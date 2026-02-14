@@ -1,227 +1,110 @@
-# SmartCar2025 - OpenMV Vision
+# 2025 智能车蚂蚁搬家组 - OpenART 视觉系统代码
 
-这是一个为智能车竞赛配置的 OpenMV 视觉项目，提供完整的开发环境和代码补全支持。
+## 项目概述
 
-## 项目结构
+本项目为智能车竞赛蚂蚁搬家组的视觉上位机代码，运行于 OpenART 模块（MicroPython 环境）。系统架构设计时考虑到搬运车底盘代码的高复用性，将主要的**业务状态机逻辑**和**视觉识别算法**均部署在 OpenART 端，底盘仅负责执行具体的运动指令。
 
-```
-SmartCar2025-Vision/
-├── .venv/                  # Python 虚拟环境
-├── .vscode/                # VS Code 配置
-│   ├── settings.json       # 编辑器设置
-│   └── launch.json         # 调试配置
-├── stubs/                  # OpenMV API 类型提示
-│   ├── sensor.py           # 传感器模块
-│   ├── image.py            # 图像处理模块
-│   ├── pyb.py              # 硬件控制模块
-│   ├── time.py             # 时间模块
-│   └── machine.py          # 机器模块
-├── examples/               # 示例程序
-│   ├── color_tracking.py   # 颜色识别
-│   ├── line_following.py   # 巡线示例
-│   └── apriltag_detection.py  # AprilTag检测
-├── main.py                 # 主程序入口
-├── .gitignore              # Git 忽略文件
-└── README.md               # 本文件
-```
+## 开发环境
 
-## 环境配置
+开发环境延续了搬运车模的 VS Code + MicroPython 方案。
 
-### 已安装的组件
+1.  **IDE**: Visual Studio Code
+2.  **插件**: Pylance, Python
+3.  **智能提示 (Stubs)**: 使用了第三方的 MicroPython stubs 以获得代码补全和类型检查支持。
 
-1. **Python 虚拟环境** (.venv)
-   - 独立的 Python 环境，避免包冲突
-   - 位置: `SmartCar2025-Vision/.venv`
+## 核心功能
 
-2. **OpenMV 包**
-   - 提供基础的 OpenMV 库支持
-   - 已自动安装到虚拟环境
+系统功能主要划分为两大部分：**视觉识别 (Vision)** 和 **状态机与通信 (FSM & Communication)**。
 
-3. **OpenMV Stubs**
-   - 完整的 OpenMV API 类型提示
-   - 支持 VS Code 智能补全
-   - 包含主要模块: sensor, image, pyb, time, machine
+### 1. 视觉识别架构 (Vision Architecture)
 
-4. **VS Code 配置**
-   - 自动识别虚拟环境
-   - 配置了 Python 路径和类型提示
-   - 启用了代码格式化
+目前主要基于普通的色块识别（Color Blob Detection）实现，鉴于目标物体特征（沙包）形态不规则，未采用 `findRect` 等矩形检测算法。
 
-## 使用方法
+为了应对未来可能引入的更复杂的识别需求（如 Yolo），可以借鉴我机械臂项目，设计一个 **Detector 路由**。所有的检测器均继承自统一的抽象基类，保证接口一致性。
 
-### 1. 激活虚拟环境
-
-在 VS Code 中打开终端 (Ctrl + `)，虚拟环境会自动激活。
-
-或者手动激活:
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-### 2. 在 VS Code 中编码
-
-- 打开任意 `.py` 文件
-- 输入 `import sensor` 或 `import image` 会自动获得代码补全
-- 所有 OpenMV API 都有完整的类型提示和文档
-
-示例代码补全:
 ```python
-import sensor
-import image
+# 检测器抽象基类，基于此架构可以方便地扩展多种识别算法并进行路由管理
+class BaseDetector(ABC):
+    """
+    所有检测器的基类
+    """
+    def __init__(self, tag):
+        self.tag = tag
 
-sensor.reset()
-sensor.set_pixformat(sensor.RGB565)  # 会有自动补全提示
-sensor.set_framesize(sensor.QVGA)
-
-img = sensor.snapshot()
-img.find_blobs(...)  # 会显示参数提示
+    @abstractmethod
+    def detect(self, frame):
+        """
+        在图像中检测目标
+        返回值: boxes, frame
+        boxes: [((x1, y1), (x2, y2)), ...]
+        frame: 可视化后的图像
+        """
+        pass
 ```
 
-### 3. 转移到 OpenMV IDE 调试
+### 2. 状态机控制 (State Machine)
 
-1. 在 VS Code 中完成代码编写
-2. 复制代码到 OpenMV IDE
-3. 连接 OpenMV 摄像头
-4. 在 OpenMV IDE 中运行和调试
+为了解耦视觉决策与底盘运动，我们将状态机逻辑运行在 OpenART 上。状态机定义了搬运任务的完整生命周期：
 
-**或者使用文件同步:**
-
-可以直接保存文件到 OpenMV 的存储中，然后在 OpenMV IDE 中打开：
-- 连接 OpenMV 摄像头
-- 在 OpenMV IDE 中打开此项目目录中的文件
-- 直接运行
-
-## 示例程序说明
-
-### main.py - Hello World
-基础的 OpenMV 示例，演示:
-- 传感器初始化
-- 图像捕获
-- 基本绘图功能
-- FPS 计算
-
-### examples/color_tracking.py - 颜色识别
-智能车常用的颜色跟踪:
-- 识别红、绿、蓝色块
-- 计算色块中心位置
-- 显示色块边界
-
-**使用提示:** 需要根据实际光照环境调整颜色阈值
-
-### examples/line_following.py - 巡线
-线性回归巡线算法:
-- 二值化图像
-- ROI 区域设置
-- 线性回归计算
-- 输出偏移量和角度
-
-**适用场景:** 智能车循线比赛
-
-### examples/apriltag_detection.py - AprilTag检测
-标签识别与定位:
-- 检测 AprilTag 标签
-- 获取标签 ID 和位置
-- 计算旋转角度
-- 支持多标签同时检测
-
-**适用场景:** 智能车定位、导航
-
-## 调试技巧
-
-### 在 VS Code 中模拟测试
-虽然 VS Code 不能直接运行 OpenMV 硬件代码，但可以:
-1. 测试算法逻辑
-2. 使用 OpenCV 进行图像处理验证
-3. 调试数据处理部分
-
-### 在 OpenMV IDE 中真机调试
-1. 使用 `print()` 输出调试信息
-2. 查看串口输出
-3. 使用帧缓冲查看器实时查看图像
-4. 调整参数观察效果
-
-## 常用 API 速查
-
-### 传感器初始化
 ```python
-sensor.reset()                      # 重置传感器
-sensor.set_pixformat(sensor.RGB565) # 设置像素格式
-sensor.set_framesize(sensor.QVGA)   # 设置分辨率
-sensor.skip_frames(time=2000)       # 跳过初始帧
+IDLE = 0        # 闲置/搜索状态
+ALIGN_ANGLE = 1 # 角度对正 (旋转调整)
+ALIGN_DIST = 2  # 距离对正 (前后调整)
+ALIGN_DX = 3    # 横向对正 (左右平移)
+ORBITING = 4    # 绕行转向 (复杂轨迹)
+PUSHING = 5     # 执行推操作
+RETURNING = 6   # 执行返回操作
+DONE = 7        # 任务完成
 ```
 
-### 图像捕获与处理
+### 3. 通信协议与封装 (Communication Protocol)
+
+本项目对底层串口协议进行了二次封装，实现了更可靠的指令发送机制。底盘通信波特率较高，且存在半双工总线竞争风险，因此通信层的实现细节至关重要。
+
+#### 3.1 底层写入保护
+
+为了避免串口总线占用导致的冲突，在 `_write_line` 方法中强制加入了微小的延时。由于 UART `write` 是异步操作，而物理串口发送是同步串行的，连续快速调用可能会导致后一条消息覆盖前一条消息或导致总线拥塞。
+
 ```python
-img = sensor.snapshot()             # 捕获图像
-img.binary([threshold])             # 二值化
-img.find_blobs([threshold])         # 查找色块
-img.get_regression([threshold])     # 线性回归
-img.find_apriltags()                # 查找 AprilTag
+def _write_line(self, cmd_str):
+    time.sleep(0.002)
+    self.uart.write(cmd_str + "\r\n")
+    time.sleep(0.002) # 短暂延时确保发送完成
 ```
 
-### 绘图函数
+#### 3.2 发送策略：同步 vs 异步
+
+针对不同的控制场景，封装了两种发送模式：
+
+**A. 普通发送 (Async/No-lock)**
+
+适用于**视觉闭环控制**过程。此类指令发送频率高（如连续的速度修正指令），即使单条指令丢失，后续的闭环回路也会迅速补充新的修正指令。此模式不检查底盘的 `lock` 状态，类似于 UDP 协议。
+
 ```python
-img.draw_rectangle(x, y, w, h)      # 绘制矩形
-img.draw_circle(x, y, r)            # 绘制圆
-img.draw_line(x0, y0, x1, y1)       # 绘制直线
-img.draw_string(x, y, text)         # 绘制文本
+def send_cmd(self, cmd_str):
+    # 普通发送（不做 lock 同步）
+    self._write_line(cmd_str)
 ```
 
-## 性能优化建议
+**B. 同步发送 (Sync/Lock-check)**
 
-1. **选择合适的分辨率**
-   - QQVGA (160x120) - 最快
-   - QVGA (320x240) - 平衡
-   - VGA (640x480) - 最清晰但慢
+适用于**状态切换**或**关键离散动作**（如“移动到指定位置”、“重置状态”）。此类指令要求必须被执行，且执行期间不能被其他指令打断。发送前会轮询底盘的 `lock` 状态，直到底盘空闲（Idle）才发送指令。
 
-2. **使用 ROI (感兴趣区域)**
-   - 只处理图像的特定区域
-   - 显著提升处理速度
+```python
+def send_cmd_sync(self, cmd_str, timeout_ms=5000, wait_after=False):
+    # 同步发送：保证按 lock 顺序执行（用于离散动作/阶段切换）
+    # 阻塞等待底盘解锁
+    self.wait_until_idle(timeout_ms=timeout_ms)
+    self._write_line(cmd_str)
+    
+    # 可选：发送后继续等待直到动作执行完毕（再次解锁）
+    if wait_after:
+        self.wait_until_idle(timeout_ms=timeout_ms)
+```
 
-3. **降低颜色深度**
-   - 使用 GRAYSCALE 而非 RGB565
-   - 对于巡线等应用足够
+> **最佳实践**：在没有明确的高频闭环需求时，建议默认使用 `send_cmd_sync`，这能显著减少因指令覆盖或状态冲突导致的 Bug。
 
-4. **优化算法**
-   - 减少不必要的图像处理
-   - 使用合适的阈值参数
+## 待优化项 (Future Work)
 
-## 故障排查
-
-### 代码补全不工作
-1. 确认虚拟环境已激活
-2. 检查 `.vscode/settings.json` 中的路径
-3. 重启 VS Code
-4. 运行命令: `Python: Select Interpreter`
-
-### OpenMV IDE 找不到设备
-1. 检查 USB 连接
-2. 安装 OpenMV 驱动程序
-3. 尝试不同的 USB 端口
-
-### 图像识别效果不佳
-1. 调整光照环境
-2. 重新标定颜色阈值
-3. 调整 ROI 区域
-4. 使用 OpenMV IDE 的阈值编辑器
-
-## 相关资源
-
-- [OpenMV 官方文档](https://docs.openmv.io/)
-- [OpenMV 中文论坛](https://singtown.com/openmv/)
-- [智能车竞赛官网](https://www.smartcar.club/)
-
-## 开发建议
-
-1. **先在 VS Code 中编写代码** - 享受完整的代码补全和类型提示
-2. **在 OpenMV IDE 中调试** - 实时查看图像和调试输出
-3. **版本控制** - 使用 Git 管理代码版本
-4. **记录参数** - 不同环境下的阈值参数要记录保存
-
-## 许可证
-
-本项目供学习和竞赛使用。
-
----
-
-**Happy Coding! 🚗📷**
+1.  **消息队列 (Message Queue)**：目前虽然通过 `sleep` 和 `lock` 检查解决了大部分问题，但当大量指令涌入时，仍可能存在顺序执行无保证的问题。计划引入简单的软件消息队列来管理指令发送顺序。
+2.  **协议深度封装**：目前的封装主要在传输层，计划参考 ESP32 或 Arduino 的库封装思路，将所有协议命令封装为 Python 对象/方法，对上层完全屏蔽字符串拼接细节。
