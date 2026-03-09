@@ -1,469 +1,215 @@
-# OpenART Color Tracking + State Machine Control
-# 色块追踪 + 状态机搬运逻辑
-# 硬件连接: UART 2 (Tx接底盘Rx, Rx接底盘Tx)
+"""! @file main.py
+@brief OpenART 纯视觉观测上报主程序.
+@details 该程序只负责图像采集、目标选择与 `x,y` 观测上报,
+         不再承担本地动作状态机与离散控制命令编排.
+"""
 
-import sensor
-import image
 import time
-import math
-from machine import UART
 
-# OpenMV 上的 enum/Enum 在部分固件中会触发 recursion_space 错误。
-# 这里使用最简单的整数状态常量，避免任何 Enum/.name 行为。
+try:
+    import sensor
+except ImportError:
+    sensor = None
+
+try:
+    from machine import UART
+except ImportError:
+    UART = None
 
 
-# -----------------------------------------------------------
-# 1. 状态机与任务定义
-# -----------------------------------------------------------
-
-class SMState:
-    IDLE = 0        # 闲置/搜索
-    ALIGN_ANGLE = 1 # 角度对正 (旋转)
-    ALIGN_DIST = 2  # 距离对正 (前后)
-    ALIGN_DX = 3    # 横向对正 (平移)
-    ORBITING = 4    # 绕行转向
-    PUSHING = 5     # 执行推操作
-    RETURNING = 6   # 执行返回操作
-    DONE = 7        # 完成
-
-class TaskConfig:
-    def __init__(self, name, threshold, push_angle_deg):
-        self.name = name
-        self.threshold = threshold
-        self.push_angle = push_angle_deg
-
-# [颜色阈值] - 请务必根据实际环境调整
-RED_TASK = TaskConfig("Red", (0, 100, 23, 127, -26, 127), -90)    # -90 deg (Left)
-GREEN_TASK = TaskConfig("Green", (0, 100, -128, -14, -128, 127), 90) # 90 deg (Right)
-TASKS = [RED_TASK, GREEN_TASK]
-
-# -----------------------------------------------------------
-# 2. 参数配置
-# -----------------------------------------------------------
-
-Kp_x = 0.0005   # 左右平移 P参数
-Kp_y = 0.0005   # 前后移动 P参数
-Kp_angle = 0.3  # 转向 P参数 (像素 -> 角度)
-DEADZONE_XY = 15  # 像素死区 (中心多少像素内不移动)
-
-PUSH_DISTANCE_M = 0.2     # 推行距离 (m)
-# 预估推行时间 (用于超时控制，根据底盘实际移动速度调整)
-PUSH_DURATION_MS = 2500   # ms
+# 主通信串口编号, 固定使用协议约定的 `UART(2)`
+UART_ID = 2
+# 主通信波特率, 需与 RT1021 侧保持一致
+UART_BAUDRATE = 115200
+# 固定曝光时间, 单位为微秒
 EXP_TIME_US = 500
+# 连续视觉帧上报的最小间隔, 单位为毫秒
+SEND_INTERVAL_MS = 40
+# 启动后是否先发送一次 `reset=1`
+STARTUP_RESET = True
+# 串口写入前后的保护延时, 单位为秒
+WRITE_DELAY_S = 0.002
 
-Kp_push_correct = 0.0001 # 推进过程中的修正系数 (米/像素)
+# 红色目标的 LAB 阈值参数
+RED_THRESHOLD = (0, 100, 23, 127, -26, 127)
+# 绿色目标的 LAB 阈值参数
+GREEN_THRESHOLD = (0, 100, -128, -14, -128, 127)
+# 参与检测的任务集合, 元素格式为 `(名称, 阈值)`
+TASKS = (("Red", RED_THRESHOLD), ("Green", GREEN_THRESHOLD))
 
-# -----------------------------------------------------------
-# 3. 硬件初始化
-# -----------------------------------------------------------
 
-uart = UART(2, baudrate=115200)
+def format_vision_frame(pixel_x, pixel_y):
+    """! @brief 将像素坐标编码为协议要求的纯 `x,y` 文本帧.
 
-sensor.reset()
-sensor.set_pixformat(sensor.RGB565)
-sensor.set_framesize(sensor.QVGA) # 320x240
-sensor.set_vflip(True)      # 倒装修正
-sensor.set_hmirror(True)    # 倒装修正
-sensor.skip_frames(time=2000) # type: ignore
-sensor.set_auto_gain(False) # type: ignore
-sensor.set_auto_whitebal(False)
-sensor.set_auto_exposure(False, exposure_us=EXP_TIME_US)
-
-cx_screen = sensor.width() // 2
-
-# -----------------------------------------------------------
-# 3. 辅助函数
-# -----------------------------------------------------------
-
-def normalize_angle(angle):
-    """将角度标准化到 -180 到 180 度"""
-    while angle > 180: angle -= 360
-    while angle <= -180: angle += 360
-    return angle
-
-def adjust_output(val):
+    @param pixel_x 目标横向像素坐标.
+    @param pixel_y 目标纵向像素坐标.
+    @return 形如 `x=<num>,y=<num>` 的单行协议文本.
     """
-    电机死区补偿：
-    当理论输出值绝对值较小时，强制实际输出值绝对值至少为 1cm (0.01m)
+    return "x=%s,y=%s" % (int(round(pixel_x)), int(round(pixel_y)))
+
+
+def choose_best_candidate(candidates, cx_screen, img_height):
+    """! @brief 选择当前帧最值得上报的目标.
+
+    @param candidates 候选目标列表, 元素至少包含名称, 像素 x, 像素 y.
+    @param cx_screen 画面横向中心像素坐标.
+    @param img_height 当前图像高度.
+    @return 与画面中线更接近且更靠近底边的候选目标.
     """
-    if abs(val) > 1e-5 and abs(val) < 0.01:
-        if val > 0:
-            return 0.01
-        else:
-            return -0.01
-    return val
-
-class RobotController:
-    def __init__(self, uart_obj):
-        self.uart = uart_obj
-        self.x = 0
-        self.y = 0
-        self.angle = 0
-        self.push_start_x = 0
-        self.push_start_y = 0
-        self.push_target_x = 0
-        self.push_target_y = 0
-
-    def _write_line(self, cmd_str):
-        # 低层写串口：只负责发送 + 小延时，避免总线冲突
-        time.sleep(0.002)
-        self.uart.write(cmd_str + "\r\n")
-        time.sleep(0.002) # 短暂延时确保发送完成
-
-    def send_cmd(self, cmd_str):
-        # 普通发送（不做 lock 同步）
-        self._write_line(cmd_str)
-
-    def send_cmd_sync(self, cmd_str, timeout_ms=5000, wait_after=False):
-        # 同步发送：保证按 lock 顺序执行（用于离散动作/阶段切换）
-        self.wait_until_idle(timeout_ms=timeout_ms)
-        self._write_line(cmd_str)
-        if wait_after:
-            self.wait_until_idle(timeout_ms=timeout_ms)
-
-    def print_msg(self, msg):
-        # 打印不参与 lock 同步，避免与 wait_until_idle 互相递归
-        self._write_line("print=" + str(msg))
+    return min(
+        candidates,
+        key=lambda item: (item[1] - cx_screen) ** 2 + (img_height - item[2]) ** 2,
+    )
 
 
-    def _read_line(self, timeout_ms):
-        buf = b""
-        start = time.ticks_ms()
-        res = b""
-        while time.ticks_diff(time.ticks_ms(), start) < timeout_ms:
-            if self.uart.any():
-                chunk = self.uart.read()
-                if chunk:
-                    buf += chunk
-                    if b"\n" in buf:
-                        line, _, _ = buf.partition(b"\n")
-                        res = line.rstrip(b"\r")
-                        break
-            time.sleep(0.002)
-        time.sleep(0.002) # 短暂延时确保读取完成
-        return res
+def should_send(now_ms, last_send_ms, interval_ms):
+    """! @brief 判断当前时刻是否允许发送新一帧观测.
 
-    def update_pose(self):
-        # 清空缓冲区
-        while self.uart.any():
-            self.uart.read()
-
-        # 发送新协议查询指令 ?pos
-        self._write_line("?pos")
-        line = self._read_line(30)
-        if line.startswith(b"?pos="):
-            parts = line[5:].split(b',')
-        elif line.startswith(b"pos="):
-            parts = line[4:].split(b',')
-        else:
-            return
-        if len(parts) >= 3:
-            try:
-                self.x = float(parts[0])
-                self.y = float(parts[1])
-                self.angle = float(parts[2])
-            except ValueError:
-                pass
-
-    def is_locked(self):
-        """查询底盘是否处于锁定(运动)状态"""
-        # 清空缓冲区
-        while self.uart.any():
-            self.uart.read()
-
-        # 注意：查询不能走 send_cmd_sync，否则会递归
-        self._write_line("?lock")
-        line = self._read_line(50)
-        # self.print_msg("LockResp:" + str(line))
-        if line.startswith(b"?lock="):
-            payload = line[6:]
-        elif line.startswith(b"lock="):
-            payload = line[5:]
-        else:
-            return False
-        try:
-            return int(payload) == 1
-        except ValueError:
-            return False
-
-    def wait_until_idle(self, timeout_ms=3000):
-        """阻塞等待直到底盘解锁(运动完成)"""
-        # 给一点时间让之前的指令生效进入Lock状态
-        time.sleep(0.05)
-
-        start = time.ticks_ms()
-        # self.print_msg("Waiting idle...")
-        while time.ticks_diff(time.ticks_ms(), start) < timeout_ms:
-            if not self.is_locked():
-                # self.print_msg("Wait idle done")
-                return True
-            time.sleep(0.05)
-        # 超时提示也不能用 print_msg -> send_cmd_sync 链路
-        self._write_line("print=Wait idle timeout")
-        return False
-
-    def init_push_target(self, distance_m):
-        """初始化推行任务，计算世界坐标终点"""
-        # 推行是离散动作：发出前确保底盘空闲（lock=0）
-        self.send_cmd_sync("dy=%.4f" % distance_m, timeout_ms=5000, wait_after=False)
-
-    def update_push_correction(self, angle_deg, correction_m):
-        """
-        在推行过程中修正终点目标
-        angle_deg: 当前推行的主方向
-        correction_m: 横向修正量 (+为向左修正)
-        """
-        # 计算修正向量 (垂直于运动方向)
-        # 运动方向向量: (sin(a), cos(a))
-        # 垂直向量(左): (-cos(a), sin(a))  <-- 逆时针90度
-        # 验证: Angle=0(Y+), Left=(-1, 0)(X-). Right?
-        # Protocol: X+ is Right. So Left is X-.
-        # Left Vector for Angle=0 (0,1) should be (-1, 0).
-        # Formula: -cos(0)=-1, sin(0)=0. Correct.
-
-        rad = math.radians(angle_deg)
-        lat_dx = correction_m * (-math.cos(rad))
-        lat_dy = correction_m * math.sin(rad)
-
-        # 更新目标点
-        self.push_target_x += lat_dx
-        self.push_target_y += lat_dy
-
-        # 发送更新后的绝对位置指令 (角度保持不变)
-        self.send_cmd_sync("angle=%.1f,x=%.4f,y=%.4f" % (angle_deg, self.push_target_x, self.push_target_y), timeout_ms=5000, wait_after=False)
-
-    def return_to_start(self, angle_deg):
-        """返回到推行起点"""
-        # 直接去起点的绝对坐标
-        self.send_cmd_sync("angle=%.1f,x=%.4f,y=%.4f" % (angle_deg, self.push_start_x, self.push_start_y), timeout_ms=5000, wait_after=False)
-
-    def turn_relative(self, d_angle):
-        target_angle = self.angle + d_angle
-        self.send_cmd_sync("angle=%.4f" % target_angle, timeout_ms=5000, wait_after=False)
-
-    def stop(self):
-        # 使用速度0来停止（相对安全）
-        # stop 需要尽快生效，不能等待 lock
-        self.send_cmd("vx=0,vy=0,omega=0")
-
-    def reset(self):
-        self.send_cmd_sync("reset=1", timeout_ms=5000, wait_after=False)
-        self.x = 0
-        self.y = 0
-        self.angle = 0
-
-# -----------------------------------------------------------
-# 5. 主逻辑
-# -----------------------------------------------------------
-
-robot = RobotController(uart)
-state = SMState.IDLE
-current_task = TASKS[0]
-state_start_time = 0
-push_last_correction_ms = 0
-
-robot.reset()
-robot.print_msg("SystemStart")
-time.sleep(1)
-
-while True:
-    img = sensor.snapshot()
-
+    @param now_ms 当前毫秒计数.
+    @param last_send_ms 上一次发送时刻, 若为空表示尚未发送过.
+    @param interval_ms 允许发送的最小间隔.
+    @return 若达到发送周期则返回 `True`, 否则返回 `False`.
+    """
+    if last_send_ms is None:
+        return True
     try:
-        img.lens_corr(strength=2.8, zoom=1.0)
-    except MemoryError:
+        elapsed_ms = time.ticks_diff(now_ms, last_send_ms)
+    except AttributeError:
+        elapsed_ms = now_ms - last_send_ms
+    return elapsed_ms >= interval_ms
+
+
+def sleep_short():
+    """! @brief 执行一次统一的短延时.
+
+    @details 该函数用于串口写入前后的轻量保护, 同时兼容主机侧导入场景.
+    """
+    delay_s = globals().get("WRITE_DELAY_S", 0.002)
+    try:
+        time.sleep(delay_s)
+    except AttributeError:
         pass
 
-    # [关键] 每帧更新姿态 -> 改为按需更新，节省通信资源
-    # robot.update_pose()
 
-    # [显示当前状态]
-    state_str = "UNK"
-    if state == SMState.IDLE: state_str = "IDLE"
-    elif state == SMState.ALIGN_ANGLE: state_str = "ALIGN_ANGLE"
-    elif state == SMState.ALIGN_DIST: state_str = "ALIGN_DIST"
-    elif state == SMState.ALIGN_DX: state_str = "ALIGN_DX"
-    elif state == SMState.ORBITING: state_str = "ORBITING"
-    elif state == SMState.PUSHING: state_str = "PUSHING"
-    elif state == SMState.RETURNING: state_str = "RETURNING"
-    elif state == SMState.DONE: state_str = "DONE"
+def write_line(uart, line):
+    """! @brief 按协议发送单行文本.
 
-    img.draw_string(10, 10, state_str, color=(255, 0, 0), scale=2)
-    # 显示当前的绝对坐标，便于调试
-    pose_str = "X:%.2f Y:%.2f A:%.1f" % (robot.x, robot.y, robot.angle)
-    img.draw_string(10, 30, pose_str, color=(255, 0, 0), scale=2)
+    @param uart 当前使用的串口对象.
+    @param line 待发送的单行 ASCII 文本, 函数内部会补齐 `\r\n`.
+    """
+    sleep_short()
+    uart.write(line + "\r\n")
+    sleep_short()
 
-    if state == SMState.IDLE:
-        found = False
-        for task in TASKS:
-            blobs = img.find_blobs([task.threshold], pixels_threshold=200, area_threshold=200, merge=True)
-            if blobs:
-                current_task = task
-                state = SMState.ALIGN_ANGLE
-                robot.print_msg("State:ALIGN_ANGLE_Task:" + task.name)
-                found = True
-                break
 
-        if not found:
-            # 停止
-            # robot.stop()
+def send_startup_reset(uart):
+    """! @brief 启动时按协议发送一次运行态复位.
+
+    @param uart 当前使用的串口对象.
+    """
+    write_line(uart, "reset=1")
+
+
+def build_blob_candidates(img):
+    """! @brief 提取所有颜色候选目标的像素中心点.
+
+    @param img 当前帧图像对象.
+    @return 候选目标列表, 元素格式为 `(名称, cx, cy, blob)`.
+    """
+    candidates = []
+    for task_name, threshold in TASKS:
+        # 对每种颜色任务分别做一次 blob 检测,再合并成统一候选集合
+        blobs = img.find_blobs(
+            [threshold], pixels_threshold=200, area_threshold=200, merge=True
+        )
+        for blob in blobs:
+            candidates.append((task_name, blob.cx(), blob.cy(), blob))
+    return candidates
+
+
+def init_uart():
+    """! @brief 初始化主通信串口.
+
+    @return 配置完成的 UART 对象.
+    @exception RuntimeError 主机侧导入且无 UART 平台支持时抛出.
+    """
+    if UART is None:
+        raise RuntimeError("UART unavailable in host environment")
+    return UART(UART_ID, baudrate=UART_BAUDRATE)
+
+
+def init_sensor():
+    """! @brief 初始化 OpenART 摄像头参数.
+
+    @return 画面横向中心像素坐标.
+    @exception RuntimeError 主机侧导入且无 sensor 平台支持时抛出.
+    """
+    if sensor is None:
+        raise RuntimeError("sensor unavailable in host environment")
+
+    sensor.reset()
+    sensor.set_pixformat(sensor.RGB565)
+    sensor.set_framesize(sensor.QVGA)
+    sensor.set_vflip(True)
+    sensor.set_hmirror(True)
+    sensor.skip_frames(time=2000)  # type: ignore
+    sensor.set_auto_gain(False)  # type: ignore
+    sensor.set_auto_whitebal(False)
+    sensor.set_auto_exposure(False, exposure_us=EXP_TIME_US)
+    return sensor.width() // 2
+
+
+def run():
+    """! @brief 持续检测目标并向 RT1021 上报最新像素观测.
+
+    @details 执行流程为: 初始化串口与摄像头 -> 按需发送一次 `reset=1` ->
+             持续采集图像 -> 提取颜色候选目标 -> 选择最优目标 -> 按节流周期
+             发送 `x,y` 观测帧. 无目标时不发送伪帧, 由 RT1021 侧按超时机制
+             判定目标丢失.
+    @note 本函数不再发送 `dx/dy/d_angle`, `rear`, `angle` 等控制命令,
+          OpenArt 仅承担感知与观测上报职责.
+    """
+    # 先完成串口和摄像头初始化,后续主循环只处理观测上报
+    uart = init_uart()
+    cx_screen = init_sensor()
+    # 记录上一帧成功发送的时刻,用于发送节流
+    last_send_ms = None
+
+    if STARTUP_RESET:
+        # 启动阶段按协议发送一次 reset,让 RT1021 进入干净运行态
+        send_startup_reset(uart)
+
+    while True:
+        # 每轮抓取一帧图像作为本次检测输入
+        img = sensor.snapshot()  # type: ignore
+
+        try:
+            # 镜头畸变校正有助于减小边缘区域的像素偏差
+            img.lens_corr(strength=2.8, zoom=1.0)
+        except MemoryError:
+            # 内存不足时直接跳过校正,优先保持主循环持续运行
             pass
 
-    elif state == SMState.ALIGN_ANGLE:
-        # [状态1] 角度对正: 旋转车身使目标处于画面中心 (dx -> 0)
-        blobs = img.find_blobs([current_task.threshold], pixels_threshold=200, area_threshold=200, merge=True)
-        if blobs:
-            # [User Request] 选择距离屏幕中线(cx)和底边(height)最近的目标
-            target_blob = min(blobs, key=lambda b: (b.cx() - cx_screen)**2 + (b.cy() - img.height())**2)
-            dx_raw = target_blob.cx() - cx_screen
+        # 收集当前帧内所有颜色候选目标
+        candidates = build_blob_candidates(img)
+        if not candidates:
+            # 无目标时不发送任何伪帧,由 RT1021 侧自行按超时判丢失
+            continue
 
-            # 角度死区
-            if abs(dx_raw) > DEADZONE_XY:
-                # 旋转对正
-                cmd_angle = float(dx_raw) * Kp_angle
-                robot.send_cmd_sync("d_angle=%.4f" % cmd_angle, timeout_ms=5000, wait_after=False)
-            else:
-                # 角度满足，进入距离对正
-                # robot.stop()
-                state = SMState.ALIGN_DIST
-                robot.print_msg("State:ALIGN_DIST")
+        # 选择当前帧最适合上报的单个目标
+        _, pixel_x, pixel_y, best_blob = choose_best_candidate(
+            candidates, cx_screen, img.height()
+        )
+        # 在调试画面上标出当前被选中的目标
+        img.draw_rectangle(best_blob.rect())
+        img.draw_cross(pixel_x, pixel_y)
 
-            img.draw_rectangle(target_blob.rect())
-            img.draw_cross(target_blob.cx(), target_blob.cy())
-        else:
-            state = SMState.IDLE
-            robot.print_msg("State:IDLE_Lost")
-
-    elif state == SMState.ALIGN_DIST:
-        # [状态2] 距离对正: 前后移动使目标达到合适距离 (dy -> target)
-        blobs = img.find_blobs([current_task.threshold], pixels_threshold=200, area_threshold=200, merge=True)
-        if blobs:
-            # [User Request] 选择距离屏幕中线(cx)和底边(height)最近的目标
-            target_blob = min(blobs, key=lambda b: (b.cx() - cx_screen)**2 + (img.height() - b.cy())**2)
-            dx_raw = target_blob.cx() - cx_screen
-
-            # 如果旋转误差甚至过大，回退到 ALIGN_ANGLE 状态
-            if abs(dx_raw) > DEADZONE_XY:
-                state = SMState.ALIGN_ANGLE
-                robot.print_msg("State:ALIGN_ANGLE_Re")
-            else:
-                # [Fix] 使用索引访问 [1] (y) 避免方法/属性调用歧义
-                dy_raw = target_blob[1]
-
-                if abs(dy_raw) > DEADZONE_XY:
-                    cmd_dy = float(dy_raw) * Kp_y
-                    cmd_dy = adjust_output(cmd_dy)
-                    robot.send_cmd_sync("dy=%.4f" % cmd_dy, timeout_ms=5000, wait_after=False)
-                else:
-                    # 距离满足，进入横向对齐准备 (或Orbit检查)
-                    # robot.stop()
-                    state = SMState.ALIGN_DX
-                    robot.print_msg("State:ALIGN_DX")
-
-            img.draw_rectangle(target_blob.rect())
-            img.draw_cross(target_blob.cx(), target_blob.cy())
-        else:
-            state = SMState.IDLE
-            robot.print_msg("State:IDLE_Lost")
-
-    elif state == SMState.ALIGN_DX:
-        # [状态3] 横向对正: 平移车身再次精细对准中心，准备判断推行逻辑
-        blobs = img.find_blobs([current_task.threshold], pixels_threshold=200, area_threshold=200, merge=True)
-        if blobs:
-            # [User Request] 选择距离屏幕中线(cx)和底边(height)最近的目标
-            target_blob = min(blobs, key=lambda b: (b.cx() - cx_screen)**2 + (img.height() - b.cy())**2)
-            dx_raw = target_blob.cx() - cx_screen
-
-            # 这里的对正使用平移 (dx) 而不是旋转
-            if abs(dx_raw) > 10:
-                # 平移对正
-                cmd_dx = float(dx_raw) * Kp_x
-                cmd_dx = adjust_output(cmd_dx)
-
-                # 限制速度
-                cmd_dx = max(min(cmd_dx, 0.1), -0.1)
-
-                robot.send_cmd_sync("dx=%.4f" % cmd_dx, timeout_ms=5000, wait_after=False)
-                img.draw_string(10, 50, "AlignDX:%.3f" % cmd_dx, color=(0, 255, 0))
-            else:
-                # 横向对正完成，检查全局角度是否满足推行要求
-                # robot.stop()
-                time.sleep(0.1) # 等待停稳
-                robot.update_pose()
-                angle_diff = normalize_angle(current_task.push_angle - robot.angle)
-
-                img.draw_string(10, 50, "AngDiff:%.1f" % angle_diff, color=(0, 255, 0))
-
-                if abs(angle_diff) < 10:
-                    # 角度达标，进入推行
-                    state = SMState.PUSHING
-                    robot.print_msg("State:PUSHING")
-                    state_start_time = time.ticks_ms()
-                    push_last_correction_ms = 0
-                    robot.init_push_target(PUSH_DISTANCE_M)
-                else:
-                    # 角度不达标，进入绕行调整
-                    state = SMState.ORBITING
-                    robot.print_msg("State:ORBITING")
-
-            img.draw_rectangle(target_blob.rect())
-            img.draw_cross(target_blob.cx(), target_blob.cy())
-        else:
-            state = SMState.IDLE
-            robot.print_msg("State:IDLE_Lost")
-
-    elif state == SMState.ORBITING:
-        # [绕行] 负责执行旋转动作
-        # 旋转后，物体在画面中位置会变，因此转完后必须回到 ALIGN_DX 重新对正
-
-        # [User Request] 使用绝对角度控制，配合 rear=1 模式
-        target_angle = current_task.push_angle
-        robot.send_cmd_sync("rear=1,angle=%.1f" % target_angle, timeout_ms=5000, wait_after=True)
-        robot.print_msg("OrbitAbs:%.1f" % target_angle)
-
-        # 转完后回到 DX 对正状态
-        state = SMState.ALIGN_DX
-        robot.print_msg("State:ALIGN_DX")
-
-    elif state == SMState.PUSHING:
-        # [推行] 过程不中断：持续做与 ALIGN_DX 类似的横向对正(发送 dx)，但不切状态
         now_ms = time.ticks_ms()
+        if should_send(now_ms, last_send_ms, SEND_INTERVAL_MS):
+            # 只发送严格的 x,y 二元观测帧,避免落回旧遥控协议解析分支
+            write_line(uart, format_vision_frame(pixel_x, pixel_y))
+            last_send_ms = now_ms
 
-        # 周期性纠偏，避免每帧疯狂发串口
-        if push_last_correction_ms == 0 or time.ticks_diff(now_ms, push_last_correction_ms) > 120:
-            push_last_correction_ms = now_ms
-            blobs = img.find_blobs([current_task.threshold], pixels_threshold=200, area_threshold=200, merge=True)
-            if blobs:
-                target_blob = min(blobs, key=lambda b: (b.cx() - cx_screen)**2 + (img.height() - b.cy())**2)
-                dx_raw = target_blob.cx() - cx_screen
 
-                if abs(dx_raw) > 10:
-                    cmd_dx = float(dx_raw) * Kp_x
-                    cmd_dx = adjust_output(cmd_dx)
-                    # 推行中纠偏幅度更小，避免把前进打断得太厉害
-                    cmd_dx = max(min(cmd_dx, 0.05), -0.05)
-                    robot.send_cmd("dx=%.4f" % cmd_dx)
-
-                img.draw_rectangle(target_blob.rect())
-                img.draw_cross(target_blob.cx(), target_blob.cy())
-
-        # 推行结束判定：用 lock=0 而不是超时
-        if time.ticks_diff(now_ms, state_start_time) > 2000:
-            if not robot.is_locked():
-                state = SMState.RETURNING
-                robot.print_msg("State:RETURNING")
-                state_start_time = now_ms
-
-    elif state == SMState.RETURNING:
-        # [User Request] 向后转 180 度
-        robot.send_cmd_sync("d_angle=180", timeout_ms=5000, wait_after=True)
-        robot.print_msg("Return:180")
-
-        state = SMState.DONE
-        robot.print_msg("State:DONE")
-
-    elif state == SMState.DONE:
-        # robot.stop()
-        time.sleep(2)
-        state = SMState.IDLE
-        robot.print_msg("State:IDLE")
+if __name__ == "__main__":
+    run()
