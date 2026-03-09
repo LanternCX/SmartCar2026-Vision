@@ -1,4 +1,4 @@
-﻿# OpenART Color Tracking + State Machine Control
+# OpenART Color Tracking + State Machine Control
 # 色块追踪 + 状态机搬运逻辑
 # 硬件连接: UART 2 (Tx接底盘Rx, Rx接底盘Tx)
 
