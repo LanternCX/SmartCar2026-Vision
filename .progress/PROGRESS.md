@@ -35,3 +35,4 @@ abc123d (or TBD)
 | Page ID | Date | Title | Path | Keywords |
 | --- | --- | --- | --- | --- |
 | 2026-03-09-1 | 2026-03-09 | 重构 OpenArt 纯视觉上报主循环 | `.progress/entries/2026/2026-03-09-1.md` | vision, protocol, main.py, tests, comments |
+| 2026-03-09-2 | 2026-03-09 | 将 OpenArt 视觉上报切换为完整识别框 | `.progress/entries/2026/2026-03-09-2.md` | vision, bbox, openart, uart2, protocol |

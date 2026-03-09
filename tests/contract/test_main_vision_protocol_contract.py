@@ -30,8 +30,13 @@ def test_main_does_not_use_legacy_control_path() -> None:
         assert token not in text, f"legacy token found: {token}"
 
 
-def test_main_formats_xy_observation_frames() -> None:
-    """main.py 必须提供纯 x,y 视觉帧格式化函数."""
+def test_main_formats_bbox_observation_frames() -> None:
+    """main.py 必须提供完整框视觉帧格式化函数."""
     text = MAIN_PATH.read_text(encoding="utf-8")
     assert "def format_vision_frame" in text
-    assert 'return "x=%s,y=%s"' in text or 'return "x=%d,y=%d"' in text
+    assert 'return "x=%s,y=%s"' not in text
+    assert 'return "x=%d,y=%d"' not in text
+    assert (
+        'return "left=%s,top=%s,right=%s,bottom=%s"' in text
+        or 'return "left=%d,top=%d,right=%d,bottom=%d"' in text
+    )

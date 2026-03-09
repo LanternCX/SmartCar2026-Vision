@@ -1,6 +1,6 @@
 """! @file main.py
 @brief OpenART 纯视觉观测上报主程序.
-@details 该程序只负责图像采集、目标选择与 `x,y` 观测上报,
+@details 该程序只负责图像采集、目标选择与完整识别框观测上报,
          不再承担本地动作状态机与离散控制命令编排.
 """
 
@@ -38,27 +38,66 @@ GREEN_THRESHOLD = (0, 100, -128, -14, -128, 127)
 TASKS = (("Red", RED_THRESHOLD), ("Green", GREEN_THRESHOLD))
 
 
-def format_vision_frame(pixel_x, pixel_y):
-    """! @brief 将像素坐标编码为协议要求的纯 `x,y` 文本帧.
+def format_vision_frame(left, top, right, bottom):
+    """! @brief 将识别框边界编码为协议要求的完整框文本帧.
 
-    @param pixel_x 目标横向像素坐标.
-    @param pixel_y 目标纵向像素坐标.
-    @return 形如 `x=<num>,y=<num>` 的单行协议文本.
+    @param left 协议坐标系下的识别框左边界像素坐标.
+    @param top 协议坐标系下的识别框上边界像素坐标.
+    @param right 协议坐标系下的识别框右边界像素坐标.
+    @param bottom 协议坐标系下的识别框下边界像素坐标.
+    @return 形如 `left=<num>,top=<num>,right=<num>,bottom=<num>` 的单行协议文本.
+
+    @note 发送前会先经过协议坐标归一化, 最终发给 RT1021 的边界坐标
+          统一满足“地板在下方”的正向视图语义.
     """
-    return "x=%s,y=%s" % (int(round(pixel_x)), int(round(pixel_y)))
+    return "left=%s,top=%s,right=%s,bottom=%s" % (
+        int(round(left)),
+        int(round(top)),
+        int(round(right)),
+        int(round(bottom)),
+    )
+
+
+def blob_rect_to_bbox(rect):
+    """! @brief 将 OpenMV 的 `x,y,w,h` 矩形转换为边界框四元组.
+
+    @param rect `blob.rect()` 返回的 `(x, y, w, h)` 元组.
+    @return `(left, top, right, bottom)` 形式的边界框.
+    """
+    left, top, width, height = rect
+    return left, top, left + width, top + height
+
+
+def normalize_bbox_for_protocol(left, top, right, bottom, img_height):
+    """! @brief 将边界框统一到“地板在下方”的协议坐标系.
+
+    @param left 原始识别框左边界.
+    @param top 原始识别框上边界.
+    @param right 原始识别框右边界.
+    @param bottom 原始识别框下边界.
+    @param img_height 当前图像高度.
+    @return `(left, top, right, bottom)` 形式的协议坐标边界框.
+
+    @note 当前相机实装视角以上下颠倒为基准, 协议层统一以“地板在下方”
+          的正向视图定义纵向坐标. 因此这里显式对纵向边界做一次归一化,
+          不依赖底层驱动对坐标语义的翻转行为.
+    """
+    normalized_top = img_height - bottom
+    normalized_bottom = img_height - top
+    return left, normalized_top, right, normalized_bottom
 
 
 def choose_best_candidate(candidates, cx_screen, img_height):
     """! @brief 选择当前帧最值得上报的目标.
 
-    @param candidates 候选目标列表, 元素至少包含名称, 像素 x, 像素 y.
+    @param candidates 候选目标列表, 元素至少包含名称, 重心 x, 重心 y, 底边 y.
     @param cx_screen 画面横向中心像素坐标.
     @param img_height 当前图像高度.
-    @return 与画面中线更接近且更靠近底边的候选目标.
+    @return 在翻转后的正向图像中, 更接近中线且底边更靠近地板的候选目标.
     """
     return min(
         candidates,
-        key=lambda item: (item[1] - cx_screen) ** 2 + (img_height - item[2]) ** 2,
+        key=lambda item: (item[1] - cx_screen) ** 2 + (img_height - item[3]) ** 2,
     )
 
 
@@ -111,19 +150,24 @@ def send_startup_reset(uart):
 
 
 def build_blob_candidates(img):
-    """! @brief 提取所有颜色候选目标的像素中心点.
+    """! @brief 提取所有颜色候选目标的重心与底边信息.
 
     @param img 当前帧图像对象.
-    @return 候选目标列表, 元素格式为 `(名称, cx, cy, blob)`.
+    @return 候选目标列表, 元素格式为 `(名称, cx, cy, bottom, blob)`.
     """
     candidates = []
+    img_height = img.height()
     for task_name, threshold in TASKS:
         # 对每种颜色任务分别做一次 blob 检测,再合并成统一候选集合
         blobs = img.find_blobs(
             [threshold], pixels_threshold=200, area_threshold=200, merge=True
         )
         for blob in blobs:
-            candidates.append((task_name, blob.cx(), blob.cy(), blob))
+            left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+            _, _, _, bottom = normalize_bbox_for_protocol(
+                left, top, right, bottom, img_height
+            )
+            candidates.append((task_name, blob.cx(), blob.cy(), bottom, blob))
     return candidates
 
 
@@ -150,6 +194,7 @@ def init_sensor():
     sensor.reset()
     sensor.set_pixformat(sensor.RGB565)
     sensor.set_framesize(sensor.QVGA)
+    # 传感器侧尽量输出接近正向的画面, 但协议坐标仍由软件层统一归一化
     sensor.set_vflip(True)
     sensor.set_hmirror(True)
     sensor.skip_frames(time=2000)  # type: ignore
@@ -160,12 +205,12 @@ def init_sensor():
 
 
 def run():
-    """! @brief 持续检测目标并向 RT1021 上报最新像素观测.
+    """! @brief 持续检测目标并向 RT1021 上报最新识别框观测.
 
     @details 执行流程为: 初始化串口与摄像头 -> 按需发送一次 `reset=1` ->
              持续采集图像 -> 提取颜色候选目标 -> 选择最优目标 -> 按节流周期
-             发送 `x,y` 观测帧. 无目标时不发送伪帧, 由 RT1021 侧按超时机制
-             判定目标丢失.
+             发送 `left,top,right,bottom` 观测帧. 无目标时不发送伪帧,
+             由 RT1021 侧按超时机制判定目标丢失.
     @note 本函数不再发送 `dx/dy/d_angle`, `rear`, `angle` 等控制命令,
           OpenArt 仅承担感知与观测上报职责.
     """
@@ -197,8 +242,12 @@ def run():
             continue
 
         # 选择当前帧最适合上报的单个目标
-        _, pixel_x, pixel_y, best_blob = choose_best_candidate(
+        _, pixel_x, pixel_y, _, best_blob = choose_best_candidate(
             candidates, cx_screen, img.height()
+        )
+        left, top, right, bottom = blob_rect_to_bbox(best_blob.rect())
+        left, top, right, bottom = normalize_bbox_for_protocol(
+            left, top, right, bottom, img.height()
         )
         # 在调试画面上标出当前被选中的目标
         img.draw_rectangle(best_blob.rect())
@@ -206,8 +255,8 @@ def run():
 
         now_ms = time.ticks_ms()
         if should_send(now_ms, last_send_ms, SEND_INTERVAL_MS):
-            # 只发送严格的 x,y 二元观测帧,避免落回旧遥控协议解析分支
-            write_line(uart, format_vision_frame(pixel_x, pixel_y))
+            # 只发送完整识别框观测帧,与 RT1021 的 bbox 协议保持一致
+            write_line(uart, format_vision_frame(left, top, right, bottom))
             last_send_ms = now_ms
 
 
