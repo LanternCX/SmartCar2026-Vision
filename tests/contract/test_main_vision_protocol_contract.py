@@ -40,3 +40,20 @@ def test_main_formats_bbox_observation_frames() -> None:
         'return "left=%s,top=%s,right=%s,bottom=%s"' in text
         or 'return "left=%d,top=%d,right=%d,bottom=%d"' in text
     )
+
+
+def test_main_supports_query_response_with_physical_camera_id_contract() -> None:
+    """main.py 必须具备按物理相机查询并返回多检测帧的协议支撑函数."""
+    text = MAIN_PATH.read_text(encoding="utf-8")
+    required_tokens = [
+        "def normalize_camera_id",
+        "def is_query_for_camera",
+        "def format_detection_line",
+        "def format_frame_end_line",
+        "def build_frame_response_lines",
+        "def build_query_response",
+        "camera_id=%s,frame_id=%s,category=%s,%s",
+        "camera_id=%s,frame_id=%s,frame_end=1",
+    ]
+    for token in required_tokens:
+        assert token in text, f"missing query-response token: {token}"

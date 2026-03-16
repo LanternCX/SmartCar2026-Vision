@@ -31,6 +31,106 @@ def test_format_vision_frame_outputs_bbox() -> None:
     assert frame == "left=100,top=20,right=140,bottom=90"
 
 
+def test_query_frame_returns_multiple_detections_with_physical_camera_id() -> None:
+    """被点名相机必须返回同一帧中的多条检测与显式 frame_end."""
+    (
+        format_vision_frame,
+        format_detection_line,
+        format_frame_end_line,
+        build_frame_response_lines,
+    ) = load_functions(
+        "format_vision_frame",
+        "format_detection_line",
+        "format_frame_end_line",
+        "build_frame_response_lines",
+    )
+
+    format_detection_line.__globals__["format_vision_frame"] = format_vision_frame
+    build_frame_response_lines.__globals__["format_detection_line"] = (
+        format_detection_line
+    )
+    build_frame_response_lines.__globals__["format_frame_end_line"] = (
+        format_frame_end_line
+    )
+
+    lines = build_frame_response_lines(
+        "cam_a",
+        12,
+        [
+            {
+                "category": "cargo",
+                "left": 100,
+                "top": 20,
+                "right": 140,
+                "bottom": 90,
+            },
+            {
+                "category": "follower",
+                "left": 150,
+                "top": 25,
+                "right": 190,
+                "bottom": 95,
+            },
+        ],
+    )
+
+    assert lines == [
+        "camera_id=cam_a,frame_id=12,category=cargo,left=100,top=20,right=140,bottom=90",
+        "camera_id=cam_a,frame_id=12,category=follower,left=150,top=25,right=190,bottom=95",
+        "camera_id=cam_a,frame_id=12,frame_end=1",
+    ]
+
+
+def test_unaddressed_camera_stays_silent_even_when_category_overlaps() -> None:
+    """类别重叠时, 未被点名物理相机也必须保持静默."""
+    (
+        normalize_camera_id,
+        is_query_for_camera,
+        format_vision_frame,
+        format_detection_line,
+        format_frame_end_line,
+        build_frame_response_lines,
+        build_query_response,
+    ) = load_functions(
+        "normalize_camera_id",
+        "is_query_for_camera",
+        "format_vision_frame",
+        "format_detection_line",
+        "format_frame_end_line",
+        "build_frame_response_lines",
+        "build_query_response",
+    )
+
+    is_query_for_camera.__globals__["normalize_camera_id"] = normalize_camera_id
+    format_detection_line.__globals__["format_vision_frame"] = format_vision_frame
+    build_frame_response_lines.__globals__["format_detection_line"] = (
+        format_detection_line
+    )
+    build_frame_response_lines.__globals__["format_frame_end_line"] = (
+        format_frame_end_line
+    )
+    build_query_response.__globals__["is_query_for_camera"] = is_query_for_camera
+    build_query_response.__globals__["build_frame_response_lines"] = (
+        build_frame_response_lines
+    )
+
+    detections = [
+        {
+            "category": "cargo",
+            "left": 120,
+            "top": 18,
+            "right": 170,
+            "bottom": 110,
+        }
+    ]
+
+    assert build_query_response("?frame=cam_a", "cam_b", 33, detections) == []
+    assert build_query_response("?frame=cam_a", "cam_a", 33, detections) == [
+        "camera_id=cam_a,frame_id=33,category=cargo,left=120,top=18,right=170,bottom=110",
+        "camera_id=cam_a,frame_id=33,frame_end=1",
+    ]
+
+
 def test_blob_rect_to_bbox_converts_width_height_to_edges() -> None:
     """blob.rect() 返回的 x,y,w,h 必须转换成 left,top,right,bottom."""
     (blob_rect_to_bbox,) = load_functions("blob_rect_to_bbox")
@@ -149,6 +249,32 @@ def test_write_line_appends_crlf() -> None:
     globals_dict["sleep_short"] = sleep_short
     write_line(namespace_uart, "left=100,top=20,right=140,bottom=90")
     assert namespace_uart.writes == ["left=100,top=20,right=140,bottom=90\r\n"]
+
+
+def test_write_line_retries_until_full_line_is_sent() -> None:
+    """串口部分写出时, 仍必须把整行协议完整发完."""
+    sleep_short, write_line = load_functions("sleep_short", "write_line")
+
+    class PartialUart:
+        def __init__(self):
+            self.writes = []
+            self._responses = [10, 8, 999]
+
+        def write(self, payload):
+            self.writes.append(payload)
+            return self._responses.pop(0)
+
+    uart = PartialUart()
+    globals_dict = write_line.__globals__
+    globals_dict["sleep_short"] = sleep_short
+
+    write_line(uart, "camera_id=cam_a,frame_id=1,frame_end=1")
+
+    assert uart.writes == [
+        "camera_id=cam_a,frame_id=1,frame_end=1\r\n",
+        "cam_a,frame_id=1,frame_end=1\r\n",
+        "ame_id=1,frame_end=1\r\n",
+    ]
 
 
 def test_send_startup_reset_emits_reset_frame() -> None:
