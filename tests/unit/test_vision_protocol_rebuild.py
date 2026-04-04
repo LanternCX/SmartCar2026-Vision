@@ -24,8 +24,8 @@ def load_functions(*names: str):
     return [namespace[name] for name in names]
 
 
-def test_format_vision_frame_outputs_bbox() -> None:
-    """视觉帧必须按完整框输出四个边界键."""
+def test_format_vision_frame_outputs_only_bbox_fields() -> None:
+    """视觉帧只能输出完整识别框的四个边界键."""
     (format_vision_frame,) = load_functions("format_vision_frame")
     frame = format_vision_frame(100, 20, 140, 90)
     assert frame == "left=100,top=20,right=140,bottom=90"
@@ -85,7 +85,7 @@ def test_build_blob_candidates_uses_normalized_bottom() -> None:
 
 
 def test_protocol_frame_uses_normalized_bbox_coordinates() -> None:
-    """最终串口帧必须发送归一化后的协议坐标."""
+    """最终串口帧必须在视觉端内部完成归一化后再发送."""
     blob_rect_to_bbox, normalize_bbox_for_protocol, format_vision_frame = (
         load_functions(
             "blob_rect_to_bbox", "normalize_bbox_for_protocol", "format_vision_frame"
@@ -93,12 +93,14 @@ def test_protocol_frame_uses_normalized_bbox_coordinates() -> None:
     )
 
     left, top, right, bottom = blob_rect_to_bbox((100, 20, 40, 70))
+    raw_frame = format_vision_frame(left, top, right, bottom)
     left, top, right, bottom = normalize_bbox_for_protocol(
         left, top, right, bottom, img_height=240
     )
 
     frame = format_vision_frame(left, top, right, bottom)
 
+    assert raw_frame == "left=100,top=20,right=140,bottom=90"
     assert frame == "left=100,top=150,right=140,bottom=220"
 
 
@@ -125,11 +127,12 @@ def test_choose_best_candidate_prefers_bbox_bottom_over_centroid_y() -> None:
     assert best == ("Green", 160, 120, 235)
 
 
-def test_should_send_throttle() -> None:
-    """发送节流应避免过密上报."""
+def test_should_send_throttle_boundary() -> None:
+    """发送节流边界必须做到不早发也不漏发."""
     (should_send,) = load_functions("should_send")
     assert should_send(now_ms=100, last_send_ms=None, interval_ms=30) is True
-    assert should_send(now_ms=120, last_send_ms=100, interval_ms=30) is False
+    assert should_send(now_ms=129, last_send_ms=100, interval_ms=30) is False
+    assert should_send(now_ms=130, last_send_ms=100, interval_ms=30) is True
     assert should_send(now_ms=131, last_send_ms=100, interval_ms=30) is True
 
 
@@ -151,8 +154,8 @@ def test_write_line_appends_crlf() -> None:
     assert namespace_uart.writes == ["left=100,top=20,right=140,bottom=90\r\n"]
 
 
-def test_send_startup_reset_emits_reset_frame() -> None:
-    """启动时初始化复位应发送 reset=1."""
+def test_send_startup_reset_emits_exactly_one_reset_line() -> None:
+    """启动复位只能发送一条 reset=1 协议行."""
     sleep_short, write_line, send_startup_reset = load_functions(
         "sleep_short", "write_line", "send_startup_reset"
     )
@@ -168,4 +171,89 @@ def test_send_startup_reset_emits_reset_frame() -> None:
     write_line.__globals__["sleep_short"] = sleep_short
     send_startup_reset.__globals__["write_line"] = write_line
     send_startup_reset(namespace_uart)
+    assert namespace_uart.writes == ["reset=1\r\n"]
+
+
+def test_choose_best_candidate_prefers_smaller_score() -> None:
+    """目标选择应优先返回分值更小的候选."""
+    (choose_best_candidate,) = load_functions("choose_best_candidate")
+    candidates = [("Red", 40, 0, 200), ("Green", 158, 0, 230)]
+    best = choose_best_candidate(candidates, cx_screen=160, img_height=240)
+    assert best == ("Green", 158, 0, 230)
+
+
+def test_choose_best_candidate_follows_task3_spec_by_keeping_first_candidate_on_tie() -> (
+    None
+):
+    """任务 3 明确要求同分取第一个候选,因此这里锁死输入顺序语义."""
+    (choose_best_candidate,) = load_functions("choose_best_candidate")
+    candidates = [("Red", 150, 0, 230), ("Green", 170, 0, 230)]
+    expected_by_task3_spec = candidates[0]
+    best = choose_best_candidate(candidates, cx_screen=160, img_height=240)
+    assert best == expected_by_task3_spec
+
+
+def test_run_sends_single_startup_reset_and_stays_silent_without_candidates() -> None:
+    """开启启动复位后,运行周期内最多只发一次 reset 且无目标时不发观测帧."""
+    (run,) = load_functions("run")
+
+    class StopRun(Exception):
+        pass
+
+    class FakeClock:
+        @staticmethod
+        def ticks_ms():
+            return 0
+
+    class FakeImg:
+        def lens_corr(self, strength, zoom):
+            return None
+
+    class FakeUart:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, payload):
+            self.writes.append(payload)
+
+    class FakeSensor:
+        def __init__(self):
+            self.calls = 0
+
+        def snapshot(self):
+            if self.calls < 2:
+                self.calls += 1
+                return FakeImg()
+            raise StopRun()
+
+    namespace_uart = FakeUart()
+    run.__globals__["init_uart"] = lambda: namespace_uart
+    run.__globals__["init_sensor"] = lambda: 160
+    run.__globals__["send_startup_reset"] = lambda uart: uart.write("reset=1\r\n")
+    run.__globals__["sensor"] = FakeSensor()
+    run.__globals__["build_blob_candidates"] = lambda img: []
+    run.__globals__["choose_best_candidate"] = (
+        lambda candidates, cx_screen, img_height: None
+    )
+    run.__globals__["blob_rect_to_bbox"] = lambda rect: rect
+    run.__globals__["normalize_bbox_for_protocol"] = (
+        lambda left, top, right, bottom, img_height: (
+            left,
+            top,
+            right,
+            bottom,
+        )
+    )
+    run.__globals__["write_line"] = lambda uart, line: uart.write(line + "\r\n")
+    run.__globals__["format_vision_frame"] = lambda left, top, right, bottom: "unused"
+    run.__globals__["should_send"] = lambda now_ms, last_send_ms, interval_ms: True
+    run.__globals__["time"] = FakeClock()
+    run.__globals__["STARTUP_RESET"] = True
+    run.__globals__["SEND_INTERVAL_MS"] = 40
+
+    try:
+        run()
+    except StopRun:
+        pass
+
     assert namespace_uart.writes == ["reset=1\r\n"]
