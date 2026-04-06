@@ -25,6 +25,8 @@ UART_BAUDRATE = 115200
 EXP_TIME_US = 500
 # 连续视觉帧上报的最小间隔, 单位为毫秒
 SEND_INTERVAL_MS = 40
+# 纵向期望抓取位置, 单位为像素差值
+TARGET_ERR_Y = 60
 # 启动后是否先发送一次 `reset=1`
 STARTUP_RESET = True
 # 串口写入前后的保护延时, 单位为秒
@@ -35,26 +37,27 @@ RED_THRESHOLD = (0, 100, 23, 127, -26, 127)
 # 绿色目标的 LAB 阈值参数
 GREEN_THRESHOLD = (0, 100, -128, -14, -128, 127)
 # 参与检测的任务集合, 元素格式为 `(名称, 阈值)`
-TASKS = (("Red", RED_THRESHOLD), ("Green", GREEN_THRESHOLD))
+TASKS = (("red", RED_THRESHOLD), ("green", GREEN_THRESHOLD))
 
 
-def format_vision_frame(left, top, right, bottom):
-    """! @brief 将识别框边界编码为协议要求的完整框文本帧.
+def format_vision_frame(seq, valid, err_x, err_y):
+    """! @brief 将当前目标编码为最小视觉协议帧.
 
-    @param left 协议坐标系下的识别框左边界像素坐标.
-    @param top 协议坐标系下的识别框上边界像素坐标.
-    @param right 协议坐标系下的识别框右边界像素坐标.
-    @param bottom 协议坐标系下的识别框下边界像素坐标.
-    @return 形如 `left=<num>,top=<num>,right=<num>,bottom=<num>` 的单行协议文本.
+    @param seq 当前发送序号.
+    @param valid 当前帧是否存在有效目标.
+    @param err_x 当前目标横向偏差.
+    @param err_y 当前目标纵向偏差.
+    @return 当前主线视觉单行协议文本.
 
-    @note 发送前会先经过协议坐标归一化, 最终发给 RT1021 的边界坐标
-          统一满足“地板在下方”的正向视图语义.
+    @note 正式发送只保留版本位、序号以及像素差值, 其中 `x/y` 仍分别表示
+          横向中心偏差与底边相对期望抓取位置的纵向偏差.
     """
-    return "left=%s,top=%s,right=%s,bottom=%s" % (
-        int(round(left)),
-        int(round(top)),
-        int(round(right)),
-        int(round(bottom)),
+    if not int(valid):
+        return "v=0,s=%s" % int(seq)
+    return "v=1,s=%s,x=%s,y=%s" % (
+        int(seq),
+        int(round(err_x)),
+        int(round(err_y)),
     )
 
 
@@ -85,6 +88,23 @@ def normalize_bbox_for_protocol(left, top, right, bottom, img_height):
     normalized_top = img_height - bottom
     normalized_bottom = img_height - top
     return left, normalized_top, right, normalized_bottom
+
+
+def compute_protocol_errors(blob_cx, normalized_bottom, cx_screen, img_height):
+    """! @brief 计算主线协议要求的横纵向偏差.
+
+    @param blob_cx 当前目标横向中心像素坐标.
+    @param normalized_bottom 当前目标在协议坐标系下的底边像素坐标.
+    @param cx_screen 画面横向中心像素坐标.
+    @param img_height 当前图像高度.
+    @return `(err_x, err_y)` 形式的整数偏差, 其中 `err_y=0` 表示目标已到达期望抓取距离,
+            目标底边超过期望抓取位置时为正, 未达到时为负.
+    """
+    err_x = int(round(float(blob_cx) - float(cx_screen)))
+    err_y = int(
+        round(float(normalized_bottom) - float(img_height) + float(TARGET_ERR_Y))
+    )
+    return err_x, err_y
 
 
 def choose_best_candidate(candidates, cx_screen, img_height):
@@ -209,8 +229,8 @@ def run():
 
     @details 执行流程为: 初始化串口与摄像头 -> 按需发送一次 `reset=1` ->
              持续采集图像 -> 提取颜色候选目标 -> 选择最优目标 -> 按节流周期
-             发送 `left,top,right,bottom` 观测帧. 无目标时不发送伪帧,
-             由 RT1021 侧按超时机制判定目标丢失.
+             发送最小观测帧. 无目标时发送 `v=0,s=<seq>`, 有目标时发送
+             `v=1,s=<seq>,x=<x>,y=<y>`.
     @note 本函数不再发送 `dx/dy/d_angle`, `rear`, `angle` 等控制命令,
           OpenArt 仅承担感知与观测上报职责.
     """
@@ -219,6 +239,8 @@ def run():
     cx_screen = init_sensor()
     # 记录上一帧成功发送的时刻,用于发送节流
     last_send_ms = None
+    # 当前视觉上报序号,每次真正发包时递增
+    report_seq = 0
 
     if STARTUP_RESET:
         # 启动阶段按协议发送一次 reset,让 RT1021 进入干净运行态
@@ -237,27 +259,51 @@ def run():
 
         # 收集当前帧内所有颜色候选目标
         candidates = build_blob_candidates(img)
+        now_ms = time.ticks_ms()
+        if not should_send(now_ms, last_send_ms, SEND_INTERVAL_MS):
+            continue
+
+        report_seq += 1
         if not candidates:
-            # 无目标时不发送任何伪帧,由 RT1021 侧自行按超时判丢失
+            write_line(
+                uart,
+                format_vision_frame(
+                    seq=report_seq,
+                    valid=0,
+                    err_x=0,
+                    err_y=0,
+                ),
+            )
+            last_send_ms = now_ms
             continue
 
         # 选择当前帧最适合上报的单个目标
-        _, pixel_x, pixel_y, _, best_blob = choose_best_candidate(
+        target_label, pixel_x, pixel_y, _, best_blob = choose_best_candidate(
             candidates, cx_screen, img.height()
         )
         left, top, right, bottom = blob_rect_to_bbox(best_blob.rect())
         left, top, right, bottom = normalize_bbox_for_protocol(
             left, top, right, bottom, img.height()
         )
+        err_x, err_y = compute_protocol_errors(
+            blob_cx=pixel_x,
+            normalized_bottom=bottom,
+            cx_screen=cx_screen,
+            img_height=img.height(),
+        )
         # 在调试画面上标出当前被选中的目标
         img.draw_rectangle(best_blob.rect())
         img.draw_cross(pixel_x, pixel_y)
-
-        now_ms = time.ticks_ms()
-        if should_send(now_ms, last_send_ms, SEND_INTERVAL_MS):
-            # 只发送完整识别框观测帧,与 RT1021 的 bbox 协议保持一致
-            write_line(uart, format_vision_frame(left, top, right, bottom))
-            last_send_ms = now_ms
+        write_line(
+            uart,
+            format_vision_frame(
+                seq=report_seq,
+                valid=1,
+                err_x=err_x,
+                err_y=err_y,
+            ),
+        )
+        last_send_ms = now_ms
 
 
 if __name__ == "__main__":

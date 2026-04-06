@@ -25,10 +25,17 @@ def load_functions(*names: str):
 
 
 def test_format_vision_frame_outputs_only_bbox_fields() -> None:
-    """视觉帧只能输出完整识别框的四个边界键."""
+    """有目标时视觉帧必须切到最小协议字段集合."""
     (format_vision_frame,) = load_functions("format_vision_frame")
-    frame = format_vision_frame(100, 20, 140, 90)
-    assert frame == "left=100,top=20,right=140,bottom=90"
+    frame = format_vision_frame(seq=7, valid=1, err_x=12, err_y=20)
+    assert frame == "v=1,s=7,x=12,y=20"
+
+
+def test_format_vision_frame_outputs_compact_invalid_frame_without_bbox() -> None:
+    """无目标时视觉帧必须只发送版本位和序号."""
+    (format_vision_frame,) = load_functions("format_vision_frame")
+    frame = format_vision_frame(seq=8, valid=0, err_x=0, err_y=0)
+    assert frame == "v=0,s=8"
 
 
 def test_blob_rect_to_bbox_converts_width_height_to_edges() -> None:
@@ -85,7 +92,7 @@ def test_build_blob_candidates_uses_normalized_bottom() -> None:
 
 
 def test_protocol_frame_uses_normalized_bbox_coordinates() -> None:
-    """最终串口帧必须在视觉端内部完成归一化后再发送."""
+    """最终串口帧必须只保留归一化后算出的像素差值语义."""
     blob_rect_to_bbox, normalize_bbox_for_protocol, format_vision_frame = (
         load_functions(
             "blob_rect_to_bbox", "normalize_bbox_for_protocol", "format_vision_frame"
@@ -93,15 +100,64 @@ def test_protocol_frame_uses_normalized_bbox_coordinates() -> None:
     )
 
     left, top, right, bottom = blob_rect_to_bbox((100, 20, 40, 70))
-    raw_frame = format_vision_frame(left, top, right, bottom)
+    raw_frame = format_vision_frame(
+        seq=1,
+        valid=1,
+        err_x=0,
+        err_y=150,
+    )
     left, top, right, bottom = normalize_bbox_for_protocol(
         left, top, right, bottom, img_height=240
     )
 
-    frame = format_vision_frame(left, top, right, bottom)
+    frame = format_vision_frame(
+        seq=2,
+        valid=1,
+        err_x=0,
+        err_y=20,
+    )
 
-    assert raw_frame == "left=100,top=20,right=140,bottom=90"
-    assert frame == "left=100,top=150,right=140,bottom=220"
+    assert raw_frame == "v=1,s=1,x=0,y=150"
+    assert frame == "v=1,s=2,x=0,y=20"
+
+
+def test_compute_protocol_errors_uses_center_x_and_bottom_gap() -> None:
+    """协议误差必须使用横向中心偏差和相对抓取位置的纵向差值."""
+    (compute_protocol_errors,) = load_functions("compute_protocol_errors")
+    compute_protocol_errors.__globals__["TARGET_ERR_Y"] = 60
+    err_x, err_y = compute_protocol_errors(
+        blob_cx=150,
+        normalized_bottom=220,
+        cx_screen=160,
+        img_height=240,
+    )
+    assert (err_x, err_y) == (-10, 40)
+
+
+def test_compute_protocol_errors_returns_negative_y_before_target_distance() -> None:
+    """目标底边未达到期望抓取位置时, y 必须为负."""
+    (compute_protocol_errors,) = load_functions("compute_protocol_errors")
+    compute_protocol_errors.__globals__["TARGET_ERR_Y"] = 60
+    err_x, err_y = compute_protocol_errors(
+        blob_cx=170,
+        normalized_bottom=150,
+        cx_screen=160,
+        img_height=240,
+    )
+    assert (err_x, err_y) == (10, -30)
+
+
+def test_compute_protocol_errors_returns_zero_y_at_target_distance() -> None:
+    """目标底边到达期望抓取位置时, y 必须为零."""
+    (compute_protocol_errors,) = load_functions("compute_protocol_errors")
+    compute_protocol_errors.__globals__["TARGET_ERR_Y"] = 60
+    _, err_y = compute_protocol_errors(
+        blob_cx=160,
+        normalized_bottom=180,
+        cx_screen=160,
+        img_height=240,
+    )
+    assert err_y == 0
 
 
 def test_choose_best_candidate_prefers_center_bottom() -> None:
@@ -150,8 +206,8 @@ def test_write_line_appends_crlf() -> None:
     namespace_uart = FakeUart()
     globals_dict = write_line.__globals__
     globals_dict["sleep_short"] = sleep_short
-    write_line(namespace_uart, "left=100,top=20,right=140,bottom=90")
-    assert namespace_uart.writes == ["left=100,top=20,right=140,bottom=90\r\n"]
+    write_line(namespace_uart, "v=1,s=1,x=0,y=20")
+    assert namespace_uart.writes == ["v=1,s=1,x=0,y=20\r\n"]
 
 
 def test_send_startup_reset_emits_exactly_one_reset_line() -> None:
@@ -193,9 +249,11 @@ def test_choose_best_candidate_follows_task3_spec_by_keeping_first_candidate_on_
     assert best == expected_by_task3_spec
 
 
-def test_run_sends_single_startup_reset_and_stays_silent_without_candidates() -> None:
-    """开启启动复位后,运行周期内最多只发一次 reset 且无目标时不发观测帧."""
-    (run,) = load_functions("run")
+def test_run_sends_single_startup_reset_and_reports_invalid_frame_without_candidates() -> (
+    None
+):
+    """开启启动复位后,无目标时也必须按节流发送最小无效帧."""
+    format_vision_frame, run = load_functions("format_vision_frame", "run")
 
     class StopRun(Exception):
         pass
@@ -245,7 +303,7 @@ def test_run_sends_single_startup_reset_and_stays_silent_without_candidates() ->
         )
     )
     run.__globals__["write_line"] = lambda uart, line: uart.write(line + "\r\n")
-    run.__globals__["format_vision_frame"] = lambda left, top, right, bottom: "unused"
+    run.__globals__["format_vision_frame"] = format_vision_frame
     run.__globals__["should_send"] = lambda now_ms, last_send_ms, interval_ms: True
     run.__globals__["time"] = FakeClock()
     run.__globals__["STARTUP_RESET"] = True
@@ -256,4 +314,97 @@ def test_run_sends_single_startup_reset_and_stays_silent_without_candidates() ->
     except StopRun:
         pass
 
-    assert namespace_uart.writes == ["reset=1\r\n"]
+    assert namespace_uart.writes == [
+        "reset=1\r\n",
+        "v=0,s=1\r\n",
+        "v=0,s=2\r\n",
+    ]
+
+
+def test_run_sends_minimal_valid_frame_with_protocol_errors() -> None:
+    """有目标时运行时发送必须只保留序号和像素差值."""
+    (
+        blob_rect_to_bbox,
+        normalize_bbox_for_protocol,
+        compute_protocol_errors,
+        format_vision_frame,
+        run,
+    ) = load_functions(
+        "blob_rect_to_bbox",
+        "normalize_bbox_for_protocol",
+        "compute_protocol_errors",
+        "format_vision_frame",
+        "run",
+    )
+
+    class StopRun(Exception):
+        pass
+
+    class FakeClock:
+        @staticmethod
+        def ticks_ms():
+            return 0
+
+    class FakeImg:
+        def lens_corr(self, strength, zoom):
+            return None
+
+        def height(self):
+            return 240
+
+        def draw_rectangle(self, rect):
+            return None
+
+        def draw_cross(self, x, y):
+            return None
+
+    class FakeBlob:
+        def rect(self):
+            return (100, 20, 40, 70)
+
+    class FakeUart:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, payload):
+            self.writes.append(payload)
+
+    class FakeSensor:
+        def __init__(self):
+            self.calls = 0
+
+        def snapshot(self):
+            if self.calls == 0:
+                self.calls += 1
+                return FakeImg()
+            raise StopRun()
+
+    namespace_uart = FakeUart()
+    run.__globals__["init_uart"] = lambda: namespace_uart
+    run.__globals__["init_sensor"] = lambda: 160
+    run.__globals__["send_startup_reset"] = lambda uart: None
+    run.__globals__["sensor"] = FakeSensor()
+    run.__globals__["build_blob_candidates"] = lambda img: [
+        ("red", 150, 40, 220, FakeBlob())
+    ]
+    run.__globals__["choose_best_candidate"] = (
+        lambda candidates, cx_screen, img_height: candidates[0]
+    )
+    run.__globals__["blob_rect_to_bbox"] = blob_rect_to_bbox
+    run.__globals__["normalize_bbox_for_protocol"] = normalize_bbox_for_protocol
+    run.__globals__["compute_protocol_errors"] = compute_protocol_errors
+    run.__globals__["TARGET_ERR_Y"] = 60
+    compute_protocol_errors.__globals__["TARGET_ERR_Y"] = 60
+    run.__globals__["write_line"] = lambda uart, line: uart.write(line + "\r\n")
+    run.__globals__["format_vision_frame"] = format_vision_frame
+    run.__globals__["should_send"] = lambda now_ms, last_send_ms, interval_ms: True
+    run.__globals__["time"] = FakeClock()
+    run.__globals__["STARTUP_RESET"] = False
+    run.__globals__["SEND_INTERVAL_MS"] = 40
+
+    try:
+        run()
+    except StopRun:
+        pass
+
+    assert namespace_uart.writes == ["v=1,s=1,x=-10,y=40\r\n"]
