@@ -1,4 +1,4 @@
-"""! @file main.py
+﻿"""! @file main.py
 @brief OpenART 纯视觉查询/响应主程序.
 @details 该程序只负责图像采集、目标检测、按物理相机缓存当前帧,
          并在收到 `?frame=<camera_id>` 时回传 `0..N` 条检测结果.
@@ -27,6 +27,8 @@ EXP_TIME_US = 500
 CAMERA_ID = "cam_a"
 # 连续视觉帧上报的最小间隔, 单位为毫秒
 SEND_INTERVAL_MS = 40
+# 纵向期望抓取位置, 单位为像素差值
+TARGET_ERR_Y = 60
 # 启动后是否先发送一次 `reset=1`
 STARTUP_RESET = True
 # 串口写入前后的保护延时, 单位为秒
@@ -36,85 +38,29 @@ WRITE_DELAY_S = 0.002
 RED_THRESHOLD = (0, 100, 23, 127, -26, 127)
 # 绿色目标的 LAB 阈值参数
 GREEN_THRESHOLD = (0, 100, -128, -14, -128, 127)
-# 参与检测的任务集合, 元素格式为 `(category, 阈值)`
-TASKS = (("cargo", RED_THRESHOLD), ("follower", GREEN_THRESHOLD))
+# 参与检测的任务集合, 元素格式为 `(名称, 阈值)`
+TASKS = (("red", RED_THRESHOLD), ("green", GREEN_THRESHOLD))
 
 
-def format_vision_frame(left, top, right, bottom):
-    """! @brief 将识别框边界编码为协议要求的完整框文本帧.
+def format_vision_frame(seq, valid, err_x, err_y):
+    """! @brief 将当前目标编码为最小视觉协议帧.
 
-    @param left 协议坐标系下的识别框左边界像素坐标.
-    @param top 协议坐标系下的识别框上边界像素坐标.
-    @param right 协议坐标系下的识别框右边界像素坐标.
-    @param bottom 协议坐标系下的识别框下边界像素坐标.
-    @return 形如 `left=<num>,top=<num>,right=<num>,bottom=<num>` 的单行协议文本.
+    @param seq 当前发送序号.
+    @param valid 当前帧是否存在有效目标.
+    @param err_x 当前目标横向偏差.
+    @param err_y 当前目标纵向偏差.
+    @return 当前主线视觉单行协议文本.
 
-    @note 发送前会先经过协议坐标归一化, 最终发给 RT1021 的边界坐标
-          统一满足“地板在下方”的正向视图语义.
+    @note 正式发送只保留版本位、序号以及像素差值, 其中 `x/y` 仍分别表示
+          横向中心偏差与底边相对期望抓取位置的纵向偏差.
     """
-    return "left=%s,top=%s,right=%s,bottom=%s" % (
-        int(round(left)),
-        int(round(top)),
-        int(round(right)),
-        int(round(bottom)),
+    if not int(valid):
+        return "v=0,s=%s" % int(seq)
+    return "v=1,s=%s,x=%s,y=%s" % (
+        int(seq),
+        int(round(err_x)),
+        int(round(err_y)),
     )
-
-
-def normalize_camera_id(camera_id):
-    """! @brief 归一化物理相机 ID 文本."""
-    return str(camera_id).strip().lower()
-
-
-def is_query_for_camera(line, camera_id):
-    """! @brief 判断查询是否点名当前物理相机."""
-    return str(line).strip().lower() == "?frame=%s" % normalize_camera_id(camera_id)
-
-
-def format_detection_line(camera_id, frame_id, category, left, top, right, bottom):
-    """! @brief 将单条检测编码成协议文本."""
-    bbox_text = format_vision_frame(left, top, right, bottom)
-    camera_id_text = str(camera_id).strip().lower()
-    return "camera_id=%s,frame_id=%s,category=%s,%s" % (
-        camera_id_text,
-        int(frame_id),
-        str(category),
-        bbox_text,
-    )
-
-
-def format_frame_end_line(camera_id, frame_id):
-    """! @brief 构造单帧结束标记文本."""
-    camera_id_text = str(camera_id).strip().lower()
-    return "camera_id=%s,frame_id=%s,frame_end=1" % (
-        camera_id_text,
-        int(frame_id),
-    )
-
-
-def build_frame_response_lines(camera_id, frame_id, detections):
-    """! @brief 将一帧检测集合编码成多行响应文本."""
-    lines = []
-    for detection in detections:
-        lines.append(
-            format_detection_line(
-                camera_id,
-                frame_id,
-                detection["category"],
-                detection["left"],
-                detection["top"],
-                detection["right"],
-                detection["bottom"],
-            )
-        )
-    lines.append(format_frame_end_line(camera_id, frame_id))
-    return lines
-
-
-def build_query_response(query_line, camera_id, frame_id, detections):
-    """! @brief 仅在查询点名当前物理相机时生成响应帧."""
-    if not is_query_for_camera(query_line, camera_id):
-        return []
-    return build_frame_response_lines(camera_id, frame_id, detections)
 
 
 def blob_rect_to_bbox(rect):
@@ -144,6 +90,23 @@ def normalize_bbox_for_protocol(left, top, right, bottom, img_height):
     normalized_top = img_height - bottom
     normalized_bottom = img_height - top
     return left, normalized_top, right, normalized_bottom
+
+
+def compute_protocol_errors(blob_cx, normalized_bottom, cx_screen, img_height):
+    """! @brief 计算主线协议要求的横纵向偏差.
+
+    @param blob_cx 当前目标横向中心像素坐标.
+    @param normalized_bottom 当前目标在协议坐标系下的底边像素坐标.
+    @param cx_screen 画面横向中心像素坐标.
+    @param img_height 当前图像高度.
+    @return `(err_x, err_y)` 形式的整数偏差, 其中 `err_y=0` 表示目标已到达期望抓取距离,
+            目标底边超过期望抓取位置时为正, 未达到时为负.
+    """
+    err_x = int(round(float(blob_cx) - float(cx_screen)))
+    err_y = int(
+        round(float(normalized_bottom) - float(img_height) + float(TARGET_ERR_Y))
+    )
+    return err_x, err_y
 
 
 def choose_best_candidate(candidates, cx_screen, img_height):
@@ -321,17 +284,19 @@ def run():
     """! @brief 持续刷新当前帧缓存,并按查询回传多检测结果.
 
     @details 执行流程为: 初始化串口与摄像头 -> 按需发送一次 `reset=1` ->
-             持续采集图像 -> 构造当前物理相机缓存帧 -> 读取 UART 查询 ->
-             仅在收到 `?frame=<camera_id>` 且点名当前物理相机时回传
-             `0..N` 条检测与显式 `frame_end=1`.
-    @note OpenArt 仅承担感知与观测上报职责, 不再主动连续发包.
+             持续采集图像 -> 提取颜色候选目标 -> 选择最优目标 -> 按节流周期
+             发送最小观测帧. 无目标时发送 `v=0,s=<seq>`, 有目标时发送
+             `v=1,s=<seq>,x=<x>,y=<y>`.
+    @note 本函数不再发送 `dx/dy/d_angle`, `rear`, `angle` 等控制命令,
+          OpenArt 仅承担感知与观测上报职责.
     """
     # 先完成串口和摄像头初始化,后续主循环只处理观测上报
     uart = init_uart()
     cx_screen = init_sensor()
-    frame_id = 0
-    latest_detections = []
-    rx_buffer = ""
+    # 记录上一帧成功发送的时刻,用于发送节流
+    last_send_ms = None
+    # 当前视觉上报序号,每次真正发包时递增
+    report_seq = 0
 
     if STARTUP_RESET:
         # 启动阶段按协议发送一次 reset,让 RT1021 进入干净运行态
@@ -350,27 +315,51 @@ def run():
 
         # 收集当前帧内所有颜色候选目标
         candidates = build_blob_candidates(img)
-        latest_detections = build_frame_detections(candidates, img.height())
-        frame_id += 1
+        now_ms = time.ticks_ms()
+        if not should_send(now_ms, last_send_ms, SEND_INTERVAL_MS):
+            continue
 
-        if candidates:
-            # 在调试画面上标出当前被选中的主目标, 便于现场观察
-            _, pixel_x, pixel_y, _, best_blob = choose_best_candidate(
-                candidates, cx_screen, img.height()
+        report_seq += 1
+        if not candidates:
+            write_line(
+                uart,
+                format_vision_frame(
+                    seq=report_seq,
+                    valid=0,
+                    err_x=0,
+                    err_y=0,
+                ),
             )
-            img.draw_rectangle(best_blob.rect())
-            img.draw_cross(pixel_x, pixel_y)
+            last_send_ms = now_ms
+            continue
 
-        rx_buffer, query_lines = poll_uart_lines(uart, rx_buffer)
-        for query_line in query_lines:
-            response_lines = build_query_response(
-                query_line,
-                CAMERA_ID,
-                frame_id,
-                latest_detections,
-            )
-            for response_line in response_lines:
-                write_line(uart, response_line)
+        # 选择当前帧最适合上报的单个目标
+        target_label, pixel_x, pixel_y, _, best_blob = choose_best_candidate(
+            candidates, cx_screen, img.height()
+        )
+        left, top, right, bottom = blob_rect_to_bbox(best_blob.rect())
+        left, top, right, bottom = normalize_bbox_for_protocol(
+            left, top, right, bottom, img.height()
+        )
+        err_x, err_y = compute_protocol_errors(
+            blob_cx=pixel_x,
+            normalized_bottom=bottom,
+            cx_screen=cx_screen,
+            img_height=img.height(),
+        )
+        # 在调试画面上标出当前被选中的目标
+        img.draw_rectangle(best_blob.rect())
+        img.draw_cross(pixel_x, pixel_y)
+        write_line(
+            uart,
+            format_vision_frame(
+                seq=report_seq,
+                valid=1,
+                err_x=err_x,
+                err_y=err_y,
+            ),
+        )
+        last_send_ms = now_ms
 
 
 if __name__ == "__main__":
