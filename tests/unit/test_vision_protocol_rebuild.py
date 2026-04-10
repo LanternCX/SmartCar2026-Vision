@@ -4,9 +4,24 @@ import ast
 from pathlib import Path
 import time
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_PATH = ROOT / "main.py"
+
+
+def load_constant(name: str):
+    """从 main.py 中提取顶层常量,避免执行硬件初始化."""
+    source = MAIN_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(MAIN_PATH))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == name:
+                return ast.literal_eval(node.value)
+    raise KeyError(name)
 
 
 def load_functions(*names: str):
@@ -24,18 +39,18 @@ def load_functions(*names: str):
     return [namespace[name] for name in names]
 
 
-def test_format_vision_frame_outputs_only_bbox_fields() -> None:
-    """有目标时视觉帧必须切到最小协议字段集合."""
+def test_format_vision_frame_outputs_follow_request_with_compact_numbers() -> None:
+    """有目标时 ART 必须直接输出辅车已支持的速度模式请求格式."""
     (format_vision_frame,) = load_functions("format_vision_frame")
-    frame = format_vision_frame(seq=7, valid=1, err_x=12, err_y=20)
-    assert frame == "v=1,s=7,x=12,y=20"
+    frame = format_vision_frame(seq=7, valid=1, err_x=1.2, err_y=0.0)
+    assert frame == "f=1,m=1,x=1.2,y=0"
 
 
-def test_format_vision_frame_outputs_compact_invalid_frame_without_bbox() -> None:
-    """无目标时视觉帧必须只发送版本位和序号."""
+def test_format_vision_frame_outputs_invalid_follow_request_with_zero_control() -> None:
+    """无目标或保持阶段时也必须输出零速度请求."""
     (format_vision_frame,) = load_functions("format_vision_frame")
     frame = format_vision_frame(seq=8, valid=0, err_x=0, err_y=0)
-    assert frame == "v=0,s=8"
+    assert frame == "f=1,m=1,x=0,y=0"
 
 
 def test_blob_rect_to_bbox_converts_width_height_to_edges() -> None:
@@ -70,6 +85,9 @@ def test_build_blob_candidates_uses_normalized_bottom() -> None:
         def rect(self):
             return (100, 20, 40, 70)
 
+        def area(self):
+            return 2800
+
     class FakeImg:
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
             return [FakeBlob()]
@@ -91,73 +109,159 @@ def test_build_blob_candidates_uses_normalized_bottom() -> None:
     assert candidates[0][3] == 220
 
 
-def test_protocol_frame_uses_normalized_bbox_coordinates() -> None:
-    """最终串口帧必须只保留归一化后算出的像素差值语义."""
-    blob_rect_to_bbox, normalize_bbox_for_protocol, format_vision_frame = (
+def test_build_blob_candidates_keeps_blob_area_for_follow_distance() -> None:
+    """面积纵向控制需要候选目标直接携带 blob 面积."""
+    blob_rect_to_bbox, normalize_bbox_for_protocol, build_blob_candidates = (
         load_functions(
-            "blob_rect_to_bbox", "normalize_bbox_for_protocol", "format_vision_frame"
+            "blob_rect_to_bbox", "normalize_bbox_for_protocol", "build_blob_candidates"
         )
     )
 
-    left, top, right, bottom = blob_rect_to_bbox((100, 20, 40, 70))
-    raw_frame = format_vision_frame(
-        seq=1,
-        valid=1,
-        err_x=0,
-        err_y=150,
+    class FakeBlob:
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 40
+
+        def rect(self):
+            return (100, 20, 40, 70)
+
+        def area(self):
+            return 2800
+
+    class FakeImg:
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [FakeBlob()]
+
+        def height(self):
+            return 240
+
+    build_blob_candidates.__globals__["TASKS"] = (("red", (0, 0, 0, 0, 0, 0)),)
+    build_blob_candidates.__globals__["blob_rect_to_bbox"] = blob_rect_to_bbox
+    build_blob_candidates.__globals__["normalize_bbox_for_protocol"] = (
+        normalize_bbox_for_protocol
     )
-    left, top, right, bottom = normalize_bbox_for_protocol(
-        left, top, right, bottom, img_height=240
-    )
 
-    frame = format_vision_frame(
-        seq=2,
-        valid=1,
-        err_x=0,
-        err_y=20,
-    )
+    candidates = build_blob_candidates(FakeImg())
 
-    assert raw_frame == "v=1,s=1,x=0,y=150"
-    assert frame == "v=1,s=2,x=0,y=20"
+    assert candidates[0][4] == 2800
 
 
-def test_compute_protocol_errors_uses_center_x_and_bottom_gap() -> None:
-    """协议误差必须使用横向中心偏差和相对抓取位置的纵向差值."""
-    (compute_protocol_errors,) = load_functions("compute_protocol_errors")
-    compute_protocol_errors.__globals__["TARGET_ERR_Y"] = 60
-    err_x, err_y = compute_protocol_errors(
-        blob_cx=150,
-        normalized_bottom=220,
-        cx_screen=160,
-        img_height=240,
-    )
-    assert (err_x, err_y) == (-10, 40)
+def test_build_follow_command_align_x_outputs_only_lateral_control() -> None:
+    """横向未对齐时, ART 只能输出横向 follow 控制量."""
+    (build_follow_command,) = load_functions("build_follow_command")
+    build_follow_command.__globals__["FOLLOW_CENTER_DEADZONE_PX"] = 8.0
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_X"] = -0.1
+    build_follow_command.__globals__["FOLLOW_TARGET_AREA"] = 2400
+    build_follow_command.__globals__["FOLLOW_AREA_DEADZONE"] = 120
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_AREA"] = 0.001
+    build_follow_command.__globals__["FOLLOW_CONTROL_MAX_Y"] = 1.2
+
+    result = build_follow_command(valid=1, err_x=12, blob_area=2200)
+
+    assert result["phase"] == "ALIGN_X"
+    assert result["valid"] == 1
+    assert result["follow_x"] == pytest.approx(1.2)
+    assert result["follow_y"] == pytest.approx(0.0)
 
 
-def test_compute_protocol_errors_returns_negative_y_before_target_distance() -> None:
-    """目标底边未达到期望抓取位置时, y 必须为负."""
-    (compute_protocol_errors,) = load_functions("compute_protocol_errors")
-    compute_protocol_errors.__globals__["TARGET_ERR_Y"] = 60
-    err_x, err_y = compute_protocol_errors(
-        blob_cx=170,
-        normalized_bottom=150,
-        cx_screen=160,
-        img_height=240,
-    )
-    assert (err_x, err_y) == (10, -30)
+def test_build_follow_command_area_deadzone_holds_after_x_aligned() -> None:
+    """横向已对齐且面积进入死区后, ART 必须认为前后距离已到位."""
+    (build_follow_command,) = load_functions("build_follow_command")
+    build_follow_command.__globals__["FOLLOW_CENTER_DEADZONE_PX"] = 8.0
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_X"] = -0.1
+    build_follow_command.__globals__["FOLLOW_TARGET_AREA"] = 2400
+    build_follow_command.__globals__["FOLLOW_AREA_DEADZONE"] = 120
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_AREA"] = 0.001
+    build_follow_command.__globals__["FOLLOW_CONTROL_MAX_Y"] = 1.2
+
+    result = build_follow_command(valid=1, err_x=6, blob_area=2470)
+
+    assert result == {
+        "phase": "CENTER_HOLD",
+        "valid": 0,
+        "follow_x": 0.0,
+        "follow_y": 0.0,
+    }
 
 
-def test_compute_protocol_errors_returns_zero_y_at_target_distance() -> None:
-    """目标底边到达期望抓取位置时, y 必须为零."""
-    (compute_protocol_errors,) = load_functions("compute_protocol_errors")
-    compute_protocol_errors.__globals__["TARGET_ERR_Y"] = 60
-    _, err_y = compute_protocol_errors(
-        blob_cx=160,
-        normalized_bottom=180,
-        cx_screen=160,
-        img_height=240,
-    )
-    assert err_y == 0
+def test_build_follow_command_area_below_target_outputs_forward_y() -> None:
+    """横向对齐后, 面积偏小必须输出前进方向的纵向控制."""
+    (build_follow_command,) = load_functions("build_follow_command")
+    build_follow_command.__globals__["FOLLOW_CENTER_DEADZONE_PX"] = 8.0
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_X"] = -0.1
+    build_follow_command.__globals__["FOLLOW_TARGET_AREA"] = 2400
+    build_follow_command.__globals__["FOLLOW_AREA_DEADZONE"] = 120
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_AREA"] = 0.001
+    build_follow_command.__globals__["FOLLOW_CONTROL_MAX_Y"] = 1.2
+
+    result = build_follow_command(valid=1, err_x=3, blob_area=1800)
+
+    assert result == {
+        "phase": "ALIGN_Y",
+        "valid": 1,
+        "follow_x": 0.0,
+        "follow_y": 0.6,
+    }
+
+
+def test_build_follow_command_marks_missing_target_as_invalid_follow() -> None:
+    """没有有效目标时, ART 必须输出停跟随的无效请求."""
+    (build_follow_command,) = load_functions("build_follow_command")
+    build_follow_command.__globals__["FOLLOW_CENTER_DEADZONE_PX"] = 8.0
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_X"] = -0.1
+    build_follow_command.__globals__["FOLLOW_TARGET_AREA"] = 2400
+    build_follow_command.__globals__["FOLLOW_AREA_DEADZONE"] = 120
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_AREA"] = 0.001
+    build_follow_command.__globals__["FOLLOW_CONTROL_MAX_Y"] = 1.2
+
+    result = build_follow_command(valid=0, err_x=30, blob_area=4000)
+
+    assert result == {
+        "phase": "MARKER_MISSING",
+        "valid": 0,
+        "follow_x": 0.0,
+        "follow_y": 0.0,
+    }
+
+
+def test_build_follow_command_area_above_target_outputs_backward_y() -> None:
+    """横向对齐后, 面积偏大必须输出后退方向的纵向控制."""
+    (build_follow_command,) = load_functions("build_follow_command")
+    build_follow_command.__globals__["FOLLOW_CENTER_DEADZONE_PX"] = 8.0
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_X"] = -0.1
+    build_follow_command.__globals__["FOLLOW_TARGET_AREA"] = 2400
+    build_follow_command.__globals__["FOLLOW_AREA_DEADZONE"] = 120
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_AREA"] = 0.001
+    build_follow_command.__globals__["FOLLOW_CONTROL_MAX_Y"] = 1.2
+
+    result = build_follow_command(valid=1, err_x=3, blob_area=3100)
+
+    assert result["phase"] == "ALIGN_Y"
+    assert result["valid"] == 1
+    assert result["follow_x"] == 0.0
+    assert result["follow_y"] == pytest.approx(-0.7)
+
+
+def test_build_follow_command_area_control_is_clamped_by_max_y() -> None:
+    """面积误差再大, 纵向输出也必须受上限约束."""
+    (build_follow_command,) = load_functions("build_follow_command")
+    build_follow_command.__globals__["FOLLOW_CENTER_DEADZONE_PX"] = 8.0
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_X"] = -0.1
+    build_follow_command.__globals__["FOLLOW_TARGET_AREA"] = 2400
+    build_follow_command.__globals__["FOLLOW_AREA_DEADZONE"] = 120
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_AREA"] = 0.002
+    build_follow_command.__globals__["FOLLOW_CONTROL_MAX_Y"] = 1.2
+
+    result = build_follow_command(valid=1, err_x=0, blob_area=500)
+
+    assert result["follow_y"] == pytest.approx(1.2)
+
+
+def test_tasks_contains_only_red_target() -> None:
+    """本轮专项只允许 red 参与跟随."""
+    assert load_constant("TASKS") == (("red", load_constant("RED_THRESHOLD")),)
 
 
 def test_choose_best_candidate_prefers_center_bottom() -> None:
@@ -210,6 +314,11 @@ def test_write_line_appends_crlf() -> None:
     assert namespace_uart.writes == ["v=1,s=1,x=0,y=20\r\n"]
 
 
+def test_startup_reset_is_disabled_on_default_path() -> None:
+    """默认主线必须直接闭合到 follow 请求,不能先发 reset=1."""
+    assert load_constant("STARTUP_RESET") is False
+
+
 def test_send_startup_reset_emits_exactly_one_reset_line() -> None:
     """启动复位只能发送一条 reset=1 协议行."""
     sleep_short, write_line, send_startup_reset = load_functions(
@@ -249,11 +358,11 @@ def test_choose_best_candidate_follows_task3_spec_by_keeping_first_candidate_on_
     assert best == expected_by_task3_spec
 
 
-def test_run_sends_single_startup_reset_and_reports_invalid_frame_without_candidates() -> (
-    None
-):
-    """开启启动复位后,无目标时也必须按节流发送最小无效帧."""
-    format_vision_frame, run = load_functions("format_vision_frame", "run")
+def test_run_default_path_reports_invalid_frame_without_startup_reset() -> None:
+    """默认主线不应先发 reset=1, 而应直接输出零速度请求."""
+    format_vision_frame, build_follow_command, run = load_functions(
+        "format_vision_frame", "build_follow_command", "run"
+    )
 
     class StopRun(Exception):
         pass
@@ -303,11 +412,24 @@ def test_run_sends_single_startup_reset_and_reports_invalid_frame_without_candid
         )
     )
     run.__globals__["write_line"] = lambda uart, line: uart.write(line + "\r\n")
+    run.__globals__["build_follow_command"] = build_follow_command
     run.__globals__["format_vision_frame"] = format_vision_frame
     run.__globals__["should_send"] = lambda now_ms, last_send_ms, interval_ms: True
     run.__globals__["time"] = FakeClock()
-    run.__globals__["STARTUP_RESET"] = True
+    run.__globals__["STARTUP_RESET"] = False
     run.__globals__["SEND_INTERVAL_MS"] = 40
+    run.__globals__["FOLLOW_CENTER_DEADZONE_PX"] = 8.0
+    run.__globals__["FOLLOW_CONTROL_KP_X"] = -0.1
+    run.__globals__["FOLLOW_TARGET_AREA"] = 2400
+    run.__globals__["FOLLOW_AREA_DEADZONE"] = 120
+    run.__globals__["FOLLOW_CONTROL_KP_AREA"] = 0.001
+    run.__globals__["FOLLOW_CONTROL_MAX_Y"] = 1.2
+    build_follow_command.__globals__["FOLLOW_CENTER_DEADZONE_PX"] = 8.0
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_X"] = -0.1
+    build_follow_command.__globals__["FOLLOW_TARGET_AREA"] = 2400
+    build_follow_command.__globals__["FOLLOW_AREA_DEADZONE"] = 120
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_AREA"] = 0.001
+    build_follow_command.__globals__["FOLLOW_CONTROL_MAX_Y"] = 1.2
 
     try:
         run()
@@ -315,24 +437,25 @@ def test_run_sends_single_startup_reset_and_reports_invalid_frame_without_candid
         pass
 
     assert namespace_uart.writes == [
-        "reset=1\r\n",
-        "v=0,s=1\r\n",
-        "v=0,s=2\r\n",
+        "f=1,m=1,x=0,y=0\r\n",
+        "f=1,m=1,x=0,y=0\r\n",
     ]
 
 
 def test_run_sends_minimal_valid_frame_with_protocol_errors() -> None:
-    """有目标时运行时发送必须只保留序号和像素差值."""
+    """有目标时运行时发送必须直接输出速度模式控制请求."""
     (
         blob_rect_to_bbox,
         normalize_bbox_for_protocol,
-        compute_protocol_errors,
+        compute_lateral_error,
+        build_follow_command,
         format_vision_frame,
         run,
     ) = load_functions(
         "blob_rect_to_bbox",
         "normalize_bbox_for_protocol",
-        "compute_protocol_errors",
+        "compute_lateral_error",
+        "build_follow_command",
         "format_vision_frame",
         "run",
     )
@@ -362,6 +485,9 @@ def test_run_sends_minimal_valid_frame_with_protocol_errors() -> None:
         def rect(self):
             return (100, 20, 40, 70)
 
+        def area(self):
+            return 1800
+
     class FakeUart:
         def __init__(self):
             self.writes = []
@@ -385,16 +511,27 @@ def test_run_sends_minimal_valid_frame_with_protocol_errors() -> None:
     run.__globals__["send_startup_reset"] = lambda uart: None
     run.__globals__["sensor"] = FakeSensor()
     run.__globals__["build_blob_candidates"] = lambda img: [
-        ("red", 150, 40, 220, FakeBlob())
+        ("red", 160, 40, 220, 1800, FakeBlob())
     ]
     run.__globals__["choose_best_candidate"] = (
         lambda candidates, cx_screen, img_height: candidates[0]
     )
     run.__globals__["blob_rect_to_bbox"] = blob_rect_to_bbox
     run.__globals__["normalize_bbox_for_protocol"] = normalize_bbox_for_protocol
-    run.__globals__["compute_protocol_errors"] = compute_protocol_errors
-    run.__globals__["TARGET_ERR_Y"] = 60
-    compute_protocol_errors.__globals__["TARGET_ERR_Y"] = 60
+    run.__globals__["compute_lateral_error"] = compute_lateral_error
+    run.__globals__["build_follow_command"] = build_follow_command
+    run.__globals__["FOLLOW_CENTER_DEADZONE_PX"] = 8.0
+    run.__globals__["FOLLOW_CONTROL_KP_X"] = -0.1
+    run.__globals__["FOLLOW_TARGET_AREA"] = 2400
+    run.__globals__["FOLLOW_AREA_DEADZONE"] = 120
+    run.__globals__["FOLLOW_CONTROL_KP_AREA"] = 0.001
+    run.__globals__["FOLLOW_CONTROL_MAX_Y"] = 1.2
+    build_follow_command.__globals__["FOLLOW_CENTER_DEADZONE_PX"] = 8.0
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_X"] = -0.1
+    build_follow_command.__globals__["FOLLOW_TARGET_AREA"] = 2400
+    build_follow_command.__globals__["FOLLOW_AREA_DEADZONE"] = 120
+    build_follow_command.__globals__["FOLLOW_CONTROL_KP_AREA"] = 0.001
+    build_follow_command.__globals__["FOLLOW_CONTROL_MAX_Y"] = 1.2
     run.__globals__["write_line"] = lambda uart, line: uart.write(line + "\r\n")
     run.__globals__["format_vision_frame"] = format_vision_frame
     run.__globals__["should_send"] = lambda now_ms, last_send_ms, interval_ms: True
@@ -407,4 +544,4 @@ def test_run_sends_minimal_valid_frame_with_protocol_errors() -> None:
     except StopRun:
         pass
 
-    assert namespace_uart.writes == ["v=1,s=1,x=-10,y=40\r\n"]
+    assert namespace_uart.writes == ["f=1,m=1,x=0,y=0.6\r\n"]

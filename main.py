@@ -1,7 +1,7 @@
-﻿"""! @file main.py
-@brief OpenART 纯视觉查询/响应主程序.
-@details 该程序只负责图像采集、目标检测、按物理相机缓存当前帧,
-         并在收到 `?frame=<camera_id>` 时回传 `0..N` 条检测结果.
+"""! @file main.py
+@brief OpenART 跟随请求生成主程序.
+@details 该程序负责图像采集、目标检测、阶段判断与 follow 请求生成,
+         并直接输出辅车当前已经支持的 `f=1,s=...,v=...,x=...,y=...` 文本.
 """
 
 import time
@@ -22,45 +22,117 @@ UART_ID = 2
 # 主通信波特率, 需与 RT1021 侧保持一致
 UART_BAUDRATE = 115200
 # 固定曝光时间, 单位为微秒
-EXP_TIME_US = 500
+EXP_TIME_US = 300
 # 当前脚本代表的物理相机 ID
 CAMERA_ID = "cam_a"
 # 连续视觉帧上报的最小间隔, 单位为毫秒
 SEND_INTERVAL_MS = 40
-# 纵向期望抓取位置, 单位为像素差值
-TARGET_ERR_Y = 60
-# 启动后是否先发送一次 `reset=1`
-STARTUP_RESET = True
+# 主车当前使用的跟随中心死区, 单位为像素
+FOLLOW_CENTER_DEADZONE_PX = 8.0
+# 主车当前使用的横向位置式控制增益
+FOLLOW_CONTROL_KP_X = -0.02
+# 纵向目标面积, 单位为 blob 像素面积
+FOLLOW_TARGET_AREA = 2400
+# 纵向面积死区, 单位为 blob 像素面积
+FOLLOW_AREA_DEADZONE = 120
+# 主车当前使用的面积式纵向控制增益
+FOLLOW_CONTROL_KP_AREA = 0.000
+# 纵向控制量上限, 避免面积抖动时前后动作过猛
+FOLLOW_CONTROL_MAX_Y = 1.2
+# 默认主线直接发送 follow 请求, 不再先发不兼容的 `reset=1`
+STARTUP_RESET = False
 # 串口写入前后的保护延时, 单位为秒
 WRITE_DELAY_S = 0.002
 
 # 红色目标的 LAB 阈值参数
 RED_THRESHOLD = (0, 100, 23, 127, -26, 127)
-# 绿色目标的 LAB 阈值参数
-GREEN_THRESHOLD = (0, 100, -128, -14, -128, 127)
 # 参与检测的任务集合, 元素格式为 `(名称, 阈值)`
-TASKS = (("red", RED_THRESHOLD), ("green", GREEN_THRESHOLD))
+TASKS = (("red", (0, 100, 23, 127, -26, 127)),)
 
 
 def format_vision_frame(seq, valid, err_x, err_y):
-    """! @brief 将当前目标编码为最小视觉协议帧.
+    """! @brief 将当前控制结果编码为辅车速度模式请求.
 
     @param seq 当前发送序号.
-    @param valid 当前帧是否存在有效目标.
-    @param err_x 当前目标横向偏差.
-    @param err_y 当前目标纵向偏差.
-    @return 当前主线视觉单行协议文本.
+    @param valid 当前拍 follow 控制是否有效.
+    @param err_x 发给辅车的横向控制量.
+    @param err_y 发给辅车的纵向控制量.
+    @return 当前主线单行速度模式请求文本.
 
-    @note 正式发送只保留版本位、序号以及像素差值, 其中 `x/y` 仍分别表示
-          横向中心偏差与底边相对期望抓取位置的纵向偏差.
+    @note 输出必须直接对齐辅车当前已经支持的 `f=1,m=1,x=...,y=...`
+          速度模式语义, 无效拍与保持拍统一输出 `x=0,y=0`.
     """
     if not int(valid):
-        return "v=0,s=%s" % int(seq)
-    return "v=1,s=%s,x=%s,y=%s" % (
-        int(seq),
-        int(round(err_x)),
-        int(round(err_y)),
-    )
+        return "f=1,m=1,x=0,y=0"
+
+    x_value = float(err_x)
+    y_value = float(err_y)
+    if -0.0005 < x_value < 0.0005:
+        x_value = 0.0
+    if -0.0005 < y_value < 0.0005:
+        y_value = 0.0
+    x_text = ("%.3f" % x_value).rstrip("0").rstrip(".")
+    y_text = ("%.3f" % y_value).rstrip("0").rstrip(".")
+    if not x_text or x_text == "-0":
+        x_text = "0"
+    if not y_text or y_text == "-0":
+        y_text = "0"
+    return "f=1,m=1,x=%s,y=%s" % (x_text, y_text)
+
+
+def build_follow_command(valid, err_x, blob_area):
+    """! @brief 在 ART 端完成跟随阶段判断与控制量生成.
+
+    @param valid 当前帧是否存在有效目标.
+    @param err_x 目标中心相对画面中心的横向像素差值.
+    @param blob_area 当前目标的像素面积.
+    @return 包含阶段名和 follow 控制量的字典.
+
+    @note 这里直接复用辅车当前速度模式入口: `x/y` 表示速度量,
+          而不是继续输出位置式控制量.
+    """
+    if int(valid) != 1:
+        return {
+            "phase": "MARKER_MISSING",
+            "valid": 0,
+            "follow_x": 0.0,
+            "follow_y": 0.0,
+        }
+
+    err_x = float(err_x)
+    blob_area = float(blob_area)
+    deadzone_px = float(FOLLOW_CENTER_DEADZONE_PX)
+    area_error = float(FOLLOW_TARGET_AREA) - blob_area
+    area_deadzone = float(FOLLOW_AREA_DEADZONE)
+    if abs(err_x) <= deadzone_px and abs(area_error) <= area_deadzone:
+        return {
+            "phase": "CENTER_HOLD",
+            "valid": 0,
+            "follow_x": 0.0,
+            "follow_y": 0.0,
+        }
+
+    if abs(err_x) > deadzone_px:
+        return {
+            "phase": "ALIGN_X",
+            "valid": 1,
+            "follow_x": -err_x * float(FOLLOW_CONTROL_KP_X),
+            "follow_y": 0.0,
+        }
+
+    follow_y = area_error * float(FOLLOW_CONTROL_KP_AREA)
+    max_y = float(FOLLOW_CONTROL_MAX_Y)
+    if follow_y > max_y:
+        follow_y = max_y
+    if follow_y < -max_y:
+        follow_y = -max_y
+
+    return {
+        "phase": "ALIGN_Y",
+        "valid": 1,
+        "follow_x": 0.0,
+        "follow_y": follow_y,
+    }
 
 
 def blob_rect_to_bbox(rect):
@@ -92,21 +164,14 @@ def normalize_bbox_for_protocol(left, top, right, bottom, img_height):
     return left, normalized_top, right, normalized_bottom
 
 
-def compute_protocol_errors(blob_cx, normalized_bottom, cx_screen, img_height):
-    """! @brief 计算主线协议要求的横纵向偏差.
+def compute_lateral_error(blob_cx, cx_screen):
+    """! @brief 计算主线协议要求的横向偏差.
 
     @param blob_cx 当前目标横向中心像素坐标.
-    @param normalized_bottom 当前目标在协议坐标系下的底边像素坐标.
     @param cx_screen 画面横向中心像素坐标.
-    @param img_height 当前图像高度.
-    @return `(err_x, err_y)` 形式的整数偏差, 其中 `err_y=0` 表示目标已到达期望抓取距离,
-            目标底边超过期望抓取位置时为正, 未达到时为负.
+    @return 当前目标中心相对画面中心的横向整数偏差.
     """
-    err_x = int(round(float(blob_cx) - float(cx_screen)))
-    err_y = int(
-        round(float(normalized_bottom) - float(img_height) + float(TARGET_ERR_Y))
-    )
-    return err_x, err_y
+    return int(round(float(blob_cx) - float(cx_screen)))
 
 
 def choose_best_candidate(candidates, cx_screen, img_height):
@@ -186,7 +251,7 @@ def build_blob_candidates(img):
     """! @brief 提取所有颜色候选目标的重心与底边信息.
 
     @param img 当前帧图像对象.
-    @return 候选目标列表, 元素格式为 `(名称, cx, cy, bottom, blob)`.
+    @return 候选目标列表, 元素格式为 `(名称, cx, cy, bottom, area, blob)`.
     """
     candidates = []
     img_height = img.height()
@@ -200,7 +265,9 @@ def build_blob_candidates(img):
             _, _, _, bottom = normalize_bbox_for_protocol(
                 left, top, right, bottom, img_height
             )
-            candidates.append((task_name, blob.cx(), blob.cy(), bottom, blob))
+            candidates.append(
+                (task_name, blob.cx(), blob.cy(), bottom, blob.area(), blob)
+            )
     return candidates
 
 
@@ -281,16 +348,14 @@ def init_sensor():
 
 
 def run():
-    """! @brief 持续刷新当前帧缓存,并按查询回传多检测结果.
+    """! @brief 持续检测目标并直接发送速度模式请求.
 
     @details 执行流程为: 初始化串口与摄像头 -> 按需发送一次 `reset=1` ->
-             持续采集图像 -> 提取颜色候选目标 -> 选择最优目标 -> 按节流周期
-             发送最小观测帧. 无目标时发送 `v=0,s=<seq>`, 有目标时发送
-             `v=1,s=<seq>,x=<x>,y=<y>`.
-    @note 本函数不再发送 `dx/dy/d_angle`, `rear`, `angle` 等控制命令,
-          OpenArt 仅承担感知与观测上报职责.
+             持续采集图像 -> 提取颜色候选目标 -> 选择最优目标 -> 计算像素偏差
+             -> 在 ART 端完成阶段判断和速度量生成 -> 按节流周期发送速度模式请求.
+    @note 输出直接对齐辅车当前速度模式入口, 不再额外扩展第二套视觉发包字段.
     """
-    # 先完成串口和摄像头初始化,后续主循环只处理观测上报
+    # 先完成串口和摄像头初始化,后续主循环直接输出速度模式请求
     uart = init_uart()
     cx_screen = init_sensor()
     # 记录上一帧成功发送的时刻,用于发送节流
@@ -321,32 +386,29 @@ def run():
 
         report_seq += 1
         if not candidates:
+            follow_command = build_follow_command(valid=0, err_x=0, blob_area=0)
             write_line(
                 uart,
                 format_vision_frame(
                     seq=report_seq,
-                    valid=0,
-                    err_x=0,
-                    err_y=0,
+                    valid=follow_command["valid"],
+                    err_x=follow_command["follow_x"],
+                    err_y=follow_command["follow_y"],
                 ),
             )
             last_send_ms = now_ms
             continue
 
         # 选择当前帧最适合上报的单个目标
-        target_label, pixel_x, pixel_y, _, best_blob = choose_best_candidate(
+        target_label, pixel_x, pixel_y, _, blob_area, best_blob = choose_best_candidate(
             candidates, cx_screen, img.height()
         )
         left, top, right, bottom = blob_rect_to_bbox(best_blob.rect())
         left, top, right, bottom = normalize_bbox_for_protocol(
             left, top, right, bottom, img.height()
         )
-        err_x, err_y = compute_protocol_errors(
-            blob_cx=pixel_x,
-            normalized_bottom=bottom,
-            cx_screen=cx_screen,
-            img_height=img.height(),
-        )
+        err_x = compute_lateral_error(blob_cx=pixel_x, cx_screen=cx_screen)
+        follow_command = build_follow_command(valid=1, err_x=err_x, blob_area=blob_area)
         # 在调试画面上标出当前被选中的目标
         img.draw_rectangle(best_blob.rect())
         img.draw_cross(pixel_x, pixel_y)
@@ -354,9 +416,9 @@ def run():
             uart,
             format_vision_frame(
                 seq=report_seq,
-                valid=1,
-                err_x=err_x,
-                err_y=err_y,
+                valid=follow_command["valid"],
+                err_x=follow_command["follow_x"],
+                err_y=follow_command["follow_y"],
             ),
         )
         last_send_ms = now_ms

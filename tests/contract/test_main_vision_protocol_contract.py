@@ -95,58 +95,76 @@ def test_main_does_not_define_query_or_sync_helpers() -> None:
 
 
 def test_main_formats_minimal_observation_frames() -> None:
-    """main.py 必须按正式行为输出最小协议格式."""
+    """main.py 必须按辅车当前协议输出速度模式请求格式."""
     format_vision_frame = load_function("format_vision_frame")
 
     assert (
-        format_vision_frame(seq=3, valid=1, err_x=-12, err_y=5) == "v=1,s=3,x=-12,y=5"
+        format_vision_frame(seq=3, valid=1, err_x=-1.2, err_y=0.0)
+        == "f=1,m=1,x=-1.2,y=0"
     )
-    assert format_vision_frame(seq=4, valid=0, err_x=99, err_y=88) == "v=0,s=4"
+    assert format_vision_frame(seq=4, valid=0, err_x=99, err_y=88) == "f=1,m=1,x=0,y=0"
 
 
 def test_main_format_vision_frame_signature_is_trimmed_to_minimal_protocol() -> None:
-    """格式化函数签名不应继续暴露已退出正式输出的空壳参数."""
+    """格式化函数签名保持最小 follow 请求所需参数即可."""
     format_vision_frame = load_function("format_vision_frame")
     parameter_names = list(inspect.signature(format_vision_frame).parameters)
     assert parameter_names == ["seq", "valid", "err_x", "err_y"]
 
 
+def test_main_exposes_follow_stage_and_control_builder() -> None:
+    """main.py 必须显式包含 ART 端阶段判断与控制量生成入口."""
+    builder = load_function("build_follow_command")
+    parameter_names = list(inspect.signature(builder).parameters)
+    assert parameter_names == ["valid", "err_x", "blob_area"]
+
+
 def test_protocol_docs_use_minimal_text_frames_only() -> None:
-    """正式协议文档与 README 只保留最小文本协议作为正式口径."""
-    required_tokens = [
-        "v=1,s=<seq>,x=<x>,y=<y>",
-        "v=0,s=<seq>",
-        "`v=1` 表示当前帧存在有效目标",
-        "`v=0` 表示当前帧无有效目标",
-        "`x` 表示目标中心相对画面中心的横向像素差值",
-        "`y` 表示目标底边相对当前期望抓取位置的纵向像素差值",
-        "`v=1` 时必须同时携带 `x` 和 `y`",
-        "`v=0` 时不发送 `x` 和 `y`",
-        "`x > 0` 表示目标在画面中心右侧，`x < 0` 表示目标在画面中心左侧",
-        "`y > 0` 表示目标底边超过期望抓取位置，`y < 0` 表示目标底边尚未到达期望抓取位置",
-        "`y=0` 表示目标已到达当前设定的抓取距离",
-        "无目标时，视觉端发送明确的无目标报文",
+    """正式协议文档与 README 必须直接对齐辅车速度模式请求口径."""
+    shared_required_tokens = [
+        "f=1,m=1,x=<x>,y=<y>",
+        "速度模式入口",
+        "`f=1,m=1`",
+        "`x` 表示发给辅车的横向速度",
+        "`y` 表示发给辅车的纵向速度",
+        "OpenArt 直接承担跟随阶段判断和控制量生成",
+        "`ALIGN_X`",
+        "`ALIGN_Y`",
+        "`CENTER_HOLD`",
+        "`MARKER_MISSING`",
+        "辅车已经支持的速度模式入口",
     ]
-    forbidden_tokens = [
+    shared_forbidden_tokens = [
         "vision=1",
         "camera_id",
         "target=",
         "err_x",
         "err_y",
-        "bbox_left",
-        "bbox_top",
-        "bbox_right",
-        "bbox_bottom",
-        "left=<",
-        "top=<",
-        "right=<",
-        "bottom=<",
-        "left/top/right/bottom",
+        "f=1,s=<seq>,v=<0/1>,x=<x>,y=<y>",
+        "OpenArt 不负责后续控制组织",
+        "RT1021 负责决定“接下来怎么做”",
+    ]
+
+    protocol_only_required_tokens = [
+        "不改变“持续发送速度模式请求文本”作为主线机制",
+    ]
+    protocol_only_forbidden_tokens = [
+        "持续视觉观测上报",
+        "持续发送最小视觉观测文本",
+        "非观测动作",
     ]
 
     for path in (PROTOCOL_PATH, README_PATH):
         text = path.read_text(encoding="utf-8")
-        for token in required_tokens:
+        for token in shared_required_tokens:
             assert token in text, f"missing token in {path.name}: {token}"
-        for token in forbidden_tokens:
+        for token in shared_forbidden_tokens:
             assert token not in text, f"legacy token found in {path.name}: {token}"
+
+    protocol_text = PROTOCOL_PATH.read_text(encoding="utf-8")
+    for token in protocol_only_required_tokens:
+        assert token in protocol_text, f"missing token in {PROTOCOL_PATH.name}: {token}"
+    for token in protocol_only_forbidden_tokens:
+        assert token not in protocol_text, (
+            f"legacy token found in {PROTOCOL_PATH.name}: {token}"
+        )
