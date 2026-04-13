@@ -17,6 +17,8 @@ description: Use when writing or reviewing SmartCar2026-Vision Python code to ke
 
 - 目标平台: MicroPython（OpenART）
 - 注释与文档字符串使用中文
+- 单行注释行尾不使用句号
+- 所有注释统一使用半角标点,中文注释也不例外
 - 导入顺序: 标准库 -> 第三方/平台库 -> 本地
 - 优先显式类型标注,避免 `Any`
 - 捕获具体异常,禁止静默失败
@@ -33,7 +35,8 @@ description: Use when writing or reviewing SmartCar2026-Vision Python code to ke
 # Review Checklist
 
 - 是否保持 `main.py` 单文件主入口
-- 是否满足中文注释与异常处理要求
+- 是否满足中文注释,半角标点与异常处理要求
+- 是否避免在单行注释行尾使用句号
 - 是否存在无关改动
 - 是否补充对应测试与验证命令
 
