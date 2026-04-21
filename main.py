@@ -25,14 +25,14 @@ UART_BAUDRATE = 115200
 EXP_TIME_US = 300
 # 主车当前使用的横向死区, 单位为像素
 FOLLOW_X_DEADZONE_PX = 15.0
-# 主车当前使用的纵向目标点, 单位为像素
-FOLLOW_TARGET_Y = 95.0
+# 主车当前使用的纵向目标尺度量, 单位为像素
+FOLLOW_TARGET_Y = 45.0
 # 主车当前使用的纵向死区, 单位为像素
 FOLLOW_Y_DEADZONE_PX = 8.0
 # 主车当前使用的横向速度量增益
 FOLLOW_CONTROL_KP_X = 0.1
 # 主车当前使用的纵向速度量增益
-FOLLOW_CONTROL_KP_Y = 0.0
+FOLLOW_CONTROL_KP_Y = -0.15
 # 纵向速度量上限, 避免面积抖动时前后动作过猛
 FOLLOW_CONTROL_MAX_Y = 5
 # 串口写入前后的保护延时, 单位为秒
@@ -166,14 +166,46 @@ def compute_lateral_error(blob_cx, cx_screen):
     return int(round(float(blob_cx) - float(cx_screen)))
 
 
-def compute_vertical_error(blob_cy, target_y):
+def edge_length(p0, p1):
+    """! @brief 计算两点间边长.
+
+    @param p0 第一端点 `(x, y)`.
+    @param p1 第二端点 `(x, y)`.
+    @return 两点间欧氏距离.
+    """
+    dx = float(p1[0]) - float(p0[0])
+    dy = float(p1[1]) - float(p0[1])
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def get_marker_corners(blob):
+    """! @brief 返回用于距离量和显示的大角点集合.
+
+    @param blob 当前色块对象.
+    @return 优先使用最小外接旋转矩形的四个角点.
+    """
+    return tuple(blob.min_corners())
+
+
+def compute_marker_span(corners):
+    """! @brief 基于梯形上底和下底平均值计算当前目标尺度量.
+
+    @param corners 按顺时针排序的四个角点.
+    @return 当前目标的纵向距离代理尺度量.
+    """
+    top_width = edge_length(corners[0], corners[1])
+    bottom_width = edge_length(corners[3], corners[2])
+    return (top_width + bottom_width) / 2.0
+
+
+def compute_vertical_error(marker_span, target_span):
     """! @brief 计算当前速度主线使用的纵向偏差.
 
-    @param blob_cy 当前目标纵向中心像素坐标.
-    @param target_y 纵向目标点像素坐标.
-    @return 当前目标中心相对目标点的纵向整数偏差.
+    @param marker_span 当前目标的尺度量.
+    @param target_span 纵向目标尺度量.
+    @return 当前目标尺度量相对目标尺度量的纵向整数偏差.
     """
-    return int(round(float(blob_cy) - float(target_y)))
+    return int(round(float(marker_span) - float(target_span)))
 
 
 def choose_best_candidate(candidates, cx_screen, img_height):
@@ -225,10 +257,10 @@ def write_line(uart, line):
 
 
 def build_blob_candidates(img):
-    """! @brief 提取所有颜色候选目标的重心与底边信息.
+    """! @brief 提取所有颜色候选目标的重心、底边与尺度量信息.
 
     @param img 当前帧图像对象.
-    @return 候选目标列表, 元素格式为 `(名称, cx, cy, bottom, area, blob)`.
+    @return 候选目标列表, 元素格式为 `(名称, cx, cy, bottom, span, blob)`.
     """
     candidates = []
     img_height = img.height()
@@ -242,10 +274,24 @@ def build_blob_candidates(img):
             _, _, _, bottom = normalize_bbox_for_protocol(
                 left, top, right, bottom, img_height
             )
+            marker_span = compute_marker_span(get_marker_corners(blob))
             candidates.append(
-                (task_name, blob.cx(), blob.cy(), bottom, blob.area(), blob)
+                (task_name, blob.cx(), blob.cy(), bottom, marker_span, blob)
             )
     return candidates
+
+
+def draw_selected_marker(img, blob, pixel_x, pixel_y):
+    """! @brief 在调试画面上绘制当前选中目标的四角与中心.
+
+    @param img 当前图像对象.
+    @param blob 当前选中的色块对象.
+    @param pixel_x 当前目标中心 x.
+    @param pixel_y 当前目标中心 y.
+    """
+    for corner_x, corner_y in get_marker_corners(blob):
+        img.draw_cross(corner_x, corner_y)
+    img.draw_cross(pixel_x, pixel_y)
 
 
 def init_uart():
@@ -317,15 +363,16 @@ def run():
             continue
 
         # 选择当前帧最适合上报的单个目标
-        _, pixel_x, pixel_y, _, blob_area, best_blob = choose_best_candidate(
+        _, pixel_x, pixel_y, _, marker_span, best_blob = choose_best_candidate(
             candidates, cx_screen, img.height()
         )
         err_x = compute_lateral_error(blob_cx=pixel_x, cx_screen=cx_screen)
-        err_y = compute_vertical_error(blob_cy=pixel_y, target_y=FOLLOW_TARGET_Y)
+        err_y = compute_vertical_error(
+            marker_span=marker_span, target_span=FOLLOW_TARGET_Y
+        )
         follow_command = build_follow_command(valid=1, err_x=err_x, err_y=err_y)
-        # 在调试画面上标出当前被选中的目标
-        img.draw_rectangle(best_blob.rect())
-        img.draw_cross(pixel_x, pixel_y)
+        # 在调试画面上标出当前被选中的目标四角和中心
+        draw_selected_marker(img=img, blob=best_blob, pixel_x=pixel_x, pixel_y=pixel_y)
         write_line(
             uart,
             format_vision_frame(
