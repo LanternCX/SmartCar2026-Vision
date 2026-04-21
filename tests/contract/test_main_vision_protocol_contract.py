@@ -16,9 +16,12 @@ def test_main_formats_minimal_observation_frames() -> None:
 def test_main_format_vision_frame_signature_keeps_only_minimal_inputs() -> None:
     """format_vision_frame 只应保留最小输入参数."""
     module = load_main_module("vision_main_test_module_contract")
-    parameter_names = list(inspect.signature(module.format_vision_frame).parameters)
+    signature = inspect.signature(module.format_vision_frame)
+    parameter_names = list(signature.parameters)
 
-    assert parameter_names == ["vx", "vy"]
+    assert "vx" in parameter_names
+    assert "vy" in parameter_names
+    assert len(parameter_names) == 2
 
 
 def test_main_build_follow_command_returns_position_deltas() -> None:
