@@ -50,18 +50,129 @@ def build_dual_axis_sample(module):
     )
 
 
-def test_compute_vertical_error_uses_fixed_target_y() -> None:
-    """纵向误差必须相对固定目标点 95 计算."""
+def test_follow_target_y_uses_calibrated_midpoint() -> None:
+    """纵向目标尺度量使用现场标定的中点 45."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    assert module.FOLLOW_TARGET_Y == 45.0
+
+
+def test_compute_marker_span_uses_trapezoid_top_bottom_average() -> None:
+    """距离环尺度量必须取梯形上底和下底的平均长度."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    corners = ((10, 10), (30, 10), (36, 34), (4, 34))
+
+    assert module.compute_marker_span(corners) == pytest.approx(26.0)
+
+
+def test_get_marker_corners_prefers_min_area_rect_big_corners() -> None:
+    """角点来源必须优先取最小外接旋转矩形的大角."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    class FakeBlob:
+        def corners(self):
+            return ((11, 20), (18, 21), (30, 20), (35, 27))
+
+        def min_corners(self):
+            return ((10, 20), (30, 20), (36, 50), (4, 50))
+
+    assert module.get_marker_corners(FakeBlob()) == (
+        (10, 20),
+        (30, 20),
+        (36, 50),
+        (4, 50),
+    )
+
+
+def test_compute_vertical_error_uses_target_span() -> None:
+    """纵向误差必须相对目标尺度量计算."""
     module = load_main_module("vision_main_test_module_unit")
 
     assert (
-        module.compute_vertical_error(blob_cy=110, target_y=module.FOLLOW_TARGET_Y)
+        module.compute_vertical_error(
+            marker_span=module.FOLLOW_TARGET_Y + 15,
+            target_span=module.FOLLOW_TARGET_Y,
+        )
         == 15
     )
     assert (
-        module.compute_vertical_error(blob_cy=80, target_y=module.FOLLOW_TARGET_Y)
+        module.compute_vertical_error(
+            marker_span=module.FOLLOW_TARGET_Y - 15,
+            target_span=module.FOLLOW_TARGET_Y,
+        )
         == -15
     )
+
+
+def test_build_blob_candidates_reports_corner_based_span() -> None:
+    """候选目标必须携带由角点计算出的梯形尺度量."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    class FakeBlob:
+        def rect(self):
+            return (10, 20, 20, 30)
+
+        def corners(self):
+            return ((11, 20), (18, 21), (30, 20), (35, 27))
+
+        def min_corners(self):
+            return ((10, 20), (30, 20), (36, 50), (4, 50))
+
+        def cx(self):
+            return 20
+
+        def cy(self):
+            return 35
+
+    class FakeImage:
+        def height(self):
+            return 100
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [FakeBlob()]
+
+    candidates = module.build_blob_candidates(FakeImage())
+
+    assert len(candidates) == 1
+    _, pixel_x, pixel_y, bottom, marker_span, _ = candidates[0]
+    assert pixel_x == 20
+    assert pixel_y == 35
+    assert bottom == 80
+    assert marker_span == pytest.approx(26.0)
+
+
+def test_draw_selected_marker_draws_corners_without_bounding_box() -> None:
+    """调试显示必须画四个角点而不是外接框."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    class FakeBlob:
+        def corners(self):
+            return ((11, 20), (18, 21), (30, 20), (35, 27))
+
+        def min_corners(self):
+            return ((10, 20), (30, 20), (36, 50), (4, 50))
+
+    class FakeImage:
+        def __init__(self):
+            self.crosses = []
+            self.rectangles = []
+
+        def draw_cross(self, x, y):
+            self.crosses.append((x, y))
+
+        def draw_rectangle(self, rect):
+            self.rectangles.append(rect)
+
+    img = FakeImage()
+    blob = FakeBlob()
+
+    module.draw_selected_marker(img=img, blob=blob, pixel_x=20, pixel_y=35)
+
+    assert img.rectangles == []
+    assert img.crosses == [(10, 20), (30, 20), (36, 50), (4, 50), (20, 35)]
+
+
 
 
 def test_format_vision_frame_outputs_position_request_with_compact_numbers() -> None:
