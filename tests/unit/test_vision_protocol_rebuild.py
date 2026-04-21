@@ -50,6 +50,24 @@ def build_dual_axis_sample(module):
     )
 
 
+def build_reverse_align_x_sample(module):
+    """构造一个反向横向阶段样例."""
+    return module.build_follow_command(
+        valid=1,
+        err_x=-(float(module.FOLLOW_X_DEADZONE_PX) + 5.0),
+        err_y=0.0,
+    )
+
+
+def build_cross_direction_dual_axis_sample(module):
+    """构造一个横纵方向相反的双轴偏差样例."""
+    return module.build_follow_command(
+        valid=1,
+        err_x=-(float(module.FOLLOW_X_DEADZONE_PX) + 5.0),
+        err_y=float(module.FOLLOW_Y_DEADZONE_PX) + 5.0,
+    )
+
+
 def test_follow_target_y_uses_calibrated_midpoint() -> None:
     """纵向目标尺度量使用现场标定的中点 45."""
     module = load_main_module("vision_main_test_module_unit")
@@ -215,6 +233,15 @@ def test_build_follow_command_align_x_outputs_only_lateral_position_delta() -> N
     assert result["command_vy"] == pytest.approx(0.0)
 
 
+def test_build_follow_command_align_x_preserves_reverse_direction() -> None:
+    """横向偏差反向时也必须保留反向速度符号."""
+    module = load_main_module("vision_main_test_module_unit")
+    result = build_reverse_align_x_sample(module)
+
+    assert result["command_vx"] < 0
+    assert result["command_vy"] == pytest.approx(0.0)
+
+
 def test_build_follow_command_outputs_both_axes_when_both_errors_exist() -> None:
     """横纵都超出死区时必须同时输出两个方向的速度量."""
     module = load_main_module("vision_main_test_module_unit")
@@ -234,6 +261,19 @@ def test_build_follow_command_area_deadzone_holds_after_x_aligned() -> None:
     """横向已对齐且纵向进入死区后必须输出零速度."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_hold_sample(module)
+
+    assert result["command_vx"] == pytest.approx(0.0)
+    assert result["command_vy"] == pytest.approx(0.0)
+
+
+def test_build_follow_command_exact_deadzone_boundary_still_holds() -> None:
+    """刚好落在死区边界时也必须继续保持零速度."""
+    module = load_main_module("vision_main_test_module_unit")
+    result = module.build_follow_command(
+        valid=1,
+        err_x=float(module.FOLLOW_X_DEADZONE_PX),
+        err_y=-float(module.FOLLOW_Y_DEADZONE_PX),
+    )
 
     assert result["command_vx"] == pytest.approx(0.0)
     assert result["command_vy"] == pytest.approx(0.0)
@@ -261,6 +301,15 @@ def test_build_follow_command_align_y_preserves_reverse_direction() -> None:
 
     assert result["command_vx"] == pytest.approx(0.0)
     assert result["command_vy"] == pytest.approx(expected_vy)
+
+
+def test_build_follow_command_dual_axis_keeps_axes_independent() -> None:
+    """双轴同时偏差时, 横向反向不应把纵向输出一起压掉."""
+    module = load_main_module("vision_main_test_module_unit")
+    result = build_cross_direction_dual_axis_sample(module)
+
+    assert result["command_vx"] < 0
+    assert result["command_vy"] != 0
 
 
 def test_build_follow_command_marks_missing_target_as_zero_position_command() -> None:
