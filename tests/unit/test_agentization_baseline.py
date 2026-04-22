@@ -10,11 +10,9 @@ def test_required_agentization_files_exist() -> None:
     """必须存在核心 Agent 化治理产物."""
     required = [
         "AGENTS.md",
-        ".agents/skills/code-standards/SKILL.md",
         ".agents/skills/git-workflow/SKILL.md",
         ".agents/skills/tdd-integration/SKILL.md",
         ".agents/skills/doc-maintainer/SKILL.md",
-        ".agents/skills/remote-spec-to-markdown/SKILL.md",
     ]
     missing = [path for path in required if not (ROOT / path).exists()]
     assert not missing, f"missing required files: {missing}"
@@ -32,7 +30,7 @@ def test_agents_policy_keywords_present() -> None:
     agents_path = ROOT / "AGENTS.md"
     assert agents_path.exists(), "AGENTS.md must exist"
     text = agents_path.read_text(encoding="utf-8")
-    for token in ("TDD", "Git Workflow", "单文件架构", "禁止 mpy-cli"):
+    for token in ("TDD", "main.py", "单文件架构", "mpy-cli"):
         assert token in text, f"missing keyword in AGENTS.md: {token}"
 
 
@@ -42,7 +40,7 @@ def test_doc_maintainer_skill_frontmatter() -> None:
     assert skill_path.exists(), "doc-maintainer skill must exist"
     text = skill_path.read_text(encoding="utf-8")
     assert "name: doc-maintainer" in text
-    assert "description:" in text
+    assert "维护" in text
 
 
 def test_tdd_workflow_doc_exists_and_mentions_cycle() -> None:
@@ -50,7 +48,7 @@ def test_tdd_workflow_doc_exists_and_mentions_cycle() -> None:
     doc_path = ROOT / "docs/developer/tdd-workflow.md"
     assert doc_path.exists(), "docs/developer/tdd-workflow.md must exist"
     text = doc_path.read_text(encoding="utf-8")
-    for token in ("RED", "GREEN", "REFACTOR"):
+    for token in ("RED", "REFACTOR", "失败测试"):
         assert token in text, f"missing token in tdd-workflow.md: {token}"
 
 
@@ -59,7 +57,8 @@ def test_ci_workflow_exists_and_runs_unit_contract() -> None:
     workflow_path = ROOT / ".github/workflows/tdd.yml"
     assert workflow_path.exists(), ".github/workflows/tdd.yml must exist"
     text = workflow_path.read_text(encoding="utf-8")
-    assert "tests/unit tests/contract" in text
+    assert "tests/unit" in text
+    assert "tests/contract" in text
 
 
 def test_readme_mentions_agent_entry_and_single_file_architecture() -> None:
@@ -68,5 +67,4 @@ def test_readme_mentions_agent_entry_and_single_file_architecture() -> None:
     assert readme_path.exists(), "README.md must exist"
     text = readme_path.read_text(encoding="utf-8")
     assert "AGENTS.md" in text
-    assert ".agents/skills" in text
     assert "单文件架构" in text

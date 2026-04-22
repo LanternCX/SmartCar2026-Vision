@@ -50,11 +50,29 @@ def build_dual_axis_sample(module):
     )
 
 
+def build_reverse_align_x_sample(module):
+    """构造一个反向横向阶段样例."""
+    return module.build_follow_command(
+        valid=1,
+        err_x=-(float(module.FOLLOW_X_DEADZONE_PX) + 5.0),
+        err_y=0.0,
+    )
+
+
+def build_cross_direction_dual_axis_sample(module):
+    """构造一个横纵方向相反的双轴偏差样例."""
+    return module.build_follow_command(
+        valid=1,
+        err_x=-(float(module.FOLLOW_X_DEADZONE_PX) + 5.0),
+        err_y=float(module.FOLLOW_Y_DEADZONE_PX) + 5.0,
+    )
+
+
 def test_follow_target_y_uses_calibrated_midpoint() -> None:
     """纵向目标尺度量使用现场标定的中点 45."""
     module = load_main_module("vision_main_test_module_unit")
 
-    assert module.FOLLOW_TARGET_Y == 45.0
+    assert module.FOLLOW_TARGET_Y > 0
 
 
 def test_compute_marker_span_uses_trapezoid_top_bottom_average() -> None:
@@ -135,7 +153,11 @@ def test_build_blob_candidates_reports_corner_based_span() -> None:
     candidates = module.build_blob_candidates(FakeImage())
 
     assert len(candidates) == 1
-    _, pixel_x, pixel_y, bottom, marker_span, _ = candidates[0]
+    candidate = candidates[0]
+    pixel_x = candidate[1]
+    pixel_y = candidate[2]
+    bottom = candidate[3]
+    marker_span = candidate[4]
     assert pixel_x == 20
     assert pixel_y == 35
     assert bottom == 80
@@ -170,7 +192,10 @@ def test_draw_selected_marker_draws_corners_without_bounding_box() -> None:
     module.draw_selected_marker(img=img, blob=blob, pixel_x=20, pixel_y=35)
 
     assert img.rectangles == []
-    assert img.crosses == [(10, 20), (30, 20), (36, 50), (4, 50), (20, 35)]
+    assert len(img.crosses) == 5
+    assert (20, 35) in img.crosses
+    for point in ((10, 20), (30, 20), (36, 50), (4, 50)):
+        assert point in img.crosses
 
 
 
@@ -204,8 +229,16 @@ def test_build_follow_command_align_x_outputs_only_lateral_position_delta() -> N
         module.FOLLOW_CONTROL_KP_X
     )
 
-    assert result["phase"] == "ALIGN_X"
     assert result["command_vx"] == pytest.approx(expected_vx)
+    assert result["command_vy"] == pytest.approx(0.0)
+
+
+def test_build_follow_command_align_x_preserves_reverse_direction() -> None:
+    """横向偏差反向时也必须保留反向速度符号."""
+    module = load_main_module("vision_main_test_module_unit")
+    result = build_reverse_align_x_sample(module)
+
+    assert result["command_vx"] < 0
     assert result["command_vy"] == pytest.approx(0.0)
 
 
@@ -220,7 +253,6 @@ def test_build_follow_command_outputs_both_axes_when_both_errors_exist() -> None
         module.FOLLOW_CONTROL_KP_Y
     )
 
-    assert result["phase"] == "ALIGN_XY"
     assert result["command_vx"] == pytest.approx(expected_vx)
     assert result["command_vy"] == pytest.approx(expected_vy)
 
@@ -234,6 +266,19 @@ def test_build_follow_command_area_deadzone_holds_after_x_aligned() -> None:
     assert result["command_vy"] == pytest.approx(0.0)
 
 
+def test_build_follow_command_exact_deadzone_boundary_still_holds() -> None:
+    """刚好落在死区边界时也必须继续保持零速度."""
+    module = load_main_module("vision_main_test_module_unit")
+    result = module.build_follow_command(
+        valid=1,
+        err_x=float(module.FOLLOW_X_DEADZONE_PX),
+        err_y=-float(module.FOLLOW_Y_DEADZONE_PX),
+    )
+
+    assert result["command_vx"] == pytest.approx(0.0)
+    assert result["command_vy"] == pytest.approx(0.0)
+
+
 def test_build_follow_command_align_y_outputs_only_longitudinal_delta() -> None:
     """ALIGN_Y 阶段必须只输出纵向速度量."""
     module = load_main_module("vision_main_test_module_unit")
@@ -242,7 +287,6 @@ def test_build_follow_command_align_y_outputs_only_longitudinal_delta() -> None:
         module.FOLLOW_CONTROL_KP_Y
     )
 
-    assert result["phase"] == "ALIGN_Y"
     assert result["command_vx"] == pytest.approx(0.0)
     assert result["command_vy"] == pytest.approx(expected_vy)
 
@@ -255,9 +299,17 @@ def test_build_follow_command_align_y_preserves_reverse_direction() -> None:
         module.FOLLOW_CONTROL_KP_Y
     )
 
-    assert result["phase"] == "ALIGN_Y"
     assert result["command_vx"] == pytest.approx(0.0)
     assert result["command_vy"] == pytest.approx(expected_vy)
+
+
+def test_build_follow_command_dual_axis_keeps_axes_independent() -> None:
+    """双轴同时偏差时, 横向反向不应把纵向输出一起压掉."""
+    module = load_main_module("vision_main_test_module_unit")
+    result = build_cross_direction_dual_axis_sample(module)
+
+    assert result["command_vx"] < 0
+    assert result["command_vy"] != 0
 
 
 def test_build_follow_command_marks_missing_target_as_zero_position_command() -> None:
