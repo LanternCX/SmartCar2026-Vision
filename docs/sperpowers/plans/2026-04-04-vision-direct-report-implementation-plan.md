@@ -1,5 +1,10 @@
 # 视觉直接回传实现计划
 
+## 执行状态
+
+- 状态: Archive
+
+
 > **供代理执行时使用：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 逐任务执行本计划，步骤统一使用复选框 `- [ ]` 跟踪。
 
 **Goal:** 先锁死“持续直接回传最新目标框，且仅允许启动阶段可选一次 `reset=1`”这一实现边界，再按需修正文档、测试与运行时代码；当前执行结果可能无需修改 `main.py`。

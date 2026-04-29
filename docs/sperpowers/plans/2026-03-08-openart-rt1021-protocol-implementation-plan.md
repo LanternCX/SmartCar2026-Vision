@@ -1,5 +1,10 @@
 # OpenArt 与 RT1021 协议文档 Implementation Plan
 
+## 执行状态
+
+- 状态: Archive
+
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 重写 `Protocol.md`,将当前 RT1021 遥控协议与 OpenArt/RT1021 视觉通信协议拆分清楚,供 vision 端重构直接参考。

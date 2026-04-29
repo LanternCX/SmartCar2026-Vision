@@ -200,28 +200,30 @@ def test_draw_selected_marker_draws_corners_without_bounding_box() -> None:
 
 
 
-def test_format_vision_frame_outputs_position_request_with_compact_numbers() -> None:
-    """速度式主线必须输出紧凑的 vx/vy 文本."""
+def test_format_vision_frame_outputs_short_velocity_packet_with_compact_numbers() -> None:
+    """视觉主线必须输出紧凑的 v 短包文本."""
     module = load_main_module("vision_main_test_module_unit")
     frame = module.format_vision_frame(vx=1.2, vy=0.0)
-    assert frame == "vx=1.2,vy=0"
+    assert frame == "v,1.2,0"
+    assert frame.split(",") == ["v", "1.2", "0"]
+    assert "=" not in frame
 
 
-def test_format_vision_frame_outputs_zero_position_request() -> None:
-    """无目标或保持阶段时也必须输出零速度请求."""
+def test_format_vision_frame_outputs_zero_short_velocity_packet() -> None:
+    """无目标或保持阶段时也必须输出零速度短包."""
     module = load_main_module("vision_main_test_module_unit")
     frame = module.format_vision_frame(vx=0, vy=0)
-    assert frame == "vx=0,vy=0"
+    assert frame == "v,0,0"
 
 
-def test_format_vision_frame_preserves_nonzero_dy_in_position_request() -> None:
-    """纵向速度非零时也必须输出完整的 vx/vy 文本格式."""
+def test_format_vision_frame_preserves_nonzero_vy_in_short_velocity_packet() -> None:
+    """纵向速度非零时也必须输出完整的 v 短包文本."""
     module = load_main_module("vision_main_test_module_unit")
     frame = module.format_vision_frame(vx=0, vy=0.6)
-    assert frame == "vx=0,vy=0.6"
+    assert frame == "v,0,0.6"
 
 
-def test_build_follow_command_align_x_outputs_only_lateral_position_delta() -> None:
+def test_build_follow_command_align_x_outputs_only_lateral_velocity_delta() -> None:
     """横向未对齐时只能输出横向速度量."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_align_x_sample(module)
@@ -279,7 +281,7 @@ def test_build_follow_command_exact_deadzone_boundary_still_holds() -> None:
     assert result["command_vy"] == pytest.approx(0.0)
 
 
-def test_build_follow_command_align_y_outputs_only_longitudinal_delta() -> None:
+def test_build_follow_command_align_y_outputs_only_longitudinal_velocity_delta() -> None:
     """ALIGN_Y 阶段必须只输出纵向速度量."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_align_y_sample(module)
@@ -312,10 +314,68 @@ def test_build_follow_command_dual_axis_keeps_axes_independent() -> None:
     assert result["command_vy"] != 0
 
 
-def test_build_follow_command_marks_missing_target_as_zero_position_command() -> None:
+def test_build_follow_command_marks_missing_target_as_zero_velocity_command() -> None:
     """没有有效目标时必须输出零速度命令."""
     module = load_main_module("vision_main_test_module_unit")
     result = module.build_follow_command(valid=0, err_x=30, err_y=40)
 
     assert result["command_vx"] == pytest.approx(0.0)
     assert result["command_vy"] == pytest.approx(0.0)
+
+def test_build_follow_command_keeps_phase_names_for_behavior_paths() -> None:
+    """阶段名必须继续标识无目标、保持、单轴和双轴路径."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    assert module.build_follow_command(valid=0, err_x=30, err_y=40)["phase"] == "MARKER_MISSING"
+    assert build_hold_sample(module)["phase"] == "CENTER_HOLD"
+    assert build_align_x_sample(module)["phase"] == "ALIGN_X"
+    assert build_align_y_sample(module)["phase"] == "ALIGN_Y"
+    assert build_dual_axis_sample(module)["phase"] == "ALIGN_XY"
+
+
+def test_build_follow_command_keeps_longitudinal_velocity_limit() -> None:
+    """纵向速度修正量必须继续受单帧上限约束."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    forward = module.build_follow_command(valid=1, err_x=0, err_y=1000)
+    backward = module.build_follow_command(valid=1, err_x=0, err_y=-1000)
+
+    assert forward["phase"] == "ALIGN_Y"
+    assert backward["phase"] == "ALIGN_Y"
+    assert forward["command_vy"] == pytest.approx(-float(module.FOLLOW_CONTROL_MAX_Y))
+    assert backward["command_vy"] == pytest.approx(float(module.FOLLOW_CONTROL_MAX_Y))
+
+
+def test_follow_command_values_flow_into_short_packet_without_value_change() -> None:
+    """控制结果进入短包时只能改变协议外壳, 不能改变速度数值."""
+    module = load_main_module("vision_main_test_module_unit")
+    result = build_dual_axis_sample(module)
+
+    frame = module.format_vision_frame(
+        vx=result["command_vx"],
+        vy=result["command_vy"],
+    )
+
+    assert result["command_vx"] == pytest.approx(0.64)
+    assert result["command_vy"] == pytest.approx(-1.35)
+    assert frame == "v,0.64,-1.35"
+
+
+def test_write_line_appends_crlf_to_short_packet(monkeypatch) -> None:
+    """串口发送必须继续使用 CRLF 作为单行结束符."""
+    module = load_main_module("vision_main_test_module_unit")
+    monkeypatch.setattr(module, "WRITE_DELAY_S", 0)
+
+    class FakeUART:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, data):
+            self.writes.append(data)
+            return len(data)
+
+    uart = FakeUART()
+
+    module.write_line(uart, module.format_vision_frame(vx=0, vy=0))
+
+    assert uart.writes == ["v,0,0\r\n"]

@@ -1,5 +1,10 @@
 # OpenART Position Command Alignment Implementation Plan
 
+## 执行状态
+
+- 状态: Archive
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将 `main.py` 的逐帧串口输出从旧速度请求收口为 `dx=<dx>,dy=<dy>,lock=0` 位置式命令,并同步测试与文档口径。

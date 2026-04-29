@@ -1,5 +1,10 @@
 # Vision BBox Reporting Implementation Plan
 
+## 执行状态
+
+- 状态: Archive
+
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 让 OpenArt 端从发送 `x,y` 单点观测切换为发送 `left,top,right,bottom` 完整识别框。

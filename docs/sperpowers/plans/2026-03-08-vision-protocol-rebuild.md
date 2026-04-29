@@ -1,5 +1,10 @@
 # Vision Protocol Rebuild Implementation Plan
 
+## 执行状态
+
+- 状态: Archive
+
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 将 OpenArt 端重构为只负责检测、选目标并持续上报 `x,y` 像素观测。
