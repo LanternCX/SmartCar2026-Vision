@@ -1,7 +1,7 @@
 """! @file main.py
 @brief OpenART 跟随请求生成主程序.
 @details 该程序负责图像采集、目标检测、阶段判断与速度量生成,
-         并直接输出 `vx=...,vy=...` 文本.
+         并直接输出 `v,<vx>,<vy>` 短包文本.
 """
 
 import time
@@ -23,17 +23,17 @@ UART_ID = 2
 UART_BAUDRATE = 115200
 # 固定曝光时间, 单位为微秒
 EXP_TIME_US = 300
-# 主车当前使用的横向死区, 单位为像素
+# 跟随控制使用的横向死区, 单位为像素
 FOLLOW_X_DEADZONE_PX = 15.0
-# 主车当前使用的纵向目标尺度量, 单位为像素
+# 跟随控制使用的纵向目标尺度量, 单位为像素
 FOLLOW_TARGET_Y = 45.0
-# 主车当前使用的纵向死区, 单位为像素
+# 跟随控制使用的纵向死区, 单位为像素
 FOLLOW_Y_DEADZONE_PX = 8.0
-# 主车当前使用的横向速度量增益
-FOLLOW_CONTROL_KP_X = 0.1
-# 主车当前使用的纵向速度量增益
+# 跟随控制使用的横向速度修正量增益
+FOLLOW_CONTROL_KP_X = 0.04
+# 跟随控制使用的纵向速度修正量增益
 FOLLOW_CONTROL_KP_Y = -0.15
-# 纵向速度量上限, 避免面积抖动时前后动作过猛
+# 纵向速度修正量上限, 避免尺度抖动时前后动作过猛
 FOLLOW_CONTROL_MAX_Y = 5
 # 串口写入前后的保护延时, 单位为秒
 WRITE_DELAY_S = 0.002
@@ -43,11 +43,11 @@ TASKS = (("red", (0, 100, 23, 127, -26, 127)),)
 
 
 def format_vision_frame(vx, vy):
-    """! @brief 将当前速度量编码为最小视觉文本帧.
+    """! @brief 将当前速度修正量编码为 v 短包文本帧.
 
-    @param vx 发给底盘的横向速度量.
-    @param vy 发给底盘的纵向速度量.
-    @return 当前主线单行速度请求文本.
+    @param vx 车体系 x 方向视觉速度修正量.
+    @param vy 车体系 y 方向视觉速度修正量.
+    @return 当前主线单行速度短包文本.
     """
     x_value = float(vx)
     y_value = float(vy)
@@ -61,16 +61,16 @@ def format_vision_frame(vx, vy):
         x_text = "0"
     if not y_text or y_text == "-0":
         y_text = "0"
-    return "vx=%s,vy=%s" % (x_text, y_text)
+    return "v,%s,%s" % (x_text, y_text)
 
 
 def build_follow_command(valid, err_x, err_y):
-    """! @brief 在 ART 端完成跟随阶段判断与速度量生成.
+    """! @brief 在 ART 端完成跟随阶段判断与速度修正量生成.
 
     @param valid 当前帧是否存在有效目标.
     @param err_x 目标中心相对画面中心的横向像素差值.
-    @param err_y 目标中心相对画面中心的纵向像素差值.
-    @return 包含阶段名和速度量的字典.
+    @param err_y 目标尺度量相对目标尺度量的纵向差值.
+    @return 包含阶段名和速度修正量的字典.
     """
     if int(valid) != 1:
         return {
@@ -157,7 +157,7 @@ def normalize_bbox_for_protocol(left, top, right, bottom, img_height):
 
 
 def compute_lateral_error(blob_cx, cx_screen):
-    """! @brief 计算当前速度主线使用的横向偏差.
+    """! @brief 计算跟随控制使用的横向偏差.
 
     @param blob_cx 当前目标横向中心像素坐标.
     @param cx_screen 画面横向中心像素坐标.
@@ -199,7 +199,7 @@ def compute_marker_span(corners):
 
 
 def compute_vertical_error(marker_span, target_span):
-    """! @brief 计算当前速度主线使用的纵向偏差.
+    """! @brief 计算跟随控制使用的纵向偏差.
 
     @param marker_span 当前目标的尺度量.
     @param target_span 纵向目标尺度量.
@@ -328,13 +328,13 @@ def init_sensor():
 
 
 def run():
-    """! @brief 持续检测目标并逐帧发送速度请求.
+    """! @brief 持续检测目标并逐帧发送速度短包.
 
     @details 执行流程为: 初始化串口与摄像头 -> 持续采集图像 -> 提取颜色候选目标
-             -> 选择最优目标 -> 计算像素偏差 -> 在 ART 端完成阶段判断和速度量生成
-             -> 每抓一帧发送一帧速度请求.
+             -> 选择最优目标 -> 计算像素偏差 -> 在 ART 端完成阶段判断和速度修正量生成
+             -> 每抓一帧发送一帧速度短包.
     """
-    # 先完成串口和摄像头初始化,后续主循环逐帧输出速度请求
+    # 先完成串口和摄像头初始化, 后续主循环逐帧输出速度短包
     uart = init_uart()
     cx_screen = init_sensor()
 
