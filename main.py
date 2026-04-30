@@ -69,7 +69,7 @@ def build_follow_command(valid, err_x, err_y):
 
     @param valid 当前帧是否存在有效目标.
     @param err_x 目标中心相对画面中心的横向像素差值.
-    @param err_y 目标中心相对画面中心的纵向像素差值.
+    @param err_y 目标尺度量相对目标尺度量的纵向差值.
     @return 包含阶段名和速度修正量的字典.
     """
     if int(valid) != 1:
