@@ -93,11 +93,51 @@ def test_main_deadzone_hold_formats_formal_zero_velocity_frame() -> None:
 
 
 
-def test_master_formats_observation_and_reliable_event_frames() -> None:
-    """! @brief OpenART Vision master 使用观测包和可靠事件包"""
+def test_master_formats_velocity_and_reliable_event_frames() -> None:
+    """! @brief OpenART Vision master 使用速度流包和可靠事件包"""
 
     module = load_role_main_module("master", "vision_master_contract_module")
 
-    assert module.format_observation_frame(7, 1.0, -0.5, 300) == "o,7,1,-0.5,300"
+    assert module.format_search_velocity_frame(1.0, -0.5) == "v,1,-0.5"
     assert module.format_ack_frame(12) == "a,12"
     assert module.format_event_frame(30, 7, module.EVENT_TARGET_FOUND, 300) == "r,30,7,6,300"
+
+
+def test_master_velocity_frame_keeps_only_vx_and_vy_fields() -> None:
+    """! @brief 主车搜索速度流只携带 v 和两个速度字段"""
+
+    module = load_role_main_module("master", "vision_master_contract_module")
+    frame = module.format_search_velocity_frame(1.25, -0.5)
+
+    assert frame.split(",") == ["v", "1.25", "-0.5"]
+    assert "omega" not in frame
+    assert "phase" not in frame
+    assert "context" not in frame
+
+
+def test_master_missing_target_velocity_frame_is_nonzero_search_speed() -> None:
+    """! @brief 主车无目标时经观测路径输出非零搜索速度短包"""
+
+    module = load_role_main_module("master", "vision_master_contract_module")
+
+    class EmptyImage:
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return []
+
+    hook = module.MasterVisionHook()
+    hook.handle_control_line("s,12,7,1,1,1")
+
+    observation, best_blob = module.build_observation_from_image(
+        hook, EmptyImage(), 320, 240
+    )
+    vx, vy = module.build_search_velocity_from_observation(observation)
+    frame = module.format_search_velocity_frame(vx, vy)
+
+    assert best_blob is None
+    assert frame.split(",")[0] == "v"
+    assert len(frame.split(",")) == 3
+    assert frame.startswith("v,")
+    assert not frame.startswith("o,")
+    assert "omega" not in frame
+    assert "context" not in frame
+    assert frame != "v,0,0"

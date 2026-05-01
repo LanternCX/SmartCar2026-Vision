@@ -1,6 +1,6 @@
 """! @file main.py
 @brief OpenART Vision master 主车物体搜索视觉入口
-@details 负责接收 RT1021 视觉上下文, 输出物体观测, 并在 hook 条件满足时可靠回报事件
+@details 负责接收 RT1021 视觉上下文, 输出搜索速度, 并在 hook 条件满足时可靠回报事件
 """
 
 import time
@@ -16,22 +16,54 @@ except ImportError:
     UART = None
 
 
+# OpenART 与 RT1021 通信使用的串口编号。
 UART_ID = 2
+# 串口波特率，需要与车端 UART6 保持一致。
 UART_BAUDRATE = 115200
+# 摄像头固定曝光时间，单位为微秒。
 EXP_TIME_US = 300
+# 可靠包发送前后的保护延时，单位为秒。
 RELIABLE_WRITE_DELAY_S = 0.001
+# TARGET_FOUND 未确认时的重复发送间隔，单位为毫秒。
 RELIABLE_RESEND_INTERVAL_MS = 100
+# 红色候选目标的最小面积，小于该值不会触发找到事件。
 OBJECT_MIN_AREA = 100.0
+# 目标中心允许偏离画面中线的最大横向像素误差。
 OBJECT_X_TOLERANCE_PX = 15.0
+# 目标中心允许偏离画面下三分之二点的最大纵向像素误差。
 OBJECT_Y_TOLERANCE_PX = 15.0
+# 连续满足面积与位置条件多少帧后确认找到目标。
 OBJECT_STABLE_FRAMES = 3
+# 主车搜索目标丢失时输出的配置横向速度。
+MASTER_MISSING_SEARCH_VX = 0.08
+# 主车搜索目标丢失时输出的配置纵向速度。
+MASTER_MISSING_SEARCH_VY = 0.0
+# 主车搜索横向速度 P 环增益。
+MASTER_SEARCH_KP_X = 0.02
+# 主车搜索纵向速度 P 环增益。
+MASTER_SEARCH_KP_Y = 0.02
+# 主车搜索横向误差死区, 单位为像素。
+MASTER_SEARCH_DEADZONE_X_PX = 15.0
+# 主车搜索纵向误差死区, 单位为像素。
+MASTER_SEARCH_DEADZONE_Y_PX = 8.0
+# 主车搜索横向速度限幅。
+MASTER_SEARCH_MAX_VX = 2.0
+# 主车搜索纵向速度限幅。
+MASTER_SEARCH_MAX_VY = 2.0
+# 车端协议中的主车搜索状态编号。
 STATE_SEARCH_OBJECT = 1
+# 车端协议中的物体目标编号。
 TARGET_OBJECT = 1
+# 车端下发的主车搜索 hook 配置编号。
 MASTER_SEARCH_HOOK_CONFIG_ID = 1
+# 车端协议中的目标找到事件编号。
 EVENT_TARGET_FOUND = 6
+# 可靠包序号的环形范围大小。
 SEQ_RING_SIZE = 256
+# 判断环形序号新旧关系使用的半环长度。
 SEQ_HALF_RING = 128
 
+# 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
 TASKS = (("red", (0, 100, 23, 127, -26, 127)),)
 
 
@@ -202,22 +234,15 @@ def format_ack_frame(reliable_seq):
     return "a,%d" % int(reliable_seq)
 
 
-def format_observation_frame(context_id, x, y, value):
-    """! @brief 格式化主车物体观测数据流帧
+def format_search_velocity_frame(vx, vy):
+    """! @brief 格式化主车搜索速度数据流帧
 
-    @param context_id 视觉上下文编号
-    @param x 物体中心相对画面中线的横向误差
-    @param y 物体中心相对画面下三分之二点的纵向误差
-    @param value 目标强度
-    @return 观测帧文本
+    @param vx 主车搜索横向速度控制量
+    @param vy 主车搜索纵向速度控制量
+    @return 速度帧文本
     """
 
-    return "o,%d,%s,%s,%s" % (
-        int(context_id),
-        compact_number(x),
-        compact_number(y),
-        compact_number(value),
-    )
+    return "v,%s,%s" % (compact_number(vx), compact_number(vy))
 
 
 def format_event_frame(reliable_seq, context_id, event, value):
@@ -378,6 +403,70 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     for corner_x, corner_y in get_marker_corners(blob):
         img.draw_cross(corner_x, corner_y)
     img.draw_cross(pixel_x, pixel_y)
+
+
+def _clamp(value, limit):
+    """! @brief 按对称上下限约束数值
+
+    @param value 原始数值
+    @param limit 绝对值上限
+    @return 限幅后的数值
+    """
+
+    value = float(value)
+    limit = abs(float(limit))
+    if value > limit:
+        return limit
+    if value < -limit:
+        return -limit
+    return value
+
+
+def _axis_p_velocity(error, deadzone, kp, limit):
+    """! @brief 生成单轴 P 控制速度
+
+    @param error 当前轴像素误差
+    @param deadzone 当前轴死区
+    @param kp 当前轴 P 环增益
+    @param limit 当前轴速度限幅
+    @return 当前轴速度控制量
+    """
+
+    error = float(error)
+    if abs(error) <= float(deadzone):
+        return 0.0
+    return _clamp(error * float(kp), limit)
+
+
+def build_search_velocity_from_error(err_x, err_y):
+    """! @brief 根据主车搜索目标点误差生成速度控制量
+
+    @param err_x 识别框中心相对目标点的横向误差
+    @param err_y 识别框中心相对目标点的纵向误差
+    @return vx, vy 速度控制量
+    """
+
+    return (
+        _axis_p_velocity(
+            err_x, MASTER_SEARCH_DEADZONE_X_PX, MASTER_SEARCH_KP_X, MASTER_SEARCH_MAX_VX
+        ),
+        _axis_p_velocity(
+            err_y, MASTER_SEARCH_DEADZONE_Y_PX, MASTER_SEARCH_KP_Y, MASTER_SEARCH_MAX_VY
+        ),
+    )
+
+
+def build_search_velocity_from_observation(observation):
+    """! @brief 根据主车物体观测生成搜索速度控制量
+
+    @param observation context_id, x, y, value 观测字段元组
+    @return vx, vy 速度控制量
+    """
+
+    _, x, y, value = observation
+    if float(value) <= 0.0:
+        return float(MASTER_MISSING_SEARCH_VX), float(MASTER_MISSING_SEARCH_VY)
+    return build_search_velocity_from_error(x, y)
 
 
 class MasterVisionHook:
@@ -739,7 +828,8 @@ def run():
                 pixel_x=int(float(x) + image_width / 2.0),
                 pixel_y=int(float(y) + image_height * 2.0 / 3.0),
             )
-        write_data_line(uart, format_observation_frame(context_id, x, y, value))
+        velocity = build_search_velocity_from_observation(observation)
+        write_data_line(uart, format_search_velocity_frame(*velocity))
         hook.accept_observation(observation)
         event_frame = hook.next_event_frame()
         if event_frame is not None:

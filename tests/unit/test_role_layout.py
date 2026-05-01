@@ -21,7 +21,8 @@ def test_role_main_modules_expose_role_protocol_api() -> None:
     master = load_role_main_module("master", "master_role_main_module")
 
     assert assistant.format_vision_frame(0, 0) == "v,0,0"
-    assert master.format_observation_frame(7, 0, 0, 0) == "o,7,0,0,0"
+    assert master.format_search_velocity_frame(0, 0) == "v,0,0"
+    assert not hasattr(master, "format_observation_frame")
 
 
 def test_role_build_scripts_copy_local_main_to_device_entry(tmp_path) -> None:
