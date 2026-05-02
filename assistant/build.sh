@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SOURCE="./main.py"
-TARGET_DIR="/Volumes/NO NAME"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="$SCRIPT_DIR/main.py"
+TARGET_DIR="${TARGET_DIR:-/Volumes/NO NAME}"
 
 if [ ! -f "$SOURCE" ]; then
   echo "未找到 $SOURCE" >&2

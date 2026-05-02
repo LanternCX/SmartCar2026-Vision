@@ -1,5 +1,5 @@
 """! @file main.py
-@brief OpenART 跟随请求生成主程序.
+@brief OpenART 辅车跟随请求生成主程序.
 @details 该程序负责图像采集、目标检测、阶段判断与速度量生成,
          并直接输出 `v,<vx>,<vy>` 短包文本.
 """
@@ -65,7 +65,7 @@ def format_vision_frame(vx, vy):
 
 
 def build_follow_command(valid, err_x, err_y):
-    """! @brief 在 ART 端完成跟随阶段判断与速度修正量生成.
+    """! @brief 在 ART 端完成辅车跟随阶段判断与速度修正量生成.
 
     @param valid 当前帧是否存在有效目标.
     @param err_x 目标中心相对画面中心的横向像素差值.

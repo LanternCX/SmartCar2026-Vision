@@ -1,12 +1,12 @@
 # SmartCar2026 - OpenART Vision
 
-这是一个为智能车竞赛配置的 OpenART 视觉项目，运行于 OpenART（MicroPython）环境。
+这是智能车竞赛 OpenART 视觉项目, 运行于 OpenART MicroPython 环境。
 
 ## 仓库定位
 
 本仓库作为 `../SmartCar2026-TransportCar` 的附属视觉仓库维护。
 
-本仓库只维护三类内容：
+本仓库维护三类内容:
 
 1. OpenART 视觉运行时代码。
 2. 视觉协议行为测试与回归测试。
@@ -16,65 +16,66 @@
 
 ## 开发边界
 
-- 运行时代码主入口固定为 `main.py`。
-- 不在本仓库维护独立 `.agents/skills` 体系。
-- 不在本仓库维护题面规则文档副本。
-- 文档、注释和规则入口通过 review 检查，不写硬约束测试。
-- 测试只覆盖运行时行为、协议行为和回归场景。
+- 运行时代码按角色维护在 `assistant/main.py` 与 `master/main.py`。
+- 每个角色目录独立维护面向 OpenART 设备部署的 `build.sh`。
+- 本仓库不维护独立 `.agents/skills` 体系。
+- 本仓库不维护题面规则文档副本。
+- 文档、注释和规则入口通过 review 检查。
+- 测试覆盖运行时行为、协议行为和回归场景。
 
-## 项目说明
+## 角色职责
 
-本项目是 2026 智能车蚂蚁搬家组的 OpenART 视觉侧代码，职责收敛为三件事：
+### OpenART Vision master
 
-1. 图像采集与目标识别。
-2. 在 OpenART 端完成跟随阶段判断。
-3. 生成并持续发送视觉速度修正短包。
+`master/main.py` 运行在主车 OpenART 上, 负责物体搜索视觉链路:
 
-视觉主链路由 OpenART 直接发送 `v,<vx>,<vy>`。
+- 接收 RT1021 下发的 hook 上下文 `s,<reliable_seq>,<context_id>,<state>,<target>,<arg>`。
+- 使用 `a,<reliable_seq>` 确认可靠同步包。
+- 基于候选目标识别框中心点计算搜索 P 环。
+- 输出主车搜索速度数据流 `v,<vx>,<vy>`。
+- `v` 数据流独立于 hook 上下文, 每帧直接根据色块识别结果输出。
+- `v` 数据流包不携带 `omega` 和阶段元信息。
+- 在 hook 条件满足时输出可靠事件 `r,<reliable_seq>,<context_id>,6,<value>`。
+- `arg=1` 表示主车物体搜索 hook 配置。
+- hook 判定使用物体中心相对画面中线的横向误差。
+- hook 判定使用物体中心相对画面下三分之二点的纵向误差。
+- hook 判定使用候选目标面积。
+- 主车搜索控制使用 `v` 数据流, 不依赖周期 `o` 观测包。
 
-## 开发环境
+### OpenART Vision assistant
 
-开发环境使用 VS Code + MicroPython 方案。
+`assistant/main.py` 运行在辅车 OpenART 上, 负责辅车跟随主车色标:
 
-1. **IDE**: Visual Studio Code
-2. **插件**: Pylance, Python
-3. **智能提示 (Stubs)**: 使用第三方 MicroPython stubs 获得代码补全和类型检查支持
+- 识别主车色标。
+- 在 OpenART 端完成角色内阶段判断。
+- 输出辅车视觉速度修正数据流 `v,<vx>,<vy>`。
+- `v` 数据流包不携带 `omega` 和阶段元信息。
 
-## 当前主线
+## 主车视觉发送规则
 
-### 1. 视觉识别
-
-当前主线基于色块识别（Color Blob Detection）完成目标检测与目标选择。
-
-- 当前跟随目标只保留 `red` 色块。
-- 横向控制输入来自目标中心相对画面中心的横向偏差。
-- 纵向控制输入来自目标尺度量相对目标尺度量的误差。
-
-### 2. 速度短包发送
-
-视觉端在主循环中逐帧发送速度数据流短包，协议格式为：
-
-```text
-v,<vx>,<vy>
-```
-
-- 发送方向: OpenART -> RT1021。
+- `master/main.py` 的 `v` 数据流包直接写出, 不执行发送前后延时。
+- `master/main.py` 的 `v` 数据流包不等待 hook 上下文建立。
+- `master/main.py` 的 `s/a/r` 可靠包按可靠发送规则写出, 发送前后各执行一次 1 ms 延时。
+- 未确认的 `r` 事件按低频节奏重复发送, 不随每帧图像重复写出。
 - 主通信串口: `UART(2)`。
 - RT1021 接收串口: `UART6`。
 - 默认波特率: `115200`。
-- 发送方式: 每抓一帧就发送当前结果，不等待历史结果处理完成。
-- `vx` 表示车体系 x 方向视觉速度修正量。
-- `vy` 表示车体系 y 方向视觉速度修正量。
-- `UART6` 视觉链路不发送 `omega`。
-- OpenART 直接承担跟随阶段判断和控制量生成。
-- 阶段名固定为 `MARKER_MISSING`、`CENTER_HOLD`、`ALIGN_X`、`ALIGN_Y`、`ALIGN_XY`。
-- `ALIGN_X` 阶段只输出横向速度修正量，`ALIGN_Y` 阶段只输出纵向速度修正量。
-- 无目标或保持阶段都发送 `v,0,0`。
 
-### 3. 责任边界
+## 角色部署
 
-- OpenART: 负责看见目标、选中目标、判断当前跟随阶段并生成 `vx` / `vy` 速度修正量。
-- RT1021: 负责消费并执行 OpenART 生成的视觉速度修正短包。
+每个角色目录提供独立构建脚本, 脚本会把本目录的 `main.py` 复制为设备根目录的 `main.py`。
+
+```bash
+./assistant/build.sh
+./master/build.sh
+```
+
+默认设备挂载目录为 `/Volumes/NO NAME`。需要指定目标目录时使用 `TARGET_DIR`:
+
+```bash
+TARGET_DIR=/path/to/device ./assistant/build.sh
+TARGET_DIR=/path/to/device ./master/build.sh
+```
 
 ## 验证命令
 
