@@ -27,11 +27,11 @@ RELIABLE_WRITE_DELAY_S = 0.001
 # TARGET_FOUND 未确认时的重复发送间隔，单位为毫秒。
 RELIABLE_RESEND_INTERVAL_MS = 100
 # 红色候选目标的最小面积，小于该值不会触发找到事件。
-OBJECT_MIN_AREA = 100.0
+OBJECT_MIN_AREA = 50.0
 # 目标中心允许偏离画面中线的最大横向像素误差。
-OBJECT_X_TOLERANCE_PX = 15.0
-# 目标中心允许偏离画面下三分之二点的最大纵向像素误差。
-OBJECT_Y_TOLERANCE_PX = 15.0
+OBJECT_X_TOLERANCE_PX = 8.0
+# 目标底边允许偏离图像底边的最大纵向像素误差。
+OBJECT_Y_TOLERANCE_PX = 8.0
 # 连续满足面积与位置条件多少帧后确认找到目标。
 OBJECT_STABLE_FRAMES = 3
 # 主车搜索目标丢失时输出的配置横向速度。
@@ -41,7 +41,7 @@ MASTER_MISSING_SEARCH_VY = 0.0
 # 主车搜索横向速度 P 环增益。
 MASTER_SEARCH_KP_X = 0.05
 # 主车搜索纵向速度 P 环增益。
-MASTER_SEARCH_KP_Y = -0.05
+MASTER_SEARCH_KP_Y = -0.15
 # 主车搜索横向误差死区, 单位为像素。
 MASTER_SEARCH_DEADZONE_X_PX = 15.0
 # 主车搜索纵向误差死区, 单位为像素。
@@ -64,7 +64,7 @@ SEQ_RING_SIZE = 256
 SEQ_HALF_RING = 128
 
 # 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
-TASKS = (("red", (0, 100, 22, 127, -9, 127)),)
+TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
 
 
 def compact_number(value):
@@ -327,6 +327,14 @@ def blob_rect_to_bbox(rect):
     return left, top, left + width, top + height
 
 
+def normalize_bbox_for_protocol(left, top, right, bottom, img_height):
+    """! @brief 将色块边界框转换到主车搜索使用的位置坐标"""
+
+    normalized_top = img_height - bottom
+    normalized_bottom = img_height - top
+    return left, normalized_top, right, normalized_bottom
+
+
 def blob_area(blob):
     """! @brief 读取候选物体面积
 
@@ -345,7 +353,7 @@ def build_blob_candidates(img):
     """! @brief 提取物体候选目标, 面积作为目标强度
 
     @param img 当前图像对象
-    @return 候选目标列表, 元素格式为 task_name, cx, cy, area, blob
+    @return 候选目标列表, 元素格式为 task_name, cx, bottom, area, blob
     """
 
     candidates = []
@@ -353,8 +361,15 @@ def build_blob_candidates(img):
         blobs = img.find_blobs(
             [threshold], pixels_threshold=200, area_threshold=200, merge=True
         )
+        if not blobs:
+            continue
+        img_height = img.height()
         for blob in blobs:
-            candidates.append((task_name, blob.cx(), blob.cy(), blob_area(blob), blob))
+            left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+            _, _, _, bottom = normalize_bbox_for_protocol(
+                left, top, right, bottom, img_height
+            )
+            candidates.append((task_name, blob.cx(), bottom, blob_area(blob), blob))
     return candidates
 
 
@@ -363,7 +378,7 @@ def choose_best_candidate(candidates, target_x, target_y):
 
     @param candidates 候选目标列表
     @param target_x hook 目标点 x 坐标
-    @param target_y hook 目标点 y 坐标
+    @param target_y hook 目标底边 y 坐标
     @return 被选中的候选目标
     """
 
@@ -375,18 +390,12 @@ def choose_best_candidate(candidates, target_x, target_y):
 
 
 def get_marker_corners(blob):
-    """! @brief 返回调试绘制使用的候选目标角点
+    """! @brief 返回调试绘制使用的色块矩形角点
 
     @param blob 候选色块对象
-    @return 候选目标角点序列
+    @return 色块矩形四个角点
     """
 
-    min_corners = getattr(blob, "min_corners", None)
-    if min_corners is not None:
-        return tuple(min_corners())
-    corners = getattr(blob, "corners", None)
-    if corners is not None:
-        return tuple(corners())
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     return ((left, top), (right, top), (right, bottom), (left, bottom))
 
@@ -397,7 +406,7 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     @param img 当前图像对象
     @param blob 被选中的候选色块对象
     @param pixel_x 目标中心 x 坐标
-    @param pixel_y 目标中心 y 坐标
+    @param pixel_y 目标标记 y 坐标
     """
 
     for corner_x, corner_y in get_marker_corners(blob):
@@ -438,11 +447,26 @@ def _axis_p_velocity(error, deadzone, kp, limit):
     return _clamp(error * float(kp), limit)
 
 
-def build_search_velocity_from_error(err_x, err_y):
+def _build_search_y_velocity(err_y, image_height):
+    """! @brief 根据图像高度归一化纵向底边误差并生成速度"""
+
+    err_y = float(err_y)
+    if abs(err_y) <= float(MASTER_SEARCH_DEADZONE_Y_PX):
+        return 0.0
+    scaled_error = err_y * (
+        float(MASTER_SEARCH_MAX_VY)
+        / abs(float(MASTER_SEARCH_KP_Y))
+        / float(image_height)
+    )
+    return _clamp(scaled_error * float(MASTER_SEARCH_KP_Y), MASTER_SEARCH_MAX_VY)
+
+
+def build_search_velocity_from_error(err_x, err_y, image_height):
     """! @brief 根据主车搜索目标点误差生成速度控制量
 
     @param err_x 识别框中心相对目标点的横向误差
     @param err_y 识别框中心相对目标点的纵向误差
+    @param image_height 图像高度
     @return vx, vy 速度控制量
     """
 
@@ -450,23 +474,22 @@ def build_search_velocity_from_error(err_x, err_y):
         _axis_p_velocity(
             err_x, MASTER_SEARCH_DEADZONE_X_PX, MASTER_SEARCH_KP_X, MASTER_SEARCH_MAX_VX
         ),
-        _axis_p_velocity(
-            err_y, MASTER_SEARCH_DEADZONE_Y_PX, MASTER_SEARCH_KP_Y, MASTER_SEARCH_MAX_VY
-        ),
+        _build_search_y_velocity(err_y, image_height),
     )
 
 
-def build_search_velocity_from_observation(observation):
+def build_search_velocity_from_observation(observation, image_height):
     """! @brief 根据主车物体观测生成搜索速度控制量
 
     @param observation context_id, x, y, value 观测字段元组
+    @param image_height 图像高度
     @return vx, vy 速度控制量
     """
 
     _, x, y, value = observation
     if float(value) <= 0.0:
         return float(MASTER_MISSING_SEARCH_VX), float(MASTER_MISSING_SEARCH_VY)
-    return build_search_velocity_from_error(x, y)
+    return build_search_velocity_from_error(x, y, image_height)
 
 
 class MasterVisionHook:
@@ -579,13 +602,13 @@ class MasterVisionHook:
             self._pending_event_last_sent_ms = None
 
     def build_observation(
-        self, valid, center_x, center_y, area, image_width, image_height
+        self, valid, center_x, bottom_y, area, image_width, image_height
     ):
-        """! @brief 根据物体中心和面积生成观测字段
+        """! @brief 根据物体中心、底边和面积生成观测字段
 
         @param valid 当前帧是否存在有效目标
         @param center_x 目标中心 x 坐标
-        @param center_y 目标中心 y 坐标
+        @param bottom_y 目标底边 y 坐标
         @param area 目标面积
         @param image_width 图像宽度
         @param image_height 图像高度
@@ -598,11 +621,11 @@ class MasterVisionHook:
         if int(valid) != 1:
             return context_id, 0.0, 0.0, 0.0
         target_x = float(image_width) / 2.0
-        target_y = float(image_height) * 2.0 / 3.0
+        target_y = float(image_height)
         return (
             context_id,
             float(center_x) - target_x,
-            float(center_y) - target_y,
+            float(bottom_y) - target_y,
             float(area),
         )
 
@@ -790,12 +813,12 @@ def build_observation_from_image(hook, img, image_width, image_height):
     if not candidates:
         return hook.build_observation(0, 0, 0, 0, image_width, image_height), None
     target_x = float(image_width) / 2.0
-    target_y = float(image_height) * 2.0 / 3.0
-    _, pixel_x, pixel_y, area, best_blob = choose_best_candidate(
+    target_y = float(image_height)
+    _, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
         candidates, target_x, target_y
     )
     return (
-        hook.build_observation(1, pixel_x, pixel_y, area, image_width, image_height),
+        hook.build_observation(1, pixel_x, bottom_y, area, image_width, image_height),
         best_blob,
     )
 
@@ -819,9 +842,9 @@ def process_search_frame(uart, hook, img, image_width, image_height):
             img=img,
             blob=best_blob,
             pixel_x=int(float(x) + image_width / 2.0),
-            pixel_y=int(float(y) + image_height * 2.0 / 3.0),
+            pixel_y=best_blob.cy(),
         )
-    velocity = build_search_velocity_from_observation(observation)
+    velocity = build_search_velocity_from_observation(observation, image_height)
     write_data_line(uart, format_search_velocity_frame(*velocity))
     hook.accept_observation(observation)
     event_frame = hook.next_event_frame()

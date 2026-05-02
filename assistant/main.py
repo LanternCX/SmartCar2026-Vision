@@ -24,7 +24,7 @@ UART_BAUDRATE = 115200
 # 固定曝光时间, 单位为微秒
 EXP_TIME_US = 300
 # 跟随控制使用的横向死区, 单位为像素
-FOLLOW_X_DEADZONE_PX = 15.0
+FOLLOW_X_DEADZONE_PX = 5.0
 # 跟随控制使用的纵向目标尺度量, 单位为像素
 FOLLOW_TARGET_Y = 45.0
 # 跟随控制使用的纵向死区, 单位为像素
@@ -32,14 +32,14 @@ FOLLOW_Y_DEADZONE_PX = 8.0
 # 跟随控制使用的横向速度修正量增益
 FOLLOW_CONTROL_KP_X = 0.04
 # 跟随控制使用的纵向速度修正量增益
-FOLLOW_CONTROL_KP_Y = -0.15
+FOLLOW_CONTROL_KP_Y = -0.10
 # 纵向速度修正量上限, 避免尺度抖动时前后动作过猛
 FOLLOW_CONTROL_MAX_Y = 5
 # 串口写入前后的保护延时, 单位为秒
 WRITE_DELAY_S = 0.002
 
 # 参与检测的任务集合, 元素格式为 `(名称, 阈值)`
-TASKS = (("red", (0, 100, 23, 127, -26, 127)),)
+TASKS = (("red", (24, 100, 19, 127, 38, 127)),)
 
 
 def format_vision_frame(vx, vy):
@@ -380,7 +380,6 @@ def run():
                 vy=follow_command["command_vy"],
             ),
         )
-
 
 if __name__ == "__main__":
     run()

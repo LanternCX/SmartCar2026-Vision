@@ -130,7 +130,7 @@ def test_master_missing_target_velocity_frame_uses_configured_search_speed() -> 
     observation, best_blob = module.build_observation_from_image(
         hook, EmptyImage(), 320, 240
     )
-    vx, vy = module.build_search_velocity_from_observation(observation)
+    vx, vy = module.build_search_velocity_from_observation(observation, 240)
     frame = module.format_search_velocity_frame(vx, vy)
 
     assert best_blob is None

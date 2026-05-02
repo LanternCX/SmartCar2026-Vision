@@ -157,9 +157,9 @@ def test_build_blob_candidates_reports_corner_based_span() -> None:
     pixel_x = candidate[1]
     pixel_y = candidate[2]
     bottom = candidate[3]
-    marker_span = candidate[4]
     assert pixel_x == 20
     assert pixel_y == 35
+    marker_span = candidate[4]
     assert bottom == 80
     assert marker_span == pytest.approx(26.0)
 
@@ -356,9 +356,9 @@ def test_follow_command_values_flow_into_short_packet_without_value_change() -> 
         vy=result["command_vy"],
     )
 
-    assert result["command_vx"] == pytest.approx(0.64)
-    assert result["command_vy"] == pytest.approx(-1.35)
-    assert frame == "v,0.64,-1.35"
+    assert result["command_vx"] == pytest.approx(0.24)
+    assert result["command_vy"] == pytest.approx(-0.9)
+    assert frame == "v,0.24,-0.9"
 
 
 def test_write_line_appends_crlf_to_short_packet(monkeypatch) -> None:
