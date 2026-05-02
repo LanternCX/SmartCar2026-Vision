@@ -406,7 +406,7 @@ def test_master_search_velocity_uses_observation_entry_only() -> None:
 
 
 def test_master_missing_target_outputs_configured_search_velocity() -> None:
-    """! @brief 无目标时主车搜索通过观测路径输出明确的非零搜索速度"""
+    """! @brief 无目标时主车搜索通过观测路径输出配置搜索速度"""
 
     module = load_master()
 
@@ -424,8 +424,10 @@ def test_master_missing_target_outputs_configured_search_velocity() -> None:
 
     assert best_blob is None
     assert observation == (7, 0.0, 0.0, 0.0)
-    assert velocity == (0.08, 0.0)
-    assert velocity != (0.0, 0.0)
+    assert velocity == (
+        module.MASTER_MISSING_SEARCH_VX,
+        module.MASTER_MISSING_SEARCH_VY,
+    )
 
 
 def test_master_target_center_generates_p_search_velocity() -> None:
@@ -502,8 +504,19 @@ def test_master_search_velocity_clamps_vx_and_vy() -> None:
     positive = module.build_search_velocity_from_observation((7, 999.0, 999.0, 300.0))
     negative = module.build_search_velocity_from_observation((7, -999.0, -999.0, 300.0))
 
-    assert positive == (module.MASTER_SEARCH_MAX_VX, module.MASTER_SEARCH_MAX_VY)
-    assert negative == (-module.MASTER_SEARCH_MAX_VX, -module.MASTER_SEARCH_MAX_VY)
+    expected_positive_vx = (
+        module.MASTER_SEARCH_MAX_VX
+        if module.MASTER_SEARCH_KP_X > 0
+        else -module.MASTER_SEARCH_MAX_VX
+    )
+    expected_positive_vy = (
+        module.MASTER_SEARCH_MAX_VY
+        if module.MASTER_SEARCH_KP_Y > 0
+        else -module.MASTER_SEARCH_MAX_VY
+    )
+
+    assert positive == (expected_positive_vx, expected_positive_vy)
+    assert negative == (-expected_positive_vx, -expected_positive_vy)
 
 
 def test_master_target_found_uses_bbox_center_error_not_marker_span() -> None:
@@ -557,3 +570,42 @@ def test_master_search_control_does_not_require_marker_span_or_min_corners() -> 
 
     assert best_blob is not None
     assert velocity == (0.0, 0.0)
+
+
+def test_master_search_frame_outputs_velocity_without_hook_context() -> None:
+    """! @brief 主车速度流不依赖 hook 上下文, 直接按色块中心 x/y 输出"""
+
+    module = load_master()
+
+    class FakeBlob:
+        def rect(self):
+            return (190, 150, 20, 20)
+
+        def cx(self):
+            return 200
+
+        def cy(self):
+            return 160
+
+        def area(self):
+            return 500
+
+    class FakeImage:
+        def __init__(self):
+            self.crosses = []
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [FakeBlob()]
+
+        def draw_cross(self, x, y):
+            self.crosses.append((x, y))
+
+    uart = FakeUART()
+    hook = module.MasterVisionHook()
+    img = FakeImage()
+
+    module.process_search_frame(uart, hook, img, 320, 240)
+
+    assert uart.writes == ["v,2,0\r\n"]
+    assert img.crosses[-1] == (200, 160)
+    assert hook.next_event_frame() is None

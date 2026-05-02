@@ -115,8 +115,8 @@ def test_master_velocity_frame_keeps_only_vx_and_vy_fields() -> None:
     assert "context" not in frame
 
 
-def test_master_missing_target_velocity_frame_is_nonzero_search_speed() -> None:
-    """! @brief 主车无目标时经观测路径输出非零搜索速度短包"""
+def test_master_missing_target_velocity_frame_uses_configured_search_speed() -> None:
+    """! @brief 主车无目标时经观测路径输出配置搜索速度短包"""
 
     module = load_role_main_module("master", "vision_master_contract_module")
 
@@ -140,4 +140,7 @@ def test_master_missing_target_velocity_frame_is_nonzero_search_speed() -> None:
     assert not frame.startswith("o,")
     assert "omega" not in frame
     assert "context" not in frame
-    assert frame != "v,0,0"
+    assert frame == module.format_search_velocity_frame(
+        module.MASTER_MISSING_SEARCH_VX,
+        module.MASTER_MISSING_SEARCH_VY,
+    )

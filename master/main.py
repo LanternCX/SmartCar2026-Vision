@@ -35,21 +35,21 @@ OBJECT_Y_TOLERANCE_PX = 15.0
 # 连续满足面积与位置条件多少帧后确认找到目标。
 OBJECT_STABLE_FRAMES = 3
 # 主车搜索目标丢失时输出的配置横向速度。
-MASTER_MISSING_SEARCH_VX = 0.08
+MASTER_MISSING_SEARCH_VX = 0.0
 # 主车搜索目标丢失时输出的配置纵向速度。
 MASTER_MISSING_SEARCH_VY = 0.0
 # 主车搜索横向速度 P 环增益。
-MASTER_SEARCH_KP_X = 0.02
+MASTER_SEARCH_KP_X = 0.05
 # 主车搜索纵向速度 P 环增益。
-MASTER_SEARCH_KP_Y = 0.02
+MASTER_SEARCH_KP_Y = -0.05
 # 主车搜索横向误差死区, 单位为像素。
 MASTER_SEARCH_DEADZONE_X_PX = 15.0
 # 主车搜索纵向误差死区, 单位为像素。
 MASTER_SEARCH_DEADZONE_Y_PX = 8.0
 # 主车搜索横向速度限幅。
-MASTER_SEARCH_MAX_VX = 2.0
+MASTER_SEARCH_MAX_VX = 5.0
 # 主车搜索纵向速度限幅。
-MASTER_SEARCH_MAX_VY = 2.0
+MASTER_SEARCH_MAX_VY = 5.0
 # 车端协议中的主车搜索状态编号。
 STATE_SEARCH_OBJECT = 1
 # 车端协议中的物体目标编号。
@@ -64,7 +64,7 @@ SEQ_RING_SIZE = 256
 SEQ_HALF_RING = 128
 
 # 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
-TASKS = (("red", (0, 100, 23, 127, -26, 127)),)
+TASKS = (("red", (0, 100, 22, 127, -9, 127)),)
 
 
 def compact_number(value):
@@ -800,6 +800,35 @@ def build_observation_from_image(hook, img, image_width, image_height):
     )
 
 
+def process_search_frame(uart, hook, img, image_width, image_height):
+    """! @brief 处理单帧主车搜索速度流和 hook 事件
+
+    @param uart 主车视觉串口
+    @param hook 主车视觉 hook 状态
+    @param img 当前图像对象
+    @param image_width 图像宽度
+    @param image_height 图像高度
+    """
+
+    observation, best_blob = build_observation_from_image(
+        hook, img, image_width, image_height
+    )
+    _, x, y, _ = observation
+    if best_blob is not None:
+        draw_selected_marker(
+            img=img,
+            blob=best_blob,
+            pixel_x=int(float(x) + image_width / 2.0),
+            pixel_y=int(float(y) + image_height * 2.0 / 3.0),
+        )
+    velocity = build_search_velocity_from_observation(observation)
+    write_data_line(uart, format_search_velocity_frame(*velocity))
+    hook.accept_observation(observation)
+    event_frame = hook.next_event_frame()
+    if event_frame is not None:
+        write_reliable_line(uart, event_frame)
+
+
 def run():
     """! @brief 运行主车物体搜索视觉主循环"""
 
@@ -815,25 +844,7 @@ def run():
             img.lens_corr(strength=2.8, zoom=1.0)
         except MemoryError:
             pass
-        if not hook.has_context():
-            continue
-        observation, best_blob = build_observation_from_image(
-            hook, img, image_width, image_height
-        )
-        context_id, x, y, value = observation
-        if best_blob is not None:
-            draw_selected_marker(
-                img=img,
-                blob=best_blob,
-                pixel_x=int(float(x) + image_width / 2.0),
-                pixel_y=int(float(y) + image_height * 2.0 / 3.0),
-            )
-        velocity = build_search_velocity_from_observation(observation)
-        write_data_line(uart, format_search_velocity_frame(*velocity))
-        hook.accept_observation(observation)
-        event_frame = hook.next_event_frame()
-        if event_frame is not None:
-            write_reliable_line(uart, event_frame)
+        process_search_frame(uart, hook, img, image_width, image_height)
 
 
 if __name__ == "__main__":
