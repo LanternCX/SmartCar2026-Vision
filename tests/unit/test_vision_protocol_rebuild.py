@@ -227,11 +227,8 @@ def test_build_follow_command_align_x_outputs_only_lateral_velocity_delta() -> N
     """横向未对齐时只能输出横向速度量."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_align_x_sample(module)
-    expected_vx = (float(module.FOLLOW_X_DEADZONE_PX) + 1.0) * float(
-        module.FOLLOW_CONTROL_KP_X
-    )
 
-    assert result["command_vx"] == pytest.approx(expected_vx)
+    assert result["command_vx"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
     assert result["command_vy"] == pytest.approx(0.0)
 
 
@@ -248,15 +245,9 @@ def test_build_follow_command_outputs_both_axes_when_both_errors_exist() -> None
     """横纵都超出死区时必须同时输出两个方向的速度量."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_dual_axis_sample(module)
-    expected_vx = (float(module.FOLLOW_X_DEADZONE_PX) + 1.0) * float(
-        module.FOLLOW_CONTROL_KP_X
-    )
-    expected_vy = (float(module.FOLLOW_Y_DEADZONE_PX) + 1.0) * float(
-        module.FOLLOW_CONTROL_KP_Y
-    )
 
-    assert result["command_vx"] == pytest.approx(expected_vx)
-    assert result["command_vy"] == pytest.approx(expected_vy)
+    assert result["command_vx"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
+    assert result["command_vy"] == pytest.approx(-module.FOLLOW_CONTROL_MIN_SPEED)
 
 
 def test_build_follow_command_area_deadzone_holds_after_x_aligned() -> None:
@@ -285,24 +276,37 @@ def test_build_follow_command_align_y_outputs_only_longitudinal_velocity_delta()
     """ALIGN_Y 阶段必须只输出纵向速度量."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_align_y_sample(module)
-    expected_vy = (float(module.FOLLOW_Y_DEADZONE_PX) + 1.0) * float(
-        module.FOLLOW_CONTROL_KP_Y
-    )
 
     assert result["command_vx"] == pytest.approx(0.0)
-    assert result["command_vy"] == pytest.approx(expected_vy)
+    assert result["command_vy"] == pytest.approx(-module.FOLLOW_CONTROL_MIN_SPEED)
 
 
 def test_build_follow_command_align_y_preserves_reverse_direction() -> None:
     """纵向面积误差反向时也必须保留反向速度符号."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_reverse_align_y_sample(module)
-    expected_vy = -(float(module.FOLLOW_Y_DEADZONE_PX) + 1.0) * float(
-        module.FOLLOW_CONTROL_KP_Y
-    )
 
     assert result["command_vx"] == pytest.approx(0.0)
-    assert result["command_vy"] == pytest.approx(expected_vy)
+    assert result["command_vy"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
+
+
+def test_build_follow_command_applies_min_speed_outside_deadzone() -> None:
+    """误差超出死区时速度幅值不能低于最小速度."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    x_result = module.build_follow_command(
+        valid=1,
+        err_x=float(module.FOLLOW_X_DEADZONE_PX) + 0.1,
+        err_y=0.0,
+    )
+    y_result = module.build_follow_command(
+        valid=1,
+        err_x=0.0,
+        err_y=float(module.FOLLOW_Y_DEADZONE_PX) + 0.1,
+    )
+
+    assert x_result["command_vx"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
+    assert y_result["command_vy"] == pytest.approx(-module.FOLLOW_CONTROL_MIN_SPEED)
 
 
 def test_build_follow_command_dual_axis_keeps_axes_independent() -> None:
@@ -356,9 +360,9 @@ def test_follow_command_values_flow_into_short_packet_without_value_change() -> 
         vy=result["command_vy"],
     )
 
-    assert result["command_vx"] == pytest.approx(0.24)
-    assert result["command_vy"] == pytest.approx(-0.9)
-    assert frame == "v,0.24,-0.9"
+    assert result["command_vx"] == pytest.approx(1.5)
+    assert result["command_vy"] == pytest.approx(-1.5)
+    assert frame == "v,1.5,-1.5"
 
 
 def test_write_line_appends_crlf_to_short_packet(monkeypatch) -> None:

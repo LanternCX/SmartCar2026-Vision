@@ -42,6 +42,8 @@ MASTER_MISSING_SEARCH_VY = 0.0
 MASTER_SEARCH_KP_X = 0.05
 # 主车搜索纵向速度 P 环增益。
 MASTER_SEARCH_KP_Y = -0.15
+# 主车搜索误差超出死区后的最小有效速度量。
+MASTER_SEARCH_MIN_SPEED = 1.5
 # 主车搜索横向误差死区, 单位为像素。
 MASTER_SEARCH_DEADZONE_X_PX = 15.0
 # 主车搜索纵向误差死区, 单位为像素。
@@ -431,6 +433,29 @@ def _clamp(value, limit):
     return value
 
 
+def _apply_min_speed(value, limit, min_speed):
+    """! @brief 对非零速度量施加最小幅值和限幅
+
+    @param value 原始速度量
+    @param limit 速度幅值上限
+    @param min_speed 最小速度幅值
+    @return 处理后的速度量
+    """
+
+    value = _clamp(value, limit)
+    if value == 0.0:
+        return 0.0
+    min_speed = abs(float(min_speed))
+    limit = abs(float(limit))
+    if min_speed > limit:
+        min_speed = limit
+    if 0.0 < value < min_speed:
+        return min_speed
+    if -min_speed < value < 0.0:
+        return -min_speed
+    return value
+
+
 def _axis_p_velocity(error, deadzone, kp, limit):
     """! @brief 生成单轴 P 控制速度
 
@@ -444,7 +469,11 @@ def _axis_p_velocity(error, deadzone, kp, limit):
     error = float(error)
     if abs(error) <= float(deadzone):
         return 0.0
-    return _clamp(error * float(kp), limit)
+    return _apply_min_speed(
+        error * float(kp),
+        limit,
+        MASTER_SEARCH_MIN_SPEED,
+    )
 
 
 def _build_search_y_velocity(err_y, image_height):
@@ -458,7 +487,11 @@ def _build_search_y_velocity(err_y, image_height):
         / abs(float(MASTER_SEARCH_KP_Y))
         / float(image_height)
     )
-    return _clamp(scaled_error * float(MASTER_SEARCH_KP_Y), MASTER_SEARCH_MAX_VY)
+    return _apply_min_speed(
+        scaled_error * float(MASTER_SEARCH_KP_Y),
+        MASTER_SEARCH_MAX_VY,
+        MASTER_SEARCH_MIN_SPEED,
+    )
 
 
 def build_search_velocity_from_error(err_x, err_y, image_height):

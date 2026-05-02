@@ -471,9 +471,7 @@ def test_master_target_bottom_generates_p_search_velocity() -> None:
     assert best_blob is not None
     assert observation == (7, 30.0, -68.0, 300.0)
     assert velocity[0] == 30.0 * module.MASTER_SEARCH_KP_X
-    assert velocity[1] == pytest.approx(
-        module.MASTER_SEARCH_MAX_VY * 68.0 / 240.0
-    )
+    assert velocity[1] == pytest.approx(module.MASTER_SEARCH_MIN_SPEED)
 
 
 def test_master_search_y_velocity_decreases_when_target_gets_closer() -> None:
@@ -570,6 +568,32 @@ def test_master_search_velocity_deadzone_zeroes_each_axis() -> None:
 
     assert best_blob is not None
     assert velocity == (0.0, 0.0)
+
+
+def test_master_search_velocity_applies_min_speed_outside_deadzone() -> None:
+    """! @brief 主车搜索误差超出死区时速度幅值不能低于最小速度"""
+
+    module = load_master()
+
+    positive = module.build_search_velocity_from_error(
+        float(module.MASTER_SEARCH_DEADZONE_X_PX) + 0.1,
+        float(module.MASTER_SEARCH_DEADZONE_Y_PX) + 0.1,
+        240,
+    )
+    negative = module.build_search_velocity_from_error(
+        -(float(module.MASTER_SEARCH_DEADZONE_X_PX) + 0.1),
+        -(float(module.MASTER_SEARCH_DEADZONE_Y_PX) + 0.1),
+        240,
+    )
+
+    assert positive == (
+        pytest.approx(module.MASTER_SEARCH_MIN_SPEED),
+        pytest.approx(-module.MASTER_SEARCH_MIN_SPEED),
+    )
+    assert negative == (
+        pytest.approx(-module.MASTER_SEARCH_MIN_SPEED),
+        pytest.approx(module.MASTER_SEARCH_MIN_SPEED),
+    )
 
 
 def test_master_search_velocity_clamps_vx_and_vy() -> None:

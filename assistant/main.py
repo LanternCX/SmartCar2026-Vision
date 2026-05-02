@@ -33,6 +33,8 @@ FOLLOW_Y_DEADZONE_PX = 8.0
 FOLLOW_CONTROL_KP_X = 0.04
 # 跟随控制使用的纵向速度修正量增益
 FOLLOW_CONTROL_KP_Y = -0.10
+# 跟随控制误差超出死区后的最小有效速度量
+FOLLOW_CONTROL_MIN_SPEED = 1.5
 # 纵向速度修正量上限, 避免尺度抖动时前后动作过猛
 FOLLOW_CONTROL_MAX_Y = 5
 # 串口写入前后的保护延时, 单位为秒
@@ -62,6 +64,44 @@ def format_vision_frame(vx, vy):
     if not y_text or y_text == "-0":
         y_text = "0"
     return "v,%s,%s" % (x_text, y_text)
+
+
+def _apply_min_speed(value, min_speed, limit=None):
+    """! @brief 对非零速度量施加最小幅值和可选上限.
+
+    @param value 原始速度量.
+    @param min_speed 最小速度幅值.
+    @param limit 可选速度幅值上限.
+    @return 处理后的速度量.
+    """
+    value = float(value)
+    if value == 0.0:
+        return 0.0
+    min_speed = abs(float(min_speed))
+    if limit is not None:
+        limit = abs(float(limit))
+        if min_speed > limit:
+            min_speed = limit
+    if 0.0 < value < min_speed:
+        value = min_speed
+    if -min_speed < value < 0.0:
+        value = -min_speed
+    if limit is not None:
+        if value > limit:
+            value = limit
+        if value < -limit:
+            value = -limit
+    return value
+
+
+def _build_axis_velocity(error, kp, limit=None):
+    """! @brief 根据误差和增益生成带最小幅值的单轴速度量."""
+
+    return _apply_min_speed(
+        float(error) * float(kp),
+        FOLLOW_CONTROL_MIN_SPEED,
+        limit,
+    )
 
 
 def build_follow_command(valid, err_x, err_y):
@@ -94,36 +134,26 @@ def build_follow_command(valid, err_x, err_y):
     y_active = abs(err_y) > deadzone_y
 
     if x_active and y_active:
-        command_vy = err_y * float(FOLLOW_CONTROL_KP_Y)
         max_y = float(FOLLOW_CONTROL_MAX_Y)
-        if command_vy > max_y:
-            command_vy = max_y
-        if command_vy < -max_y:
-            command_vy = -max_y
         return {
             "phase": "ALIGN_XY",
-            "command_vx": err_x * float(FOLLOW_CONTROL_KP_X),
-            "command_vy": command_vy,
+            "command_vx": _build_axis_velocity(err_x, FOLLOW_CONTROL_KP_X),
+            "command_vy": _build_axis_velocity(err_y, FOLLOW_CONTROL_KP_Y, max_y),
         }
 
     if x_active:
         return {
             "phase": "ALIGN_X",
-            "command_vx": err_x * float(FOLLOW_CONTROL_KP_X),
+            "command_vx": _build_axis_velocity(err_x, FOLLOW_CONTROL_KP_X),
             "command_vy": 0.0,
         }
 
-    command_vy = err_y * float(FOLLOW_CONTROL_KP_Y)
     max_y = float(FOLLOW_CONTROL_MAX_Y)
-    if command_vy > max_y:
-        command_vy = max_y
-    if command_vy < -max_y:
-        command_vy = -max_y
 
     return {
         "phase": "ALIGN_Y",
         "command_vx": 0.0,
-        "command_vy": command_vy,
+        "command_vy": _build_axis_velocity(err_y, FOLLOW_CONTROL_KP_Y, max_y),
     }
 
 
