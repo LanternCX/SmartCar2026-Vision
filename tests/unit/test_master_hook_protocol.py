@@ -161,6 +161,40 @@ def test_master_blob_candidates_report_area_as_value() -> None:
     assert candidates[0][3] == 1234
 
 
+def test_master_blob_candidates_use_runtime_task_config() -> None:
+    """! @brief 主车候选提取直接使用当前配置的任务表"""
+
+    module = load_master()
+    module.TASKS = (("runtime_target", (9, 8, 7, 6, 5, 4)),)
+
+    class FakeBlob:
+        def rect(self):
+            return (10, 20, 30, 40)
+
+        def cx(self):
+            return 25
+
+        def area(self):
+            return 1234
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 100
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge))
+            return [FakeBlob()]
+
+    img = FakeImage()
+    candidates = module.build_blob_candidates(img)
+
+    assert img.calls == [([(9, 8, 7, 6, 5, 4)], 200, 200, True)]
+    assert candidates[0][0] == "runtime_target"
+
+
 def test_master_hook_waits_for_stable_target_before_event() -> None:
     """! @brief hook 条件连续满足后才创建 TARGET_FOUND 事件"""
 

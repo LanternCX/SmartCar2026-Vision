@@ -164,19 +164,79 @@ def test_build_blob_candidates_reports_corner_based_span() -> None:
     assert marker_span == pytest.approx(26.0)
 
 
-def test_follow_color_threshold_keeps_existing_orange_values() -> None:
-    """跟随模式继续使用现有橙色色标阈值."""
+def test_follow_color_tasks_use_runtime_config() -> None:
+    """跟随模式候选提取直接使用当前配置的任务表."""
     module = load_main_module("vision_main_test_module_unit")
+    module.FOLLOW_TASKS = (("runtime_follow", (1, 2, 3, 4, 5, 6)),)
 
-    assert module.FOLLOW_TASKS == (("orange", (0, 100, 18, 127, 18, 127)),)
+    class FakeBlob:
+        def rect(self):
+            return (10, 20, 20, 30)
+
+        def corners(self):
+            return ((11, 20), (18, 21), (30, 20), (35, 27))
+
+        def min_corners(self):
+            return ((10, 20), (30, 20), (36, 50), (4, 50))
+
+        def cx(self):
+            return 20
+
+        def cy(self):
+            return 35
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 100
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge))
+            return [FakeBlob()]
+
+    img = FakeImage()
+    candidates = module.build_blob_candidates(img)
+
+    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 200, 200, True)]
+    assert candidates[0][0] == "runtime_follow"
 
 
-def test_object_color_threshold_matches_master_target_search() -> None:
-    """找物体模式的红色阈值必须与主车目标搜索保持一致."""
-    assistant_module = load_main_module("vision_main_test_module_unit")
-    master_module = load_role_main_module("master", "vision_master_threshold_test_module")
+def test_object_color_tasks_use_runtime_config() -> None:
+    """找物体候选提取直接使用当前配置的任务表."""
+    module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_TASKS = (("runtime_object", (6, 5, 4, 3, 2, 1)),)
 
-    assert assistant_module.OBJECT_TASKS == master_module.TASKS
+    class FakeBlob:
+        def rect(self):
+            return (10, 20, 30, 40)
+
+        def cx(self):
+            return 25
+
+        def cy(self):
+            return 40
+
+        def area(self):
+            return 1234
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 100
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge))
+            return [FakeBlob()]
+
+    img = FakeImage()
+    candidates = module.build_object_blob_candidates(img)
+
+    assert img.calls == [([(6, 5, 4, 3, 2, 1)], 200, 200, True)]
+    assert candidates[0][0] == "runtime_object"
 
 
 def test_build_object_blob_candidates_reports_area_as_value() -> None:
