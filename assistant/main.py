@@ -34,7 +34,7 @@ FOLLOW_CONTROL_KP_X = 0.04
 # 跟随控制使用的纵向速度修正量增益
 FOLLOW_CONTROL_KP_Y = -0.10
 # 跟随控制误差超出死区后的最小有效速度量
-FOLLOW_CONTROL_MIN_SPEED = 1.5
+FOLLOW_CONTROL_MIN_SPEED = 2
 # 纵向速度修正量上限, 避免尺度抖动时前后动作过猛
 FOLLOW_CONTROL_MAX_Y = 5
 # 串口写入前后的保护延时, 单位为秒

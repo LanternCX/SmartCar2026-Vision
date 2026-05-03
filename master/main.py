@@ -43,7 +43,7 @@ MASTER_SEARCH_KP_X = 0.05
 # 主车搜索纵向速度 P 环增益。
 MASTER_SEARCH_KP_Y = -0.15
 # 主车搜索误差超出死区后的最小有效速度量。
-MASTER_SEARCH_MIN_SPEED = 1.5
+MASTER_SEARCH_MIN_SPEED = 2
 # 主车搜索横向误差死区, 单位为像素。
 MASTER_SEARCH_DEADZONE_X_PX = 15.0
 # 主车搜索纵向误差死区, 单位为像素。
