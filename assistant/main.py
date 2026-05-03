@@ -44,13 +44,13 @@ OBJECT_APPROACH_CONFIG_ID = 1
 # TARGET_FOUND 事件编号。
 EVENT_TARGET_FOUND = 6
 
-# 跟随模式使用的橙色色标阈值。
-FOLLOW_TASKS = (("orange", (0, 100, 18, 127, 18, 127)),)
+# 跟随模式使用的绿色色标阈值。
+FOLLOW_TASKS = (("green", (37, 8, -57, -8, -36, 6)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
 OBJECT_TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
 
 # 跟随控制使用的横向死区，单位为像素。
-FOLLOW_X_DEADZONE_PX = 10.0
+FOLLOW_X_DEADZONE_PX = 5.0
 # 跟随控制使用的纵向目标尺度量，单位为像素。
 FOLLOW_TARGET_Y = 45.0
 # 跟随控制使用的纵向死区，单位为像素。
@@ -71,11 +71,11 @@ OBJECT_MISSING_SEARCH_VY = 0.0
 # 找物体模式横向速度 P 环增益。
 OBJECT_APPROACH_KP_X = 0.05
 # 找物体模式纵向速度 P 环增益。
-OBJECT_APPROACH_KP_Y = -0.20
+OBJECT_APPROACH_KP_Y = -0.15
 # 找物体模式误差超出死区后的最小有效速度量。
 OBJECT_APPROACH_MIN_SPEED = 0.0
 # 找物体模式横向误差死区，单位为像素。
-OBJECT_APPROACH_DEADZONE_X_PX = 8.0
+OBJECT_APPROACH_DEADZONE_X_PX = 15.0
 # 找物体模式纵向误差死区，单位为像素。
 OBJECT_APPROACH_DEADZONE_Y_PX = 15.0
 # 找物体模式横向速度限幅。
