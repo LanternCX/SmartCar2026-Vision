@@ -93,6 +93,27 @@ def test_main_deadzone_hold_formats_formal_zero_velocity_frame() -> None:
 
 
 
+def test_assistant_formats_ack_and_reliable_event_frames() -> None:
+    """! @brief 辅车视觉可靠协议使用本地确认包和事件包格式"""
+    module = load_main_module("vision_main_test_module_contract")
+
+    assert module.format_ack_frame(12) == "a,12"
+    assert module.format_event_frame(12, module.EVENT_TARGET_FOUND, 180) == "r,12,6,180"
+
+
+def test_assistant_sync_packet_uses_local_short_format() -> None:
+    """! @brief 辅车视觉同步包只接受本地短格式, 不携带额外上下文字段"""
+    module = load_main_module("vision_main_test_module_contract")
+
+    assert module.parse_sync_packet("s,12,2,1,1") == {
+        "reliable_seq": 12,
+        "state": 2,
+        "target": 1,
+        "arg": 1,
+    }
+    assert module.parse_sync_packet("s,12,7,2,1,1") is None
+
+
 def test_master_formats_velocity_and_reliable_event_frames() -> None:
     """! @brief OpenART Vision master 使用速度流包和可靠事件包"""
 
@@ -130,7 +151,7 @@ def test_master_missing_target_velocity_frame_uses_configured_search_speed() -> 
     observation, best_blob = module.build_observation_from_image(
         hook, EmptyImage(), 320, 240
     )
-    vx, vy = module.build_search_velocity_from_observation(observation)
+    vx, vy = module.build_search_velocity_from_observation(observation, 240)
     frame = module.format_search_velocity_frame(vx, vy)
 
     assert best_blob is None

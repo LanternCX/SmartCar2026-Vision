@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.test_support import load_main_module
+from tests.test_support import load_main_module, load_role_main_module
 
 
 def build_align_x_sample(module):
@@ -157,11 +157,56 @@ def test_build_blob_candidates_reports_corner_based_span() -> None:
     pixel_x = candidate[1]
     pixel_y = candidate[2]
     bottom = candidate[3]
-    marker_span = candidate[4]
     assert pixel_x == 20
     assert pixel_y == 35
+    marker_span = candidate[4]
     assert bottom == 80
     assert marker_span == pytest.approx(26.0)
+
+
+def test_follow_color_threshold_keeps_existing_orange_values() -> None:
+    """跟随模式继续使用现有橙色色标阈值."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    assert module.FOLLOW_TASKS == (("orange", (0, 100, 18, 127, 18, 127)),)
+
+
+def test_object_color_threshold_matches_master_target_search() -> None:
+    """找物体模式的红色阈值必须与主车目标搜索保持一致."""
+    assistant_module = load_main_module("vision_main_test_module_unit")
+    master_module = load_role_main_module("master", "vision_master_threshold_test_module")
+
+    assert assistant_module.OBJECT_TASKS == master_module.TASKS
+
+
+def test_build_object_blob_candidates_reports_area_as_value() -> None:
+    """找物体候选目标必须携带面积值用于稳定判定."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    class FakeBlob:
+        def rect(self):
+            return (10, 20, 30, 40)
+
+        def cx(self):
+            return 25
+
+        def cy(self):
+            return 40
+
+        def area(self):
+            return 1234
+
+    class FakeImage:
+        def height(self):
+            return 100
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [FakeBlob()]
+
+    candidates = module.build_object_blob_candidates(FakeImage())
+
+    assert candidates[0][3] == 80
+    assert candidates[0][4] == 1234
 
 
 def test_draw_selected_marker_draws_corners_without_bounding_box() -> None:
@@ -227,11 +272,8 @@ def test_build_follow_command_align_x_outputs_only_lateral_velocity_delta() -> N
     """横向未对齐时只能输出横向速度量."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_align_x_sample(module)
-    expected_vx = (float(module.FOLLOW_X_DEADZONE_PX) + 1.0) * float(
-        module.FOLLOW_CONTROL_KP_X
-    )
 
-    assert result["command_vx"] == pytest.approx(expected_vx)
+    assert result["command_vx"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
     assert result["command_vy"] == pytest.approx(0.0)
 
 
@@ -248,15 +290,9 @@ def test_build_follow_command_outputs_both_axes_when_both_errors_exist() -> None
     """横纵都超出死区时必须同时输出两个方向的速度量."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_dual_axis_sample(module)
-    expected_vx = (float(module.FOLLOW_X_DEADZONE_PX) + 1.0) * float(
-        module.FOLLOW_CONTROL_KP_X
-    )
-    expected_vy = (float(module.FOLLOW_Y_DEADZONE_PX) + 1.0) * float(
-        module.FOLLOW_CONTROL_KP_Y
-    )
 
-    assert result["command_vx"] == pytest.approx(expected_vx)
-    assert result["command_vy"] == pytest.approx(expected_vy)
+    assert result["command_vx"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
+    assert result["command_vy"] == pytest.approx(-module.FOLLOW_CONTROL_MIN_SPEED)
 
 
 def test_build_follow_command_area_deadzone_holds_after_x_aligned() -> None:
@@ -285,24 +321,37 @@ def test_build_follow_command_align_y_outputs_only_longitudinal_velocity_delta()
     """ALIGN_Y 阶段必须只输出纵向速度量."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_align_y_sample(module)
-    expected_vy = (float(module.FOLLOW_Y_DEADZONE_PX) + 1.0) * float(
-        module.FOLLOW_CONTROL_KP_Y
-    )
 
     assert result["command_vx"] == pytest.approx(0.0)
-    assert result["command_vy"] == pytest.approx(expected_vy)
+    assert result["command_vy"] == pytest.approx(-module.FOLLOW_CONTROL_MIN_SPEED)
 
 
 def test_build_follow_command_align_y_preserves_reverse_direction() -> None:
     """纵向面积误差反向时也必须保留反向速度符号."""
     module = load_main_module("vision_main_test_module_unit")
     result = build_reverse_align_y_sample(module)
-    expected_vy = -(float(module.FOLLOW_Y_DEADZONE_PX) + 1.0) * float(
-        module.FOLLOW_CONTROL_KP_Y
-    )
 
     assert result["command_vx"] == pytest.approx(0.0)
-    assert result["command_vy"] == pytest.approx(expected_vy)
+    assert result["command_vy"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
+
+
+def test_build_follow_command_applies_min_speed_outside_deadzone() -> None:
+    """误差超出死区时速度幅值不能低于最小速度."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    x_result = module.build_follow_command(
+        valid=1,
+        err_x=float(module.FOLLOW_X_DEADZONE_PX) + 0.1,
+        err_y=0.0,
+    )
+    y_result = module.build_follow_command(
+        valid=1,
+        err_x=0.0,
+        err_y=float(module.FOLLOW_Y_DEADZONE_PX) + 0.1,
+    )
+
+    assert x_result["command_vx"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
+    assert y_result["command_vy"] == pytest.approx(-module.FOLLOW_CONTROL_MIN_SPEED)
 
 
 def test_build_follow_command_dual_axis_keeps_axes_independent() -> None:
@@ -356,9 +405,23 @@ def test_follow_command_values_flow_into_short_packet_without_value_change() -> 
         vy=result["command_vy"],
     )
 
-    assert result["command_vx"] == pytest.approx(0.64)
-    assert result["command_vy"] == pytest.approx(-1.35)
-    assert frame == "v,0.64,-1.35"
+    expected_vx = max(
+        (float(module.FOLLOW_X_DEADZONE_PX) + 1.0) * float(module.FOLLOW_CONTROL_KP_X),
+        float(module.FOLLOW_CONTROL_MIN_SPEED),
+    )
+    expected_vy = (float(module.FOLLOW_Y_DEADZONE_PX) + 1.0) * float(module.FOLLOW_CONTROL_KP_Y)
+    expected_vy = max(
+        -float(module.FOLLOW_CONTROL_MAX_Y),
+        min(float(module.FOLLOW_CONTROL_MAX_Y), expected_vy),
+    )
+    if 0.0 < expected_vy < float(module.FOLLOW_CONTROL_MIN_SPEED):
+        expected_vy = float(module.FOLLOW_CONTROL_MIN_SPEED)
+    elif -float(module.FOLLOW_CONTROL_MIN_SPEED) < expected_vy < 0.0:
+        expected_vy = -float(module.FOLLOW_CONTROL_MIN_SPEED)
+
+    assert result["command_vx"] == pytest.approx(expected_vx)
+    assert result["command_vy"] == pytest.approx(expected_vy)
+    assert frame == module.format_vision_frame(vx=expected_vx, vy=expected_vy)
 
 
 def test_write_line_appends_crlf_to_short_packet(monkeypatch) -> None:

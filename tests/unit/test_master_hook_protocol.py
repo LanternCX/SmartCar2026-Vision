@@ -1,5 +1,7 @@
 """! @brief OpenART Vision master hook 协议测试"""
 
+import pytest
+
 from tests.test_support import load_role_main_module
 
 
@@ -48,7 +50,7 @@ def test_master_sync_packet_records_context_and_replies_ack() -> None:
     hook = module.MasterVisionHook()
 
     reply = hook.handle_control_line("s,12,7,1,1,1")
-    observation = hook.build_observation(1, 160, 160, 180, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 180, 320, 240)
 
     assert reply == "a,12"
     assert observation == (7, 0.0, 0.0, 180.0)
@@ -61,7 +63,7 @@ def test_master_repeated_sync_replies_ack_without_reapplying() -> None:
     hook = module.MasterVisionHook(stable_frames=2, next_reliable_seq=30)
 
     assert hook.handle_control_line("s,12,7,1,1,1") == "a,12"
-    observation = hook.build_observation(1, 160, 160, 180, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 180, 320, 240)
     hook.accept_observation(observation)
     assert hook.handle_control_line("s,12,7,1,1,1") == "a,12"
     hook.accept_observation(observation)
@@ -77,7 +79,7 @@ def test_master_non_new_context_does_not_override_active_context() -> None:
 
     assert hook.handle_control_line("s,12,7,1,1,1") == "a,12"
     assert hook.handle_control_line("s,13,6,2,1,9") == "a,13"
-    observation = hook.build_observation(1, 160, 160, 180, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 180, 320, 240)
 
     assert observation == (7, 0.0, 0.0, 180.0)
 
@@ -94,7 +96,7 @@ def test_master_reliable_seq_is_separate_from_context_id() -> None:
         event_resend_interval_ms=20,
     )
     hook.handle_control_line("s,12,7,1,1,1")
-    observation = hook.build_observation(1, 160, 160, 180, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 180, 320, 240)
 
     hook.accept_observation(observation)
     event_frame = hook.next_event_frame()
@@ -105,14 +107,14 @@ def test_master_reliable_seq_is_separate_from_context_id() -> None:
     assert hook.next_event_frame() == event_frame
 
 
-def test_master_object_observation_uses_middle_and_lower_third_target() -> None:
-    """! @brief 物体观测误差使用画面中线和下三分之二点"""
+def test_master_object_observation_uses_middle_and_image_bottom_target() -> None:
+    """! @brief 物体观测误差使用画面中线和图像底边"""
 
     module = load_master()
     hook = module.MasterVisionHook()
     hook.handle_control_line("s,12,7,1,1,1")
 
-    observation = hook.build_observation(1, 160, 160, 250, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 250, 320, 240)
 
     assert observation == (7, 0.0, 0.0, 250.0)
 
@@ -148,6 +150,9 @@ def test_master_blob_candidates_report_area_as_value() -> None:
             return 1234
 
     class FakeImage:
+        def height(self):
+            return 100
+
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
             return [FakeBlob()]
 
@@ -168,7 +173,7 @@ def test_master_hook_waits_for_stable_target_before_event() -> None:
         next_reliable_seq=30,
     )
     hook.handle_control_line("s,12,7,1,1,1")
-    observation = hook.build_observation(1, 160, 160, 150, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 150, 320, 240)
 
     hook.accept_observation(observation)
     first_frame = hook.next_event_frame()
@@ -192,8 +197,8 @@ def test_master_hook_does_not_event_when_condition_is_not_met() -> None:
     )
     hook.handle_control_line("s,12,7,1,1,1")
 
-    weak = hook.build_observation(1, 160, 160, 99, 320, 240)
-    offset = hook.build_observation(1, 180, 160, 150, 320, 240)
+    weak = hook.build_observation(1, 160, 240, 99, 320, 240)
+    offset = hook.build_observation(1, 180, 240, 150, 320, 240)
     hook.accept_observation(weak)
     hook.accept_observation(offset)
 
@@ -206,7 +211,7 @@ def test_master_hook_does_not_event_for_unsupported_hook_config() -> None:
     module = load_master()
     hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
     hook.handle_control_line("s,12,7,1,1,99")
-    observation = hook.build_observation(1, 160, 160, 180, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 180, 320, 240)
 
     hook.accept_observation(observation)
 
@@ -225,7 +230,7 @@ def test_master_hook_throttles_pending_event_retries() -> None:
         event_resend_interval_ms=20,
     )
     hook.handle_control_line("s,12,7,1,1,1")
-    observation = hook.build_observation(1, 160, 160, 180, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 180, 320, 240)
 
     hook.accept_observation(observation)
     first = hook.next_event_frame()
@@ -252,7 +257,7 @@ def test_master_hook_default_event_retry_interval_is_low_frequency() -> None:
         now_ms=lambda: now_ms[0],
     )
     hook.handle_control_line("s,12,7,1,1,1")
-    observation = hook.build_observation(1, 160, 160, 180, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 180, 320, 240)
 
     hook.accept_observation(observation)
     first = hook.next_event_frame()
@@ -275,7 +280,7 @@ def test_master_hook_repeats_event_until_matching_ack() -> None:
         event_resend_interval_ms=20,
     )
     hook.handle_control_line("s,12,7,1,1,1")
-    observation = hook.build_observation(1, 160, 160, 180, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 180, 320, 240)
 
     hook.accept_observation(observation)
     first = hook.next_event_frame()
@@ -304,7 +309,7 @@ def test_master_hook_keeps_unacked_event_after_new_context_sync() -> None:
         event_resend_interval_ms=20,
     )
     hook.handle_control_line("s,12,7,1,1,1")
-    observation = hook.build_observation(1, 160, 160, 180, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 180, 320, 240)
 
     hook.accept_observation(observation)
     first = hook.next_event_frame()
@@ -324,7 +329,7 @@ def test_master_hook_creates_target_found_once_per_context() -> None:
     module = load_master()
     hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
     hook.handle_control_line("s,12,7,1,1,1")
-    observation = hook.build_observation(1, 160, 160, 180, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 180, 320, 240)
 
     hook.accept_observation(observation)
     assert hook.next_event_frame() == "r,30,7,6,180"
@@ -420,7 +425,7 @@ def test_master_missing_target_outputs_configured_search_velocity() -> None:
     observation, best_blob = module.build_observation_from_image(
         hook, EmptyImage(), 320, 240
     )
-    velocity = module.build_search_velocity_from_observation(observation)
+    velocity = module.build_search_velocity_from_observation(observation, 240)
 
     assert best_blob is None
     assert observation == (7, 0.0, 0.0, 0.0)
@@ -430,12 +435,15 @@ def test_master_missing_target_outputs_configured_search_velocity() -> None:
     )
 
 
-def test_master_target_center_generates_p_search_velocity() -> None:
-    """! @brief 有目标时主车搜索通过图像观测路径按中心点误差生成 P 控制量"""
+def test_master_target_bottom_generates_p_search_velocity() -> None:
+    """! @brief 有目标时主车搜索通过物体底边到图像底边的误差生成 P 控制量"""
 
     module = load_master()
 
     class FakeBlob:
+        def rect(self):
+            return (170, 68, 40, 62)
+
         def cx(self):
             return 190
 
@@ -446,6 +454,9 @@ def test_master_target_center_generates_p_search_velocity() -> None:
             return 300
 
     class FakeImage:
+        def height(self):
+            return 240
+
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
             return [FakeBlob()]
 
@@ -455,14 +466,89 @@ def test_master_target_center_generates_p_search_velocity() -> None:
     observation, best_blob = module.build_observation_from_image(
         hook, FakeImage(), 320, 240
     )
-    velocity = module.build_search_velocity_from_observation(observation)
+    velocity = module.build_search_velocity_from_observation(observation, 240)
 
     assert best_blob is not None
-    assert observation == (7, 30.0, -15.0, 300.0)
-    assert velocity == (
+    assert observation == (7, 30.0, -68.0, 300.0)
+    expected_vx = max(
         30.0 * module.MASTER_SEARCH_KP_X,
-        -15.0 * module.MASTER_SEARCH_KP_Y,
+        float(module.MASTER_SEARCH_MIN_SPEED),
     )
+    scaled_y_error = observation[2] * (
+        float(module.MASTER_SEARCH_MAX_VY)
+        / abs(float(module.MASTER_SEARCH_KP_Y))
+        / 240.0
+    )
+    expected_vy = scaled_y_error * float(module.MASTER_SEARCH_KP_Y)
+    expected_vy = max(
+        -float(module.MASTER_SEARCH_MAX_VY),
+        min(float(module.MASTER_SEARCH_MAX_VY), expected_vy),
+    )
+    if 0.0 < expected_vy < float(module.MASTER_SEARCH_MIN_SPEED):
+        expected_vy = float(module.MASTER_SEARCH_MIN_SPEED)
+    elif -float(module.MASTER_SEARCH_MIN_SPEED) < expected_vy < 0.0:
+        expected_vy = -float(module.MASTER_SEARCH_MIN_SPEED)
+
+    assert velocity[0] == pytest.approx(expected_vx)
+    assert velocity[1] == pytest.approx(expected_vy)
+
+
+def test_master_search_y_velocity_decreases_when_target_gets_closer() -> None:
+    """! @brief 主车目标接近时纵向搜索速度应变小"""
+
+    module = load_master()
+
+    class FarBlob:
+        def rect(self):
+            return (120, 100, 80, 40)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 120
+
+        def area(self):
+            return 1000
+
+    class CloseBlob:
+        def rect(self):
+            return (120, 20, 80, 80)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 120
+
+        def area(self):
+            return 1000
+
+    class FakeImage:
+        def __init__(self, blob):
+            self._blob = blob
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [self._blob]
+
+    hook = module.MasterVisionHook()
+    hook.handle_control_line("s,12,7,1,1,1")
+
+    far_observation, _ = module.build_observation_from_image(
+        hook, FakeImage(FarBlob()), 320, 240
+    )
+    close_observation, _ = module.build_observation_from_image(
+        hook, FakeImage(CloseBlob()), 320, 240
+    )
+    far_velocity = module.build_search_velocity_from_observation(far_observation, 240)
+    close_velocity = module.build_search_velocity_from_observation(
+        close_observation, 240
+    )
+
+    assert close_velocity[1] < far_velocity[1]
 
 
 def test_master_search_velocity_deadzone_zeroes_each_axis() -> None:
@@ -471,16 +557,23 @@ def test_master_search_velocity_deadzone_zeroes_each_axis() -> None:
     module = load_master()
 
     class FakeBlob:
+        def rect(self):
+            height = int(module.MASTER_SEARCH_DEADZONE_Y_PX)
+            return (120, height, 80, height)
+
         def cx(self):
             return 160 + module.MASTER_SEARCH_DEADZONE_X_PX
 
         def cy(self):
-            return 160 - module.MASTER_SEARCH_DEADZONE_Y_PX
+            return 160
 
         def area(self):
             return 150
 
     class FakeImage:
+        def height(self):
+            return 240
+
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
             return [FakeBlob()]
 
@@ -490,10 +583,36 @@ def test_master_search_velocity_deadzone_zeroes_each_axis() -> None:
     observation, best_blob = module.build_observation_from_image(
         hook, FakeImage(), 320, 240
     )
-    velocity = module.build_search_velocity_from_observation(observation)
+    velocity = module.build_search_velocity_from_observation(observation, 240)
 
     assert best_blob is not None
     assert velocity == (0.0, 0.0)
+
+
+def test_master_search_velocity_applies_min_speed_outside_deadzone() -> None:
+    """! @brief 主车搜索误差超出死区时速度幅值不能低于最小速度"""
+
+    module = load_master()
+
+    positive = module.build_search_velocity_from_error(
+        float(module.MASTER_SEARCH_DEADZONE_X_PX) + 0.1,
+        float(module.MASTER_SEARCH_DEADZONE_Y_PX) + 0.1,
+        240,
+    )
+    negative = module.build_search_velocity_from_error(
+        -(float(module.MASTER_SEARCH_DEADZONE_X_PX) + 0.1),
+        -(float(module.MASTER_SEARCH_DEADZONE_Y_PX) + 0.1),
+        240,
+    )
+
+    assert positive == (
+        pytest.approx(module.MASTER_SEARCH_MIN_SPEED),
+        pytest.approx(-module.MASTER_SEARCH_MIN_SPEED),
+    )
+    assert negative == (
+        pytest.approx(-module.MASTER_SEARCH_MIN_SPEED),
+        pytest.approx(module.MASTER_SEARCH_MIN_SPEED),
+    )
 
 
 def test_master_search_velocity_clamps_vx_and_vy() -> None:
@@ -501,8 +620,8 @@ def test_master_search_velocity_clamps_vx_and_vy() -> None:
 
     module = load_master()
 
-    positive = module.build_search_velocity_from_observation((7, 999.0, 999.0, 300.0))
-    negative = module.build_search_velocity_from_observation((7, -999.0, -999.0, 300.0))
+    positive = module.build_search_velocity_from_observation((7, 999.0, 999.0, 300.0), 240)
+    negative = module.build_search_velocity_from_observation((7, -999.0, -999.0, 300.0), 240)
 
     expected_positive_vx = (
         module.MASTER_SEARCH_MAX_VX
@@ -519,8 +638,8 @@ def test_master_search_velocity_clamps_vx_and_vy() -> None:
     assert negative == (-expected_positive_vx, -expected_positive_vy)
 
 
-def test_master_target_found_uses_bbox_center_error_not_marker_span() -> None:
-    """! @brief TARGET_FOUND 稳定判断使用识别框中心点误差"""
+def test_master_target_found_uses_bbox_center_and_bottom_error() -> None:
+    """! @brief TARGET_FOUND 稳定判断使用色块中心 x 和底边 y 误差"""
 
     module = load_master()
     hook = module.MasterVisionHook(
@@ -532,7 +651,7 @@ def test_master_target_found_uses_bbox_center_error_not_marker_span() -> None:
     )
     hook.handle_control_line("s,12,7,1,1,1")
 
-    observation = hook.build_observation(1, 160, 160, 150, 320, 240)
+    observation = hook.build_observation(1, 160, 240, 150, 320, 240)
     hook.accept_observation(observation)
 
     assert hook.next_event_frame() == "r,30,7,6,150"
@@ -545,7 +664,7 @@ def test_master_search_control_does_not_require_marker_span_or_min_corners() -> 
 
     class CenterOnlyBlob:
         def rect(self):
-            return (120, 130, 80, 60)
+            return (120, 1, 80, 1)
 
         def cx(self):
             return 160
@@ -557,6 +676,9 @@ def test_master_search_control_does_not_require_marker_span_or_min_corners() -> 
             return 4800
 
     class CenterOnlyImage:
+        def height(self):
+            return 240
+
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
             return [CenterOnlyBlob()]
 
@@ -566,20 +688,20 @@ def test_master_search_control_does_not_require_marker_span_or_min_corners() -> 
     observation, best_blob = module.build_observation_from_image(
         hook, CenterOnlyImage(), 320, 240
     )
-    velocity = module.build_search_velocity_from_observation(observation)
+    velocity = module.build_search_velocity_from_observation(observation, 240)
 
     assert best_blob is not None
     assert velocity == (0.0, 0.0)
 
 
 def test_master_search_frame_outputs_velocity_without_hook_context() -> None:
-    """! @brief 主车速度流不依赖 hook 上下文, 直接按色块中心 x/y 输出"""
+    """! @brief 主车速度流不依赖 hook 上下文, 直接按色块中心 x 和底边输出"""
 
     module = load_master()
 
     class FakeBlob:
         def rect(self):
-            return (190, 150, 20, 20)
+            return (190, 1, 20, 1)
 
         def cx(self):
             return 200
@@ -590,9 +712,15 @@ def test_master_search_frame_outputs_velocity_without_hook_context() -> None:
         def area(self):
             return 500
 
+        def min_corners(self):
+            raise AssertionError("min_corners must not be used")
+
     class FakeImage:
         def __init__(self):
             self.crosses = []
+
+        def height(self):
+            return 240
 
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
             return [FakeBlob()]
@@ -609,3 +737,162 @@ def test_master_search_frame_outputs_velocity_without_hook_context() -> None:
     assert uart.writes == ["v,2,0\r\n"]
     assert img.crosses[-1] == (200, 160)
     assert hook.next_event_frame() is None
+
+
+def test_master_blob_candidates_use_normalized_bottom() -> None:
+    """! @brief 主车候选目标使用归一化后的色块底边 y"""
+
+    module = load_master()
+
+    class FakeBlob:
+        def rect(self):
+            return (10, 20, 20, 30)
+
+        def cx(self):
+            return 20
+
+        def cy(self):
+            return 35
+
+        def area(self):
+            return 600
+
+    class FakeImage:
+        def height(self):
+            return 100
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [FakeBlob()]
+
+    candidates = module.build_blob_candidates(FakeImage())
+
+    assert candidates[0][2] == 80
+
+
+def test_master_search_frame_draws_blob_center_not_bottom() -> None:
+    """! @brief 主车调试标记绘制目标中心, 不把底边当中心点"""
+
+    module = load_master()
+
+    class FakeBlob:
+        def rect(self):
+            return (190, 110, 20, 70)
+
+        def cx(self):
+            return 200
+
+        def cy(self):
+            return 145
+
+        def area(self):
+            return 500
+
+    class FakeImage:
+        def __init__(self):
+            self.crosses = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [FakeBlob()]
+
+        def draw_cross(self, x, y):
+            self.crosses.append((x, y))
+
+    uart = FakeUART()
+    hook = module.MasterVisionHook()
+    img = FakeImage()
+
+    module.process_search_frame(uart, hook, img, 320, 240)
+
+    assert img.crosses[-1] == (200, 145)
+
+
+def test_master_hook_event_uses_image_bottom_not_blob_center_y() -> None:
+    """! @brief TARGET_FOUND 经图像路径使用色块底边 y, 不使用中心 y"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(
+        min_area=100,
+        tolerance_x=5,
+        tolerance_y=5,
+        stable_frames=1,
+        next_reliable_seq=30,
+    )
+    hook.handle_control_line("s,12,7,1,1,1")
+
+    class FakeBlob:
+        def rect(self):
+            return (120, 0, 80, 2)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 210
+
+        def area(self):
+            return 4800
+
+    class FakeImage:
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [FakeBlob()]
+
+    observation, _ = module.build_observation_from_image(hook, FakeImage(), 320, 240)
+    hook.accept_observation(observation)
+
+    assert observation == (7, 0.0, -0.0, 4800.0)
+    assert hook.next_event_frame() == "r,30,7,6,4800"
+
+
+def test_master_candidate_selection_uses_image_bottom_target() -> None:
+    """! @brief 主车多候选选择使用图像底边作为 y 目标"""
+
+    module = load_master()
+
+    class HigherBottomBlob:
+        def rect(self):
+            return (120, 60, 80, 40)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 120
+
+        def area(self):
+            return 1000
+
+    class LowerBottomBlob:
+        def rect(self):
+            return (120, 0, 80, 20)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 230
+
+        def area(self):
+            return 2000
+
+    class FakeImage:
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [HigherBottomBlob(), LowerBottomBlob()]
+
+    hook = module.MasterVisionHook()
+    hook.handle_control_line("s,12,7,1,1,1")
+
+    observation, best_blob = module.build_observation_from_image(
+        hook, FakeImage(), 320, 240
+    )
+
+    assert isinstance(best_blob, LowerBottomBlob)
+    assert observation == (7, 0.0, -0.0, 2000.0)
