@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.test_support import load_main_module
+from tests.test_support import load_main_module, load_role_main_module
 
 
 def build_align_x_sample(module):
@@ -162,6 +162,51 @@ def test_build_blob_candidates_reports_corner_based_span() -> None:
     marker_span = candidate[4]
     assert bottom == 80
     assert marker_span == pytest.approx(26.0)
+
+
+def test_follow_color_threshold_keeps_existing_orange_values() -> None:
+    """跟随模式继续使用现有橙色色标阈值."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    assert module.FOLLOW_TASKS == (("orange", (0, 100, 18, 127, 18, 127)),)
+
+
+def test_object_color_threshold_matches_master_target_search() -> None:
+    """找物体模式的红色阈值必须与主车目标搜索保持一致."""
+    assistant_module = load_main_module("vision_main_test_module_unit")
+    master_module = load_role_main_module("master", "vision_master_threshold_test_module")
+
+    assert assistant_module.OBJECT_TASKS == master_module.TASKS
+
+
+def test_build_object_blob_candidates_reports_area_as_value() -> None:
+    """找物体候选目标必须携带面积值用于稳定判定."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    class FakeBlob:
+        def rect(self):
+            return (10, 20, 30, 40)
+
+        def cx(self):
+            return 25
+
+        def cy(self):
+            return 40
+
+        def area(self):
+            return 1234
+
+    class FakeImage:
+        def height(self):
+            return 100
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [FakeBlob()]
+
+    candidates = module.build_object_blob_candidates(FakeImage())
+
+    assert candidates[0][3] == 80
+    assert candidates[0][4] == 1234
 
 
 def test_draw_selected_marker_draws_corners_without_bounding_box() -> None:
