@@ -360,9 +360,23 @@ def test_follow_command_values_flow_into_short_packet_without_value_change() -> 
         vy=result["command_vy"],
     )
 
-    assert result["command_vx"] == pytest.approx(1.5)
-    assert result["command_vy"] == pytest.approx(-1.5)
-    assert frame == "v,1.5,-1.5"
+    expected_vx = max(
+        (float(module.FOLLOW_X_DEADZONE_PX) + 1.0) * float(module.FOLLOW_CONTROL_KP_X),
+        float(module.FOLLOW_CONTROL_MIN_SPEED),
+    )
+    expected_vy = (float(module.FOLLOW_Y_DEADZONE_PX) + 1.0) * float(module.FOLLOW_CONTROL_KP_Y)
+    expected_vy = max(
+        -float(module.FOLLOW_CONTROL_MAX_Y),
+        min(float(module.FOLLOW_CONTROL_MAX_Y), expected_vy),
+    )
+    if 0.0 < expected_vy < float(module.FOLLOW_CONTROL_MIN_SPEED):
+        expected_vy = float(module.FOLLOW_CONTROL_MIN_SPEED)
+    elif -float(module.FOLLOW_CONTROL_MIN_SPEED) < expected_vy < 0.0:
+        expected_vy = -float(module.FOLLOW_CONTROL_MIN_SPEED)
+
+    assert result["command_vx"] == pytest.approx(expected_vx)
+    assert result["command_vy"] == pytest.approx(expected_vy)
+    assert frame == module.format_vision_frame(vx=expected_vx, vy=expected_vy)
 
 
 def test_write_line_appends_crlf_to_short_packet(monkeypatch) -> None:

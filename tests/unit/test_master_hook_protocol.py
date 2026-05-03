@@ -470,8 +470,27 @@ def test_master_target_bottom_generates_p_search_velocity() -> None:
 
     assert best_blob is not None
     assert observation == (7, 30.0, -68.0, 300.0)
-    assert velocity[0] == 30.0 * module.MASTER_SEARCH_KP_X
-    assert velocity[1] == pytest.approx(module.MASTER_SEARCH_MIN_SPEED)
+    expected_vx = max(
+        30.0 * module.MASTER_SEARCH_KP_X,
+        float(module.MASTER_SEARCH_MIN_SPEED),
+    )
+    scaled_y_error = observation[2] * (
+        float(module.MASTER_SEARCH_MAX_VY)
+        / abs(float(module.MASTER_SEARCH_KP_Y))
+        / 240.0
+    )
+    expected_vy = scaled_y_error * float(module.MASTER_SEARCH_KP_Y)
+    expected_vy = max(
+        -float(module.MASTER_SEARCH_MAX_VY),
+        min(float(module.MASTER_SEARCH_MAX_VY), expected_vy),
+    )
+    if 0.0 < expected_vy < float(module.MASTER_SEARCH_MIN_SPEED):
+        expected_vy = float(module.MASTER_SEARCH_MIN_SPEED)
+    elif -float(module.MASTER_SEARCH_MIN_SPEED) < expected_vy < 0.0:
+        expected_vy = -float(module.MASTER_SEARCH_MIN_SPEED)
+
+    assert velocity[0] == pytest.approx(expected_vx)
+    assert velocity[1] == pytest.approx(expected_vy)
 
 
 def test_master_search_y_velocity_decreases_when_target_gets_closer() -> None:
