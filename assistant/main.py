@@ -44,23 +44,23 @@ OBJECT_APPROACH_CONFIG_ID = 1
 # TARGET_FOUND 事件编号。
 EVENT_TARGET_FOUND = 6
 
-# 跟随模式使用的橙色色标阈值。
-FOLLOW_TASKS = (("orange", (0, 100, 18, 127, 18, 127)),)
+# 跟随模式使用的绿色色标阈值。
+FOLLOW_TASKS = (("green", (37, 8, -57, -8, -36, 6)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
 OBJECT_TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
 
 # 跟随控制使用的横向死区，单位为像素。
-FOLLOW_X_DEADZONE_PX = 10.0
+FOLLOW_X_DEADZONE_PX = 5.0
 # 跟随控制使用的纵向目标尺度量，单位为像素。
 FOLLOW_TARGET_Y = 45.0
 # 跟随控制使用的纵向死区，单位为像素。
 FOLLOW_Y_DEADZONE_PX = 8.0
 # 跟随控制使用的横向速度修正量增益。
-FOLLOW_CONTROL_KP_X = 0.02
+FOLLOW_CONTROL_KP_X = 0.04
 # 跟随控制使用的纵向速度修正量增益。
 FOLLOW_CONTROL_KP_Y = -0.10
 # 跟随控制误差超出死区后的最小有效速度量。
-FOLLOW_CONTROL_MIN_SPEED = 2
+FOLLOW_CONTROL_MIN_SPEED = 0
 # 跟随控制纵向速度修正量上限。
 FOLLOW_CONTROL_MAX_Y = 5
 
@@ -71,23 +71,27 @@ OBJECT_MISSING_SEARCH_VY = 0.0
 # 找物体模式横向速度 P 环增益。
 OBJECT_APPROACH_KP_X = 0.05
 # 找物体模式纵向速度 P 环增益。
-OBJECT_APPROACH_KP_Y = -0.20
+OBJECT_APPROACH_KP_Y = -0.2
 # 找物体模式误差超出死区后的最小有效速度量。
-OBJECT_APPROACH_MIN_SPEED = 0.0
+OBJECT_APPROACH_MIN_SPEED = 2
 # 找物体模式横向误差死区，单位为像素。
-OBJECT_APPROACH_DEADZONE_X_PX = 8.0
+OBJECT_APPROACH_DEADZONE_X_PX = 15.0
 # 找物体模式纵向误差死区，单位为像素。
-OBJECT_APPROACH_DEADZONE_Y_PX = 15.0
+OBJECT_APPROACH_DEADZONE_Y_PX = 8.0
 # 找物体模式横向速度限幅。
 OBJECT_APPROACH_MAX_VX = 5.0
 # 找物体模式纵向速度限幅。
 OBJECT_APPROACH_MAX_VY = 5.0
+# 找物体目标点横向像素坐标。当前图像为 QVGA 320x240, 默认中线 x=160; 若修改图像宽度请同步调整。
+OBJECT_APPROACH_TARGET_X_PX = 160.0
+# 找物体目标点纵向像素坐标。当前图像为 QVGA 320x240, 默认底边 y=240; 若修改图像高度请同步调整。
+OBJECT_APPROACH_TARGET_Y_PX = 210.0
 # TARGET_FOUND 最小面积阈值。
 OBJECT_MIN_AREA = 50.0
 # TARGET_FOUND 横向容差，单位为像素。
-OBJECT_X_TOLERANCE_PX = 8.0
+OBJECT_X_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_X_PX
 # TARGET_FOUND 纵向容差，单位为像素。
-OBJECT_Y_TOLERANCE_PX = 8.0
+OBJECT_Y_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_Y_PX
 # 连续满足 hook 条件多少帧后确认找到目标。
 OBJECT_STABLE_FRAMES = 3
 
@@ -598,13 +602,18 @@ def build_object_observation(valid, center_x, bottom_y, area, image_width, image
 
     if int(valid) != 1:
         return 0.0, 0.0, 0.0
-    target_x = float(image_width) / 2.0
-    target_y = float(image_height)
+    target_x, target_y = build_object_target_point(image_width, image_height)
     return (
         float(center_x) - target_x,
         float(bottom_y) - target_y,
         float(area),
     )
+
+
+def build_object_target_point(image_width, image_height):
+    """! @brief 根据当前配置生成找物体目标点"""
+
+    return float(OBJECT_APPROACH_TARGET_X_PX), float(OBJECT_APPROACH_TARGET_Y_PX)
 
 
 def _build_object_y_velocity(err_y, image_height):
@@ -1003,9 +1012,9 @@ def process_object_frame(uart, state, img, image_width, image_height):
     if not candidates:
         observation = build_object_observation(0, 0, 0, 0, image_width, image_height)
     else:
-        cx_screen = float(image_width) / 2.0
+        target_x, target_y = build_object_target_point(image_width, image_height)
         _, pixel_x, pixel_y, bottom_y, area, best_blob = choose_best_candidate(
-            candidates, cx_screen, image_height
+            candidates, target_x, target_y
         )
         observation = build_object_observation(
             1,
@@ -1060,4 +1069,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-

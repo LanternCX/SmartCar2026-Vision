@@ -5,6 +5,28 @@ import pytest
 from tests.test_support import load_main_module, load_role_main_module
 
 
+def expected_follow_axis_velocity(module, error, kp, limit=None):
+    """按当前跟随参数计算单轴期望速度."""
+
+    value = float(error) * float(kp)
+    min_speed = abs(float(module.FOLLOW_CONTROL_MIN_SPEED))
+    if limit is not None:
+        limit = abs(float(limit))
+        if min_speed > limit:
+            min_speed = limit
+        if value > limit:
+            value = limit
+        if value < -limit:
+            value = -limit
+    if value == 0.0:
+        return 0.0
+    if 0.0 < value < min_speed:
+        return min_speed
+    if -min_speed < value < 0.0:
+        return -min_speed
+    return value
+
+
 def build_align_x_sample(module):
     """构造一个稳定的横向阶段样例."""
     return module.build_follow_command(
@@ -68,11 +90,23 @@ def build_cross_direction_dual_axis_sample(module):
     )
 
 
-def test_follow_target_y_uses_calibrated_midpoint() -> None:
-    """纵向目标尺度量使用现场标定的中点 45."""
+def test_follow_target_y_stays_positive() -> None:
+    """纵向目标尺度量保持正数语义."""
     module = load_main_module("vision_main_test_module_unit")
 
     assert module.FOLLOW_TARGET_Y > 0
+
+
+def test_follow_runtime_params_keep_non_negative_ranges() -> None:
+    """跟随控制参数保持代码层面可确定的非负范围."""
+
+    module = load_main_module("vision_main_test_module_unit")
+
+    assert float(module.FOLLOW_X_DEADZONE_PX) >= 0.0
+    assert float(module.FOLLOW_Y_DEADZONE_PX) >= 0.0
+    assert float(module.FOLLOW_TARGET_Y) > 0.0
+    assert float(module.FOLLOW_CONTROL_MIN_SPEED) >= 0.0
+    assert float(module.FOLLOW_CONTROL_MAX_Y) >= 0.0
 
 
 def test_compute_marker_span_uses_trapezoid_top_bottom_average() -> None:
@@ -333,7 +367,13 @@ def test_build_follow_command_align_x_outputs_only_lateral_velocity_delta() -> N
     module = load_main_module("vision_main_test_module_unit")
     result = build_align_x_sample(module)
 
-    assert result["command_vx"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
+    assert result["command_vx"] == pytest.approx(
+        expected_follow_axis_velocity(
+            module,
+            float(module.FOLLOW_X_DEADZONE_PX) + 1.0,
+            module.FOLLOW_CONTROL_KP_X,
+        )
+    )
     assert result["command_vy"] == pytest.approx(0.0)
 
 
@@ -351,8 +391,21 @@ def test_build_follow_command_outputs_both_axes_when_both_errors_exist() -> None
     module = load_main_module("vision_main_test_module_unit")
     result = build_dual_axis_sample(module)
 
-    assert result["command_vx"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
-    assert result["command_vy"] == pytest.approx(-module.FOLLOW_CONTROL_MIN_SPEED)
+    assert result["command_vx"] == pytest.approx(
+        expected_follow_axis_velocity(
+            module,
+            float(module.FOLLOW_X_DEADZONE_PX) + 1.0,
+            module.FOLLOW_CONTROL_KP_X,
+        )
+    )
+    assert result["command_vy"] == pytest.approx(
+        expected_follow_axis_velocity(
+            module,
+            float(module.FOLLOW_Y_DEADZONE_PX) + 1.0,
+            module.FOLLOW_CONTROL_KP_Y,
+            module.FOLLOW_CONTROL_MAX_Y,
+        )
+    )
 
 
 def test_build_follow_command_area_deadzone_holds_after_x_aligned() -> None:
@@ -383,7 +436,14 @@ def test_build_follow_command_align_y_outputs_only_longitudinal_velocity_delta()
     result = build_align_y_sample(module)
 
     assert result["command_vx"] == pytest.approx(0.0)
-    assert result["command_vy"] == pytest.approx(-module.FOLLOW_CONTROL_MIN_SPEED)
+    assert result["command_vy"] == pytest.approx(
+        expected_follow_axis_velocity(
+            module,
+            float(module.FOLLOW_Y_DEADZONE_PX) + 1.0,
+            module.FOLLOW_CONTROL_KP_Y,
+            module.FOLLOW_CONTROL_MAX_Y,
+        )
+    )
 
 
 def test_build_follow_command_align_y_preserves_reverse_direction() -> None:
@@ -392,7 +452,14 @@ def test_build_follow_command_align_y_preserves_reverse_direction() -> None:
     result = build_reverse_align_y_sample(module)
 
     assert result["command_vx"] == pytest.approx(0.0)
-    assert result["command_vy"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
+    assert result["command_vy"] == pytest.approx(
+        expected_follow_axis_velocity(
+            module,
+            -(float(module.FOLLOW_Y_DEADZONE_PX) + 1.0),
+            module.FOLLOW_CONTROL_KP_Y,
+            module.FOLLOW_CONTROL_MAX_Y,
+        )
+    )
 
 
 def test_build_follow_command_applies_min_speed_outside_deadzone() -> None:
@@ -410,8 +477,21 @@ def test_build_follow_command_applies_min_speed_outside_deadzone() -> None:
         err_y=float(module.FOLLOW_Y_DEADZONE_PX) + 0.1,
     )
 
-    assert x_result["command_vx"] == pytest.approx(module.FOLLOW_CONTROL_MIN_SPEED)
-    assert y_result["command_vy"] == pytest.approx(-module.FOLLOW_CONTROL_MIN_SPEED)
+    assert x_result["command_vx"] == pytest.approx(
+        expected_follow_axis_velocity(
+            module,
+            float(module.FOLLOW_X_DEADZONE_PX) + 0.1,
+            module.FOLLOW_CONTROL_KP_X,
+        )
+    )
+    assert y_result["command_vy"] == pytest.approx(
+        expected_follow_axis_velocity(
+            module,
+            float(module.FOLLOW_Y_DEADZONE_PX) + 0.1,
+            module.FOLLOW_CONTROL_KP_Y,
+            module.FOLLOW_CONTROL_MAX_Y,
+        )
+    )
 
 
 def test_build_follow_command_dual_axis_keeps_axes_independent() -> None:
