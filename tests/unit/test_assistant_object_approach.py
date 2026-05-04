@@ -242,6 +242,15 @@ def test_assistant_object_params_stay_within_qvga_bounds() -> None:
     assert int(module.OBJECT_STABLE_FRAMES) >= 1
 
 
+def test_assistant_target_found_window_matches_approach_deadzone() -> None:
+    """找物体命中窗口与停下修正的死区保持一致."""
+
+    module = load_assistant()
+
+    assert float(module.OBJECT_X_TOLERANCE_PX) == float(module.OBJECT_APPROACH_DEADZONE_X_PX)
+    assert float(module.OBJECT_Y_TOLERANCE_PX) == float(module.OBJECT_APPROACH_DEADZONE_Y_PX)
+
+
 def test_assistant_object_target_can_be_reconfigured(monkeypatch) -> None:
     """找物体目标点改动后, 候选选择和输出速度都要跟着变化."""
 

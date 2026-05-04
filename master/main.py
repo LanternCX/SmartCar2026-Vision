@@ -28,12 +28,6 @@ RELIABLE_WRITE_DELAY_S = 0.001
 RELIABLE_RESEND_INTERVAL_MS = 100
 # 红色候选目标的最小面积，小于该值不会触发找到事件。
 OBJECT_MIN_AREA = 50.0
-# 目标中心允许偏离搜索目标点的最大横向像素误差。
-OBJECT_X_TOLERANCE_PX = 8.0
-# 目标底边允许偏离搜索目标点的最大纵向像素误差。
-OBJECT_Y_TOLERANCE_PX = 8.0
-# 连续满足面积与位置条件多少帧后确认找到目标。
-OBJECT_STABLE_FRAMES = 3
 # 主车搜索目标丢失时输出的配置横向速度。
 MASTER_MISSING_SEARCH_VX = 0.0
 # 主车搜索目标丢失时输出的配置纵向速度。
@@ -48,6 +42,12 @@ MASTER_SEARCH_MIN_SPEED = 2
 MASTER_SEARCH_DEADZONE_X_PX = 15.0
 # 主车搜索纵向误差死区, 单位为像素。
 MASTER_SEARCH_DEADZONE_Y_PX = 8.0
+# 目标中心允许偏离搜索目标点的最大横向像素误差。
+OBJECT_X_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_X_PX
+# 目标底边允许偏离搜索目标点的最大纵向像素误差。
+OBJECT_Y_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_Y_PX
+# 连续满足面积与位置条件多少帧后确认找到目标。
+OBJECT_STABLE_FRAMES = 3
 # 主车搜索横向速度限幅。
 MASTER_SEARCH_MAX_VX = 5.0
 # 主车搜索纵向速度限幅。

@@ -212,6 +212,15 @@ def test_master_search_params_stay_within_qvga_bounds() -> None:
     assert int(module.OBJECT_STABLE_FRAMES) >= 1
 
 
+def test_master_target_found_window_matches_search_deadzone() -> None:
+    """! @brief 主车命中窗口与停下修正的死区保持一致"""
+
+    module = load_master()
+
+    assert float(module.OBJECT_X_TOLERANCE_PX) == float(module.MASTER_SEARCH_DEADZONE_X_PX)
+    assert float(module.OBJECT_Y_TOLERANCE_PX) == float(module.MASTER_SEARCH_DEADZONE_Y_PX)
+
+
 def test_master_search_target_can_be_reconfigured(monkeypatch) -> None:
     """! @brief 主车搜索目标点改动后, 候选选择和观测误差都要跟着变化"""
 
