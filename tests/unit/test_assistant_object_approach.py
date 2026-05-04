@@ -41,6 +41,81 @@ def load_assistant():
     return load_main_module("assistant_object_approach_test_module")
 
 
+IMAGE_WIDTH = 320
+IMAGE_HEIGHT = 240
+
+
+def assistant_target_point(module):
+    """返回当前找物体目标点."""
+
+    return module.build_object_target_point(IMAGE_WIDTH, IMAGE_HEIGHT)
+
+
+def centered_object_observation(module, area):
+    """构造命中当前目标点的观测."""
+
+    target_x, target_y = assistant_target_point(module)
+    return module.build_object_observation(
+        1,
+        target_x,
+        target_y,
+        area,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+
+def choose_outside_deadzone_offset(target, upper_bound, deadzone, clearance=1.0):
+    """在图像范围内构造一个稳定超出死区的偏移量."""
+
+    required = float(deadzone) + float(clearance)
+    target = float(target)
+    upper_bound = float(upper_bound)
+    if upper_bound - target >= required:
+        return required
+    if target >= required:
+        return -required
+    raise AssertionError("configured target leaves no room for out-of-deadzone sample")
+
+
+def expected_axis_velocity(error, kp, min_speed, limit):
+    """按当前参数计算单轴期望速度."""
+
+    value = float(error) * float(kp)
+    limit = abs(float(limit))
+    min_speed = min(abs(float(min_speed)), limit)
+    if value > limit:
+        value = limit
+    if value < -limit:
+        value = -limit
+    if value == 0.0:
+        return 0.0
+    if 0.0 < value < min_speed:
+        return min_speed
+    if -min_speed < value < 0.0:
+        return -min_speed
+    return value
+
+
+def expected_object_y_velocity(module, err_y):
+    """按当前参数计算纵向找物体期望速度."""
+
+    err_y = float(err_y)
+    if abs(err_y) <= float(module.OBJECT_APPROACH_DEADZONE_Y_PX):
+        return 0.0
+    scaled_error = err_y * (
+        float(module.OBJECT_APPROACH_MAX_VY)
+        / abs(float(module.OBJECT_APPROACH_KP_Y))
+        / float(IMAGE_HEIGHT)
+    )
+    return expected_axis_velocity(
+        scaled_error,
+        module.OBJECT_APPROACH_KP_Y,
+        module.OBJECT_APPROACH_MIN_SPEED,
+        module.OBJECT_APPROACH_MAX_VY,
+    )
+
+
 def test_assistant_defaults_to_follow_mode() -> None:
     """默认启动模式仍然是 follow."""
 
@@ -83,7 +158,7 @@ def test_assistant_repeated_sync_replies_ack_without_clearing_pending_event() ->
     )
 
     assert state.handle_control_line("s,12,2,1,1") == "a,12"
-    observation = module.build_object_observation(1, 160, 240, 180, 320, 240)
+    observation = centered_object_observation(module, 180)
     state.accept_object_observation(observation)
     first = state.next_event_frame()
 
@@ -98,44 +173,73 @@ def test_assistant_missing_target_outputs_zero_search_velocity() -> None:
     """无目标时找物体模式输出零搜索速度。"""
 
     module = load_assistant()
-    observation = module.build_object_observation(0, 0, 0, 0, 320, 240)
+    observation = module.build_object_observation(0, 0, 0, 0, IMAGE_WIDTH, IMAGE_HEIGHT)
 
-    assert module.build_object_approach_velocity_from_observation(observation, 240) == (
+    assert module.build_object_approach_velocity_from_observation(
+        observation, IMAGE_HEIGHT
+    ) == (
         module.OBJECT_MISSING_SEARCH_VX,
         module.OBJECT_MISSING_SEARCH_VY,
     )
     assert module.OBJECT_MISSING_SEARCH_VY == 0.0
 
 
-def test_assistant_target_bottom_generates_p_search_velocity() -> None:
-    """有目标时找物体模式使用中心和底边误差生成速度."""
+def test_assistant_object_target_point_generates_p_search_velocity() -> None:
+    """有目标时找物体模式按当前目标点误差生成速度."""
 
     module = load_assistant()
-    observation = module.build_object_observation(1, 190, 172, 300, 320, 240)
-    velocity = module.build_object_approach_velocity_from_observation(observation, 240)
+    target_x, target_y = assistant_target_point(module)
+    err_x = choose_outside_deadzone_offset(
+        target_x,
+        IMAGE_WIDTH,
+        module.OBJECT_APPROACH_DEADZONE_X_PX,
+        clearance=15.0,
+    )
+    err_y = choose_outside_deadzone_offset(
+        target_y,
+        IMAGE_HEIGHT,
+        module.OBJECT_APPROACH_DEADZONE_Y_PX,
+        clearance=15.0,
+    )
+    observation = module.build_object_observation(
+        1,
+        target_x + err_x,
+        target_y + err_y,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+    velocity = module.build_object_approach_velocity_from_observation(
+        observation, IMAGE_HEIGHT
+    )
 
-    assert observation == (30.0, -68.0, 300.0)
-    expected_vx = max(
-        30.0 * module.OBJECT_APPROACH_KP_X,
-        float(module.OBJECT_APPROACH_MIN_SPEED),
+    assert observation == pytest.approx((err_x, err_y, 300.0))
+    assert velocity == pytest.approx(
+        (
+            expected_axis_velocity(
+                err_x,
+                module.OBJECT_APPROACH_KP_X,
+                module.OBJECT_APPROACH_MIN_SPEED,
+                module.OBJECT_APPROACH_MAX_VX,
+            ),
+            expected_object_y_velocity(module, err_y),
+        )
     )
-    scaled_y_error = observation[1] * (
-        float(module.OBJECT_APPROACH_MAX_VY)
-        / abs(float(module.OBJECT_APPROACH_KP_Y))
-        / 240.0
-    )
-    expected_vy = scaled_y_error * float(module.OBJECT_APPROACH_KP_Y)
-    expected_vy = max(
-        -float(module.OBJECT_APPROACH_MAX_VY),
-        min(float(module.OBJECT_APPROACH_MAX_VY), expected_vy),
-    )
-    if 0.0 < expected_vy < float(module.OBJECT_APPROACH_MIN_SPEED):
-        expected_vy = float(module.OBJECT_APPROACH_MIN_SPEED)
-    elif -float(module.OBJECT_APPROACH_MIN_SPEED) < expected_vy < 0.0:
-        expected_vy = -float(module.OBJECT_APPROACH_MIN_SPEED)
 
-    assert velocity[0] == pytest.approx(expected_vx)
-    assert velocity[1] == pytest.approx(expected_vy)
+
+def test_assistant_object_params_stay_within_qvga_bounds() -> None:
+    """找物体像素参数保持在当前图像范围内."""
+
+    module = load_assistant()
+
+    assert 0.0 <= float(module.OBJECT_APPROACH_TARGET_X_PX) <= IMAGE_WIDTH
+    assert 0.0 <= float(module.OBJECT_APPROACH_TARGET_Y_PX) <= IMAGE_HEIGHT
+    assert 0.0 <= float(module.OBJECT_APPROACH_DEADZONE_X_PX) < IMAGE_WIDTH
+    assert 0.0 <= float(module.OBJECT_APPROACH_DEADZONE_Y_PX) < IMAGE_HEIGHT
+    assert 0.0 <= float(module.OBJECT_X_TOLERANCE_PX) <= IMAGE_WIDTH
+    assert 0.0 <= float(module.OBJECT_Y_TOLERANCE_PX) <= IMAGE_HEIGHT
+    assert float(module.OBJECT_MIN_AREA) >= 0.0
+    assert int(module.OBJECT_STABLE_FRAMES) >= 1
 
 
 def test_assistant_object_target_can_be_reconfigured(monkeypatch) -> None:
@@ -173,7 +277,7 @@ def test_assistant_object_target_can_be_reconfigured(monkeypatch) -> None:
             self.crosses = []
 
         def height(self):
-            return 240
+            return IMAGE_HEIGHT
 
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
             return list(self._blobs)
@@ -185,7 +289,7 @@ def test_assistant_object_target_can_be_reconfigured(monkeypatch) -> None:
     second_blob = FakeBlob(150, 40, 20, 20)
     img = FakeImage([second_blob, first_blob])
 
-    module.process_object_frame(uart, state, img, 320, 240)
+    module.process_object_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
     assert uart.writes == ["v,0,0\r\n"]
 
@@ -202,7 +306,7 @@ def test_assistant_hook_waits_for_stable_target_before_event() -> None:
     )
 
     assert state.handle_control_line("s,12,2,1,1") == "a,12"
-    observation = module.build_object_observation(1, 160, 240, 150, 320, 240)
+    observation = centered_object_observation(module, 150)
 
     state.accept_object_observation(observation)
     assert state.next_event_frame() is None
@@ -223,7 +327,7 @@ def test_assistant_hook_repeats_event_until_matching_ack() -> None:
     )
 
     assert state.handle_control_line("s,12,2,1,1") == "a,12"
-    observation = module.build_object_observation(1, 160, 240, 180, 320, 240)
+    observation = centered_object_observation(module, 180)
     state.accept_object_observation(observation)
     first = state.next_event_frame()
     state.handle_control_line("a,11")
