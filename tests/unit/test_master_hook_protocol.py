@@ -119,6 +119,46 @@ def test_master_object_observation_uses_middle_and_image_bottom_target() -> None
     assert observation == (7, 0.0, 0.0, 250.0)
 
 
+def test_master_search_target_can_be_reconfigured(monkeypatch) -> None:
+    """! @brief 主车搜索目标点改动后, 候选选择和观测误差都要跟着变化"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    hook.handle_control_line("s,12,7,1,1,1")
+    monkeypatch.setattr(module, "MASTER_SEARCH_TARGET_X_PX", 80.0)
+    monkeypatch.setattr(module, "MASTER_SEARCH_TARGET_Y_PX", 120.0)
+
+    class FakeBlob:
+        def __init__(self, left, top, width, height):
+            self._rect = (left, top, width, height)
+
+        def rect(self):
+            return self._rect
+
+        def cx(self):
+            return self._rect[0] + self._rect[2] / 2
+
+    first_blob = FakeBlob(70, 120, 20, 20)
+    second_blob = FakeBlob(150, 0, 20, 20)
+
+    class FakeImage:
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [second_blob, first_blob]
+
+    observation, best_blob = module.build_observation_from_image(
+        hook,
+        FakeImage(),
+        320,
+        240,
+    )
+
+    assert best_blob is first_blob
+    assert observation == (7, 0.0, 0.0, 400.0)
+
+
 def test_master_missing_target_outputs_zero_observation() -> None:
     """! @brief 无目标时主车视觉输出同一上下文下的零观测"""
 

@@ -138,6 +138,58 @@ def test_assistant_target_bottom_generates_p_search_velocity() -> None:
     assert velocity[1] == pytest.approx(expected_vy)
 
 
+def test_assistant_object_target_can_be_reconfigured(monkeypatch) -> None:
+    """找物体目标点改动后, 候选选择和输出速度都要跟着变化."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState()
+    uart = FakeUART()
+    assert state.handle_control_line("s,12,2,1,1") == "a,12"
+    monkeypatch.setattr(module, "OBJECT_APPROACH_TARGET_X_PX", 80.0)
+    monkeypatch.setattr(module, "OBJECT_APPROACH_TARGET_Y_PX", 120.0)
+
+    class FakeBlob:
+        def __init__(self, left, top, width, height):
+            self._rect = (left, top, width, height)
+
+        def rect(self):
+            return self._rect
+
+        def cx(self):
+            return self._rect[0] + self._rect[2] / 2
+
+        def cy(self):
+            return self._rect[1] + self._rect[3] / 2
+
+        def min_corners(self):
+            left, top, width, height = self._rect
+            right = left + width
+            bottom = top + height
+            return ((left, top), (right, top), (right, bottom), (left, bottom))
+
+    class FakeImage:
+        def __init__(self, blobs):
+            self._blobs = blobs
+            self.crosses = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return list(self._blobs)
+
+        def draw_cross(self, x, y):
+            self.crosses.append((x, y))
+
+    first_blob = FakeBlob(70, 120, 20, 20)
+    second_blob = FakeBlob(150, 40, 20, 20)
+    img = FakeImage([second_blob, first_blob])
+
+    module.process_object_frame(uart, state, img, 320, 240)
+
+    assert uart.writes == ["v,0,0\r\n"]
+
+
 def test_assistant_hook_waits_for_stable_target_before_event() -> None:
     """目标稳定满足条件后才创建 TARGET_FOUND 事件."""
 

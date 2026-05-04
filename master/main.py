@@ -28,9 +28,9 @@ RELIABLE_WRITE_DELAY_S = 0.001
 RELIABLE_RESEND_INTERVAL_MS = 100
 # 红色候选目标的最小面积，小于该值不会触发找到事件。
 OBJECT_MIN_AREA = 50.0
-# 目标中心允许偏离画面中线的最大横向像素误差。
+# 目标中心允许偏离搜索目标点的最大横向像素误差。
 OBJECT_X_TOLERANCE_PX = 8.0
-# 目标底边允许偏离图像底边的最大纵向像素误差。
+# 目标底边允许偏离搜索目标点的最大纵向像素误差。
 OBJECT_Y_TOLERANCE_PX = 8.0
 # 连续满足面积与位置条件多少帧后确认找到目标。
 OBJECT_STABLE_FRAMES = 3
@@ -52,6 +52,10 @@ MASTER_SEARCH_DEADZONE_Y_PX = 8.0
 MASTER_SEARCH_MAX_VX = 5.0
 # 主车搜索纵向速度限幅。
 MASTER_SEARCH_MAX_VY = 5.0
+# 主车搜索目标点横向像素坐标。当前图像为 QVGA 320x240, 默认中线 x=160; 若修改图像宽度请同步调整。
+MASTER_SEARCH_TARGET_X_PX = 160.0
+# 主车搜索目标点纵向像素坐标。当前图像为 QVGA 320x240, 默认底边 y=240; 若修改图像高度请同步调整。
+MASTER_SEARCH_TARGET_Y_PX = 210.0
 # 车端协议中的主车搜索状态编号。
 STATE_SEARCH_OBJECT = 1
 # 车端协议中的物体目标编号。
@@ -380,7 +384,7 @@ def choose_best_candidate(candidates, target_x, target_y):
 
     @param candidates 候选目标列表
     @param target_x hook 目标点 x 坐标
-    @param target_y hook 目标底边 y 坐标
+    @param target_y hook 目标点 y 坐标
     @return 被选中的候选目标
     """
 
@@ -389,6 +393,12 @@ def choose_best_candidate(candidates, target_x, target_y):
         key=lambda item: (float(item[1]) - float(target_x)) ** 2
         + (float(item[2]) - float(target_y)) ** 2,
     )
+
+
+def build_search_target_point(image_width, image_height):
+    """! @brief 根据当前配置生成主车搜索目标点"""
+
+    return float(MASTER_SEARCH_TARGET_X_PX), float(MASTER_SEARCH_TARGET_Y_PX)
 
 
 def get_marker_corners(blob):
@@ -653,8 +663,7 @@ class MasterVisionHook:
             context_id = int(self.context["context_id"])
         if int(valid) != 1:
             return context_id, 0.0, 0.0, 0.0
-        target_x = float(image_width) / 2.0
-        target_y = float(image_height)
+        target_x, target_y = build_search_target_point(image_width, image_height)
         return (
             context_id,
             float(center_x) - target_x,
@@ -845,8 +854,7 @@ def build_observation_from_image(hook, img, image_width, image_height):
     candidates = build_blob_candidates(img)
     if not candidates:
         return hook.build_observation(0, 0, 0, 0, image_width, image_height), None
-    target_x = float(image_width) / 2.0
-    target_y = float(image_height)
+    target_x, target_y = build_search_target_point(image_width, image_height)
     _, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
         candidates, target_x, target_y
     )
