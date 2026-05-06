@@ -45,10 +45,12 @@ IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
 
 
-def assistant_target_point(module):
-    """返回当前找物体目标点."""
+def assistant_target_point(module, config_id=None):
+    """返回当前指定配置的找物体目标点."""
 
-    return module.build_object_target_point(IMAGE_WIDTH, IMAGE_HEIGHT)
+    if config_id is None:
+        config_id = module.OBJECT_APPROACH_CONFIG_ID
+    return module.build_object_target_point(IMAGE_WIDTH, IMAGE_HEIGHT, config_id)
 
 
 def centered_object_observation(module, area):
@@ -62,6 +64,24 @@ def centered_object_observation(module, area):
         area,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
+    )
+
+
+def centered_transport_observation(module, area):
+    """构造命中搬运入口目标点的观测."""
+
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+    return module.build_object_observation(
+        1,
+        target_x,
+        target_y,
+        area,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
     )
 
 
@@ -227,6 +247,66 @@ def test_assistant_object_target_point_generates_p_search_velocity() -> None:
     )
 
 
+def test_assistant_transport_observation_uses_transport_target_point() -> None:
+    """搬运入口配置的目标底边必须切到推行阶段目标点."""
+
+    module = load_assistant()
+    search_target_x, search_target_y = assistant_target_point(
+        module,
+        module.OBJECT_APPROACH_CONFIG_ID,
+    )
+    transport_target_x, transport_target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    search_observation = module.build_object_observation(
+        1,
+        search_target_x,
+        search_target_y,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.OBJECT_APPROACH_CONFIG_ID,
+    )
+    transport_observation = module.build_object_observation(
+        1,
+        transport_target_x,
+        transport_target_y,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    assert search_target_y == 210.0
+    assert transport_target_y == 240.0
+    assert search_observation == pytest.approx((0.0, 0.0, 300.0))
+    assert transport_observation == pytest.approx((0.0, 0.0, 300.0))
+
+
+def test_assistant_transport_config_treats_search_target_as_not_aligned() -> None:
+    """搬运入口配置不能继续沿用寻找阶段的 210 目标点."""
+
+    module = load_assistant()
+    search_target_x, search_target_y = assistant_target_point(
+        module,
+        module.OBJECT_APPROACH_CONFIG_ID,
+    )
+
+    observation = module.build_object_observation(
+        1,
+        search_target_x,
+        search_target_y,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    assert observation == pytest.approx((0.0, -30.0, 300.0))
+
+
 def test_assistant_object_params_stay_within_qvga_bounds() -> None:
     """找物体像素参数保持在当前图像范围内."""
 
@@ -347,6 +427,84 @@ def test_assistant_hook_repeats_event_until_matching_ack() -> None:
     assert first == "r,12,6,180"
     assert second == first
     assert state.next_event_frame() is None
+
+
+def test_assistant_transport_mode_emits_aligned_for_transport_config() -> None:
+    """搬运入口配置稳定满足条件后回报 ALIGNED."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState(stable_frames=1)
+
+    assert (
+        state.handle_control_line(
+            "s,12,%d,1,%d"
+            % (
+                int(module.STATE_APPROACH_OBJECT),
+                int(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID),
+            )
+        )
+        == "a,12"
+    )
+    observation = centered_transport_observation(module, 180)
+    state.accept_object_observation(observation)
+
+    assert state.next_event_frame() == "r,12,7,180"
+
+
+def test_assistant_transport_mode_keeps_object_velocity_output() -> None:
+    """搬运入口配置继续输出物体视觉速度."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState()
+    uart = FakeUART()
+    assert (
+        state.handle_control_line(
+            "s,12,%d,1,%d"
+            % (
+                int(module.STATE_APPROACH_OBJECT),
+                int(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID),
+            )
+        )
+        == "a,12"
+    )
+
+    class FakeBlob:
+        def __init__(self, left, top, width, height):
+            self._rect = (left, top, width, height)
+
+        def rect(self):
+            return self._rect
+
+        def cx(self):
+            return self._rect[0] + self._rect[2] / 2
+
+        def cy(self):
+            return self._rect[1] + self._rect[3] / 2
+
+        def min_corners(self):
+            left, top, width, height = self._rect
+            right = left + width
+            bottom = top + height
+            return ((left, top), (right, top), (right, bottom), (left, bottom))
+
+    class FakeImage:
+        def __init__(self, blobs):
+            self._blobs = blobs
+            self.crosses = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return list(self._blobs)
+
+        def draw_cross(self, x, y):
+            self.crosses.append((x, y))
+
+    img = FakeImage([FakeBlob(150, 150, 20, 20)])
+    module.process_object_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert uart.writes[0].startswith("v,")
 
 
 def test_assistant_process_uart_input_writes_local_ack() -> None:

@@ -47,16 +47,35 @@ IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
 
 
-def master_target_point(module):
-    """! @brief 返回当前主车搜索目标点"""
+def master_target_point(module, config_id=None):
+    """! @brief 返回当前主车指定配置的搜索目标点"""
 
-    return module.build_search_target_point(IMAGE_WIDTH, IMAGE_HEIGHT)
+    if config_id is None:
+        config_id = module.MASTER_SEARCH_HOOK_CONFIG_ID
+    return module.build_search_target_point(IMAGE_WIDTH, IMAGE_HEIGHT, config_id)
 
 
 def centered_master_observation(module, hook, area):
     """! @brief 构造命中当前目标点的观测"""
 
     target_x, target_y = master_target_point(module)
+    return hook.build_observation(
+        1,
+        target_x,
+        target_y,
+        area,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+
+def centered_master_transport_observation(module, hook, area):
+    """! @brief 构造命中搬运入口目标点的观测"""
+
+    target_x, target_y = master_target_point(
+        module,
+        module.MASTER_TRANSPORT_HOOK_CONFIG_ID,
+    )
     return hook.build_observation(
         1,
         target_x,
@@ -195,6 +214,50 @@ def test_master_object_observation_uses_configured_target_point() -> None:
     )
 
     assert observation == (7, 0.0, 0.0, 250.0)
+
+
+def test_master_transport_observation_uses_transport_target_point() -> None:
+    """! @brief 搬运入口配置的目标底边必须切到推行阶段目标点"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(
+        "s,12,7,%d,1,%d"
+        % (
+            int(module.STATE_SEARCH_OBJECT),
+            int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+        )
+    )
+    search_target_x, search_target_y = master_target_point(
+        module,
+        module.MASTER_SEARCH_HOOK_CONFIG_ID,
+    )
+    transport_target_x, transport_target_y = master_target_point(
+        module,
+        module.MASTER_TRANSPORT_HOOK_CONFIG_ID,
+    )
+
+    search_observation = hook.build_observation(
+        1,
+        search_target_x,
+        search_target_y,
+        250,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+    transport_observation = hook.build_observation(
+        1,
+        transport_target_x,
+        transport_target_y,
+        250,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    assert search_target_y == 210.0
+    assert transport_target_y == 240.0
+    assert search_observation == (7, 0.0, -30.0, 250.0)
+    assert transport_observation == (7, 0.0, 0.0, 250.0)
 
 
 def test_master_search_params_stay_within_qvga_bounds() -> None:
@@ -406,6 +469,73 @@ def test_master_hook_does_not_event_for_unsupported_hook_config() -> None:
     hook.accept_observation(observation)
 
     assert hook.next_event_frame() is None
+
+
+def test_master_transport_hook_emits_aligned_for_transport_config() -> None:
+    """! @brief 搬运入口 hook 配置稳定满足条件后回报 ALIGNED"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(
+        stable_frames=1,
+        next_reliable_seq=30,
+    )
+    hook.handle_control_line(
+        "s,12,7,%d,1,%d"
+        % (
+            int(module.STATE_SEARCH_OBJECT),
+            int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+        )
+    )
+    observation = centered_master_transport_observation(module, hook, 180)
+
+    hook.accept_observation(observation)
+
+    assert hook.next_event_frame() == "r,30,7,7,180"
+
+
+def test_master_transport_hook_keeps_search_velocity_output() -> None:
+    """! @brief 搬运入口 hook 配置继续输出视觉速度"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(
+        "s,12,7,%d,1,%d"
+        % (
+            int(module.STATE_SEARCH_OBJECT),
+            int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+        )
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (150, 150, 20, 20)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 160
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def __init__(self):
+            self.crosses = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [FakeBlob()]
+
+        def draw_cross(self, x, y):
+            self.crosses.append((x, y))
+
+    uart = FakeUART()
+    module.process_search_frame(uart, hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert uart.writes[0].startswith("v,")
 
 
 def test_master_hook_throttles_pending_event_retries() -> None:

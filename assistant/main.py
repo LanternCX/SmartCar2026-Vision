@@ -41,8 +41,12 @@ STATE_APPROACH_OBJECT = 2
 TARGET_OBJECT = 1
 # 找物体同步参数编号。
 OBJECT_APPROACH_CONFIG_ID = 1
+# 搬运对正同步参数编号。
+ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID = 2
 # TARGET_FOUND 事件编号。
 EVENT_TARGET_FOUND = 6
+# ALIGNED 事件编号。
+EVENT_ALIGNED = 7
 
 # 跟随模式使用的绿色色标阈值。
 FOLLOW_TASKS = (("green", (37, 8, -57, -8, -36, 6)),)
@@ -86,6 +90,8 @@ OBJECT_APPROACH_MAX_VY = 5.0
 OBJECT_APPROACH_TARGET_X_PX = 160.0
 # 找物体目标点纵向像素坐标。当前图像为 QVGA 320x240, 默认底边 y=240; 若修改图像高度请同步调整。
 OBJECT_APPROACH_TARGET_Y_PX = 210.0
+# 搬运入口目标点纵向像素坐标。当前图像为 QVGA 320x240, 推行前对正使用底边 y=240。
+ASSISTANT_TRANSPORT_TARGET_Y_PX = 240.0
 # TARGET_FOUND 最小面积阈值。
 OBJECT_MIN_AREA = 50.0
 # TARGET_FOUND 横向容差，单位为像素。
@@ -588,7 +594,15 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     img.draw_cross(pixel_x, pixel_y)
 
 
-def build_object_observation(valid, center_x, bottom_y, area, image_width, image_height):
+def build_object_observation(
+    valid,
+    center_x,
+    bottom_y,
+    area,
+    image_width,
+    image_height,
+    config_id=OBJECT_APPROACH_CONFIG_ID,
+):
     """! @brief 根据物体中心、底边和面积生成找物体观测
 
     @param valid 当前帧是否存在有效目标
@@ -597,12 +611,17 @@ def build_object_observation(valid, center_x, bottom_y, area, image_width, image
     @param area 目标面积
     @param image_width 图像宽度
     @param image_height 图像高度
+    @param config_id 当前找物体配置编号
     @return x, y, value 观测字段元组
     """
 
     if int(valid) != 1:
         return 0.0, 0.0, 0.0
-    target_x, target_y = build_object_target_point(image_width, image_height)
+    target_x, target_y = build_object_target_point(
+        image_width,
+        image_height,
+        config_id,
+    )
     return (
         float(center_x) - target_x,
         float(bottom_y) - target_y,
@@ -610,10 +629,19 @@ def build_object_observation(valid, center_x, bottom_y, area, image_width, image
     )
 
 
-def build_object_target_point(image_width, image_height):
+def build_object_target_point(
+    image_width,
+    image_height,
+    config_id=OBJECT_APPROACH_CONFIG_ID,
+):
     """! @brief 根据当前配置生成找物体目标点"""
 
-    return float(OBJECT_APPROACH_TARGET_X_PX), float(OBJECT_APPROACH_TARGET_Y_PX)
+    _ = image_width
+    _ = image_height
+    target_x = float(OBJECT_APPROACH_TARGET_X_PX)
+    if int(config_id) == int(ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID):
+        return target_x, float(ASSISTANT_TRANSPORT_TARGET_Y_PX)
+    return target_x, float(OBJECT_APPROACH_TARGET_Y_PX)
 
 
 def _build_object_y_velocity(err_y, image_height):
@@ -766,10 +794,20 @@ class AssistantVisionState:
         if (
             int(sync["state"]) == STATE_APPROACH_OBJECT
             and int(sync["target"]) == TARGET_OBJECT
-            and int(sync["arg"]) == OBJECT_APPROACH_CONFIG_ID
+            and (
+                int(sync["arg"]) == OBJECT_APPROACH_CONFIG_ID
+                or int(sync["arg"]) == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+            )
         ):
             return MODE_APPROACH_OBJECT
         return MODE_FOLLOW
+
+    def current_object_config_id(self):
+        """! @brief 返回当前找物体阶段使用的目标点配置编号"""
+
+        if self.current_sync is None:
+            return OBJECT_APPROACH_CONFIG_ID
+        return int(self.current_sync["arg"])
 
     def _handle_ack_packet(self, packet):
         """! @brief 处理可靠事件确认包
@@ -797,6 +835,10 @@ class AssistantVisionState:
             return
         if self._completed_event_sync_seq == current_sync_seq:
             return
+        event_id = self._current_event_id()
+        if event_id is None:
+            self._stable_count = 0
+            return
         x, y, value = observation
         if self._observation_matches_target(x, y, value):
             self._stable_count += 1
@@ -804,7 +846,7 @@ class AssistantVisionState:
             self._stable_count = 0
             return
         if self._stable_count >= self.required_stable_frames:
-            self._create_target_found_event(current_sync_seq, value)
+            self._create_event(current_sync_seq, event_id, value)
 
     def _observation_matches_target(self, x, y, value):
         """! @brief 判断当前观测是否满足找到目标条件
@@ -821,16 +863,42 @@ class AssistantVisionState:
             and abs(float(y)) <= self.tolerance_y
         )
 
-    def _create_target_found_event(self, reliable_seq, value):
-        """! @brief 创建 TARGET_FOUND 待确认事件
+    def _current_event_id(self):
+        """! @brief 返回当前模式应回报的事件编号
+
+        @return 事件编号, 当前模式不支持时返回 None
+        """
+
+        if self.current_sync is None:
+            return None
+        state = int(self.current_sync["state"])
+        target = int(self.current_sync["target"])
+        arg = int(self.current_sync["arg"])
+        if (
+            state == STATE_APPROACH_OBJECT
+            and target == TARGET_OBJECT
+            and arg == OBJECT_APPROACH_CONFIG_ID
+        ):
+            return EVENT_TARGET_FOUND
+        if (
+            state == STATE_APPROACH_OBJECT
+            and target == TARGET_OBJECT
+            and arg == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+        ):
+            return EVENT_ALIGNED
+        return None
+
+    def _create_event(self, reliable_seq, event, value):
+        """! @brief 创建待确认事件
 
         @param reliable_seq 当前同步序号
+        @param event 事件编号
         @param value 事件附加值
         """
 
         self._pending_event = {
             "reliable_seq": int(reliable_seq),
-            "event": EVENT_TARGET_FOUND,
+            "event": int(event),
             "value": int(float(value)),
         }
         self._pending_event_last_sent_ms = None
@@ -1012,7 +1080,12 @@ def process_object_frame(uart, state, img, image_width, image_height):
     if not candidates:
         observation = build_object_observation(0, 0, 0, 0, image_width, image_height)
     else:
-        target_x, target_y = build_object_target_point(image_width, image_height)
+        config_id = state.current_object_config_id()
+        target_x, target_y = build_object_target_point(
+            image_width,
+            image_height,
+            config_id,
+        )
         _, pixel_x, pixel_y, bottom_y, area, best_blob = choose_best_candidate(
             candidates, target_x, target_y
         )
@@ -1023,6 +1096,7 @@ def process_object_frame(uart, state, img, image_width, image_height):
             area,
             image_width,
             image_height,
+            config_id,
         )
         draw_selected_marker(img=img, blob=best_blob, pixel_x=pixel_x, pixel_y=pixel_y)
     vx, vy = build_object_approach_velocity_from_observation(observation, image_height)

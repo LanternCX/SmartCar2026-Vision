@@ -56,14 +56,20 @@ MASTER_SEARCH_MAX_VY = 5.0
 MASTER_SEARCH_TARGET_X_PX = 160.0
 # 主车搜索目标点纵向像素坐标。当前图像为 QVGA 320x240, 默认底边 y=240; 若修改图像高度请同步调整。
 MASTER_SEARCH_TARGET_Y_PX = 210.0
+# 主车搬运入口目标点纵向像素坐标。当前图像为 QVGA 320x240, 推行前对正使用底边 y=240。
+MASTER_TRANSPORT_TARGET_Y_PX = 240.0
 # 车端协议中的主车搜索状态编号。
 STATE_SEARCH_OBJECT = 1
 # 车端协议中的物体目标编号。
 TARGET_OBJECT = 1
 # 车端下发的主车搜索 hook 配置编号。
 MASTER_SEARCH_HOOK_CONFIG_ID = 1
+# 车端下发的主车搬运 hook 配置编号。
+MASTER_TRANSPORT_HOOK_CONFIG_ID = 2
 # 车端协议中的目标找到事件编号。
 EVENT_TARGET_FOUND = 6
+# 车端协议中的对正完成事件编号。
+EVENT_ALIGNED = 7
 # 可靠包序号的环形范围大小。
 SEQ_RING_SIZE = 256
 # 判断环形序号新旧关系使用的半环长度。
@@ -395,10 +401,15 @@ def choose_best_candidate(candidates, target_x, target_y):
     )
 
 
-def build_search_target_point(image_width, image_height):
-    """! @brief 根据当前配置生成主车搜索目标点"""
+def build_search_target_point(image_width, image_height, config_id=MASTER_SEARCH_HOOK_CONFIG_ID):
+    """! @brief 根据当前 hook 配置生成主车搜索目标点"""
 
-    return float(MASTER_SEARCH_TARGET_X_PX), float(MASTER_SEARCH_TARGET_Y_PX)
+    _ = image_width
+    _ = image_height
+    target_x = float(MASTER_SEARCH_TARGET_X_PX)
+    if int(config_id) == int(MASTER_TRANSPORT_HOOK_CONFIG_ID):
+        return target_x, float(MASTER_TRANSPORT_TARGET_Y_PX)
+    return target_x, float(MASTER_SEARCH_TARGET_Y_PX)
 
 
 def get_marker_corners(blob):
@@ -584,6 +595,13 @@ class MasterVisionHook:
 
         return self.context is not None
 
+    def current_target_config_id(self):
+        """! @brief 返回当前 hook 使用的目标点配置编号"""
+
+        if self.context is None:
+            return MASTER_SEARCH_HOOK_CONFIG_ID
+        return int(self.context["arg"])
+
     def handle_control_line(self, line):
         """! @brief 处理 RT1021 发来的同步或确认短包
 
@@ -663,7 +681,11 @@ class MasterVisionHook:
             context_id = int(self.context["context_id"])
         if int(valid) != 1:
             return context_id, 0.0, 0.0, 0.0
-        target_x, target_y = build_search_target_point(image_width, image_height)
+        target_x, target_y = build_search_target_point(
+            image_width,
+            image_height,
+            self.current_target_config_id(),
+        )
         return (
             context_id,
             float(center_x) - target_x,
@@ -683,7 +705,8 @@ class MasterVisionHook:
         observed_context_id, x, y, value = observation
         if int(observed_context_id) != context_id:
             return
-        if not self._context_matches_hook_config():
+        event_type = self._resolve_event_type()
+        if event_type is None:
             self._stable_count = 0
             return
         if self._pending_event is not None or self._event_context_id == context_id:
@@ -694,7 +717,7 @@ class MasterVisionHook:
             self._stable_count = 0
             return
         if self._stable_count >= self.required_stable_frames:
-            self._create_target_found_event(context_id, value)
+            self._create_event(context_id, value, event_type)
 
     def _observation_matches_hook(self, x, y, value):
         """! @brief 判断单帧观测是否满足 hook 条件
@@ -711,19 +734,30 @@ class MasterVisionHook:
             and abs(float(y)) <= self.tolerance_y
         )
 
-    def _context_matches_hook_config(self):
-        """! @brief 判断当前上下文是否匹配支持的 hook 配置
+    def _resolve_event_type(self):
+        """! @brief 根据当前上下文解析应回报的事件类型
 
-        @return 当前上下文是否匹配主车物体搜索 hook
+        @return 事件编号, 不支持的上下文返回 None
         """
 
         if self.context is None:
-            return False
-        return (
-            int(self.context["state"]) == STATE_SEARCH_OBJECT
-            and int(self.context["target"]) == TARGET_OBJECT
-            and int(self.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
-        )
+            return None
+        state = int(self.context["state"])
+        target = int(self.context["target"])
+        arg = int(self.context["arg"])
+        if (
+            state == STATE_SEARCH_OBJECT
+            and target == TARGET_OBJECT
+            and arg == MASTER_SEARCH_HOOK_CONFIG_ID
+        ):
+            return EVENT_TARGET_FOUND
+        if (
+            state == STATE_SEARCH_OBJECT
+            and target == TARGET_OBJECT
+            and arg == MASTER_TRANSPORT_HOOK_CONFIG_ID
+        ):
+            return EVENT_ALIGNED
+        return None
 
     def _allocate_reliable_seq(self):
         """! @brief 分配新的可靠事件序号
@@ -735,11 +769,12 @@ class MasterVisionHook:
         self._next_reliable_seq = (self._next_reliable_seq + 1) % SEQ_RING_SIZE
         return reliable_seq
 
-    def _create_target_found_event(self, context_id, value):
-        """! @brief 创建 TARGET_FOUND 待确认事件
+    def _create_event(self, context_id, value, event):
+        """! @brief 创建待确认事件
 
         @param context_id 视觉上下文编号
         @param value 事件附加值
+        @param event 事件编号
         """
 
         reliable_seq = self._allocate_reliable_seq()
@@ -747,7 +782,7 @@ class MasterVisionHook:
         self._pending_event = {
             "reliable_seq": reliable_seq,
             "context_id": int(context_id),
-            "event": EVENT_TARGET_FOUND,
+            "event": int(event),
             "value": event_value,
         }
         self._pending_event_last_sent_ms = None
@@ -854,7 +889,11 @@ def build_observation_from_image(hook, img, image_width, image_height):
     candidates = build_blob_candidates(img)
     if not candidates:
         return hook.build_observation(0, 0, 0, 0, image_width, image_height), None
-    target_x, target_y = build_search_target_point(image_width, image_height)
+    target_x, target_y = build_search_target_point(
+        image_width,
+        image_height,
+        hook.current_target_config_id(),
+    )
     _, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
         candidates, target_x, target_y
     )
