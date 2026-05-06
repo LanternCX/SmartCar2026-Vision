@@ -41,8 +41,12 @@ STATE_APPROACH_OBJECT = 2
 TARGET_OBJECT = 1
 # 找物体同步参数编号。
 OBJECT_APPROACH_CONFIG_ID = 1
+# 搬运对正同步参数编号。
+ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID = 2
 # TARGET_FOUND 事件编号。
 EVENT_TARGET_FOUND = 6
+# ALIGNED 事件编号。
+EVENT_ALIGNED = 7
 
 # 跟随模式使用的绿色色标阈值。
 FOLLOW_TASKS = (("green", (37, 8, -57, -8, -36, 6)),)
@@ -766,7 +770,10 @@ class AssistantVisionState:
         if (
             int(sync["state"]) == STATE_APPROACH_OBJECT
             and int(sync["target"]) == TARGET_OBJECT
-            and int(sync["arg"]) == OBJECT_APPROACH_CONFIG_ID
+            and (
+                int(sync["arg"]) == OBJECT_APPROACH_CONFIG_ID
+                or int(sync["arg"]) == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+            )
         ):
             return MODE_APPROACH_OBJECT
         return MODE_FOLLOW
@@ -797,6 +804,10 @@ class AssistantVisionState:
             return
         if self._completed_event_sync_seq == current_sync_seq:
             return
+        event_id = self._current_event_id()
+        if event_id is None:
+            self._stable_count = 0
+            return
         x, y, value = observation
         if self._observation_matches_target(x, y, value):
             self._stable_count += 1
@@ -804,7 +815,7 @@ class AssistantVisionState:
             self._stable_count = 0
             return
         if self._stable_count >= self.required_stable_frames:
-            self._create_target_found_event(current_sync_seq, value)
+            self._create_event(current_sync_seq, event_id, value)
 
     def _observation_matches_target(self, x, y, value):
         """! @brief 判断当前观测是否满足找到目标条件
@@ -821,16 +832,42 @@ class AssistantVisionState:
             and abs(float(y)) <= self.tolerance_y
         )
 
-    def _create_target_found_event(self, reliable_seq, value):
-        """! @brief 创建 TARGET_FOUND 待确认事件
+    def _current_event_id(self):
+        """! @brief 返回当前模式应回报的事件编号
+
+        @return 事件编号, 当前模式不支持时返回 None
+        """
+
+        if self.current_sync is None:
+            return None
+        state = int(self.current_sync["state"])
+        target = int(self.current_sync["target"])
+        arg = int(self.current_sync["arg"])
+        if (
+            state == STATE_APPROACH_OBJECT
+            and target == TARGET_OBJECT
+            and arg == OBJECT_APPROACH_CONFIG_ID
+        ):
+            return EVENT_TARGET_FOUND
+        if (
+            state == STATE_APPROACH_OBJECT
+            and target == TARGET_OBJECT
+            and arg == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+        ):
+            return EVENT_ALIGNED
+        return None
+
+    def _create_event(self, reliable_seq, event, value):
+        """! @brief 创建待确认事件
 
         @param reliable_seq 当前同步序号
+        @param event 事件编号
         @param value 事件附加值
         """
 
         self._pending_event = {
             "reliable_seq": int(reliable_seq),
-            "event": EVENT_TARGET_FOUND,
+            "event": int(event),
             "value": int(float(value)),
         }
         self._pending_event_last_sent_ms = None

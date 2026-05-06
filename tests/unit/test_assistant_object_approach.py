@@ -65,6 +65,20 @@ def centered_object_observation(module, area):
     )
 
 
+def centered_transport_observation(module, area):
+    """构造命中搬运入口目标点的观测."""
+
+    target_x, target_y = assistant_target_point(module)
+    return module.build_object_observation(
+        1,
+        target_x,
+        target_y,
+        area,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+
 def choose_outside_deadzone_offset(target, upper_bound, deadzone, clearance=1.0):
     """在图像范围内构造一个稳定超出死区的偏移量."""
 
@@ -347,6 +361,84 @@ def test_assistant_hook_repeats_event_until_matching_ack() -> None:
     assert first == "r,12,6,180"
     assert second == first
     assert state.next_event_frame() is None
+
+
+def test_assistant_transport_mode_emits_aligned_for_transport_config() -> None:
+    """搬运入口配置稳定满足条件后回报 ALIGNED."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState(stable_frames=1)
+
+    assert (
+        state.handle_control_line(
+            "s,12,%d,1,%d"
+            % (
+                int(module.STATE_APPROACH_OBJECT),
+                int(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID),
+            )
+        )
+        == "a,12"
+    )
+    observation = centered_transport_observation(module, 180)
+    state.accept_object_observation(observation)
+
+    assert state.next_event_frame() == "r,12,7,180"
+
+
+def test_assistant_transport_mode_keeps_object_velocity_output() -> None:
+    """搬运入口配置继续输出物体视觉速度."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState()
+    uart = FakeUART()
+    assert (
+        state.handle_control_line(
+            "s,12,%d,1,%d"
+            % (
+                int(module.STATE_APPROACH_OBJECT),
+                int(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID),
+            )
+        )
+        == "a,12"
+    )
+
+    class FakeBlob:
+        def __init__(self, left, top, width, height):
+            self._rect = (left, top, width, height)
+
+        def rect(self):
+            return self._rect
+
+        def cx(self):
+            return self._rect[0] + self._rect[2] / 2
+
+        def cy(self):
+            return self._rect[1] + self._rect[3] / 2
+
+        def min_corners(self):
+            left, top, width, height = self._rect
+            right = left + width
+            bottom = top + height
+            return ((left, top), (right, top), (right, bottom), (left, bottom))
+
+    class FakeImage:
+        def __init__(self, blobs):
+            self._blobs = blobs
+            self.crosses = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return list(self._blobs)
+
+        def draw_cross(self, x, y):
+            self.crosses.append((x, y))
+
+    img = FakeImage([FakeBlob(150, 150, 20, 20)])
+    module.process_object_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert uart.writes[0].startswith("v,")
 
 
 def test_assistant_process_uart_input_writes_local_ack() -> None:
