@@ -45,10 +45,12 @@ IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
 
 
-def assistant_target_point(module):
-    """返回当前找物体目标点."""
+def assistant_target_point(module, config_id=None):
+    """返回当前指定配置的找物体目标点."""
 
-    return module.build_object_target_point(IMAGE_WIDTH, IMAGE_HEIGHT)
+    if config_id is None:
+        config_id = module.OBJECT_APPROACH_CONFIG_ID
+    return module.build_object_target_point(IMAGE_WIDTH, IMAGE_HEIGHT, config_id)
 
 
 def centered_object_observation(module, area):
@@ -68,7 +70,10 @@ def centered_object_observation(module, area):
 def centered_transport_observation(module, area):
     """构造命中搬运入口目标点的观测."""
 
-    target_x, target_y = assistant_target_point(module)
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
     return module.build_object_observation(
         1,
         target_x,
@@ -76,6 +81,7 @@ def centered_transport_observation(module, area):
         area,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
     )
 
 
@@ -239,6 +245,66 @@ def test_assistant_object_target_point_generates_p_search_velocity() -> None:
             expected_object_y_velocity(module, err_y),
         )
     )
+
+
+def test_assistant_transport_observation_uses_transport_target_point() -> None:
+    """搬运入口配置的目标底边必须切到推行阶段目标点."""
+
+    module = load_assistant()
+    search_target_x, search_target_y = assistant_target_point(
+        module,
+        module.OBJECT_APPROACH_CONFIG_ID,
+    )
+    transport_target_x, transport_target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    search_observation = module.build_object_observation(
+        1,
+        search_target_x,
+        search_target_y,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.OBJECT_APPROACH_CONFIG_ID,
+    )
+    transport_observation = module.build_object_observation(
+        1,
+        transport_target_x,
+        transport_target_y,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    assert search_target_y == 210.0
+    assert transport_target_y == 240.0
+    assert search_observation == pytest.approx((0.0, 0.0, 300.0))
+    assert transport_observation == pytest.approx((0.0, 0.0, 300.0))
+
+
+def test_assistant_transport_config_treats_search_target_as_not_aligned() -> None:
+    """搬运入口配置不能继续沿用寻找阶段的 210 目标点."""
+
+    module = load_assistant()
+    search_target_x, search_target_y = assistant_target_point(
+        module,
+        module.OBJECT_APPROACH_CONFIG_ID,
+    )
+
+    observation = module.build_object_observation(
+        1,
+        search_target_x,
+        search_target_y,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    assert observation == pytest.approx((0.0, -30.0, 300.0))
 
 
 def test_assistant_object_params_stay_within_qvga_bounds() -> None:

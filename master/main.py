@@ -56,6 +56,8 @@ MASTER_SEARCH_MAX_VY = 5.0
 MASTER_SEARCH_TARGET_X_PX = 160.0
 # 主车搜索目标点纵向像素坐标。当前图像为 QVGA 320x240, 默认底边 y=240; 若修改图像高度请同步调整。
 MASTER_SEARCH_TARGET_Y_PX = 210.0
+# 主车搬运入口目标点纵向像素坐标。当前图像为 QVGA 320x240, 推行前对正使用底边 y=240。
+MASTER_TRANSPORT_TARGET_Y_PX = 240.0
 # 车端协议中的主车搜索状态编号。
 STATE_SEARCH_OBJECT = 1
 # 车端协议中的物体目标编号。
@@ -399,10 +401,15 @@ def choose_best_candidate(candidates, target_x, target_y):
     )
 
 
-def build_search_target_point(image_width, image_height):
-    """! @brief 根据当前配置生成主车搜索目标点"""
+def build_search_target_point(image_width, image_height, config_id=MASTER_SEARCH_HOOK_CONFIG_ID):
+    """! @brief 根据当前 hook 配置生成主车搜索目标点"""
 
-    return float(MASTER_SEARCH_TARGET_X_PX), float(MASTER_SEARCH_TARGET_Y_PX)
+    _ = image_width
+    _ = image_height
+    target_x = float(MASTER_SEARCH_TARGET_X_PX)
+    if int(config_id) == int(MASTER_TRANSPORT_HOOK_CONFIG_ID):
+        return target_x, float(MASTER_TRANSPORT_TARGET_Y_PX)
+    return target_x, float(MASTER_SEARCH_TARGET_Y_PX)
 
 
 def get_marker_corners(blob):
@@ -588,6 +595,13 @@ class MasterVisionHook:
 
         return self.context is not None
 
+    def current_target_config_id(self):
+        """! @brief 返回当前 hook 使用的目标点配置编号"""
+
+        if self.context is None:
+            return MASTER_SEARCH_HOOK_CONFIG_ID
+        return int(self.context["arg"])
+
     def handle_control_line(self, line):
         """! @brief 处理 RT1021 发来的同步或确认短包
 
@@ -667,7 +681,11 @@ class MasterVisionHook:
             context_id = int(self.context["context_id"])
         if int(valid) != 1:
             return context_id, 0.0, 0.0, 0.0
-        target_x, target_y = build_search_target_point(image_width, image_height)
+        target_x, target_y = build_search_target_point(
+            image_width,
+            image_height,
+            self.current_target_config_id(),
+        )
         return (
             context_id,
             float(center_x) - target_x,
@@ -871,7 +889,11 @@ def build_observation_from_image(hook, img, image_width, image_height):
     candidates = build_blob_candidates(img)
     if not candidates:
         return hook.build_observation(0, 0, 0, 0, image_width, image_height), None
-    target_x, target_y = build_search_target_point(image_width, image_height)
+    target_x, target_y = build_search_target_point(
+        image_width,
+        image_height,
+        hook.current_target_config_id(),
+    )
     _, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
         candidates, target_x, target_y
     )
