@@ -89,7 +89,7 @@ OBJECT_APPROACH_MAX_VY = 5.0
 # 找物体目标点横向像素坐标。当前图像为 QVGA 320x240, 默认中线 x=160; 若修改图像宽度请同步调整。
 OBJECT_APPROACH_TARGET_X_PX = 160.0
 # 找物体目标点纵向像素坐标。当前图像为 QVGA 320x240, 默认底边 y=240; 若修改图像高度请同步调整。
-OBJECT_APPROACH_TARGET_Y_PX = 210.0
+OBJECT_APPROACH_TARGET_Y_PX = 200.0
 # 搬运入口目标点纵向像素坐标。当前图像为 QVGA 320x240, 推行前对正使用底边 y=240。
 ASSISTANT_TRANSPORT_TARGET_Y_PX = 240.0
 # TARGET_FOUND 最小面积阈值。

@@ -31,7 +31,7 @@ OBJECT_MIN_AREA = 50.0
 # 主车搜索目标丢失时输出的配置横向速度。
 MASTER_MISSING_SEARCH_VX = 0.0
 # 主车搜索目标丢失时输出的配置纵向速度。
-MASTER_MISSING_SEARCH_VY = 0.0
+MASTER_MISSING_SEARCH_VY = 2
 # 主车搜索横向速度 P 环增益。
 MASTER_SEARCH_KP_X = 0.05
 # 主车搜索纵向速度 P 环增益。
@@ -58,18 +58,31 @@ MASTER_SEARCH_TARGET_X_PX = 160.0
 MASTER_SEARCH_TARGET_Y_PX = 210.0
 # 主车搬运入口目标点纵向像素坐标。当前图像为 QVGA 320x240, 推行前对正使用底边 y=240。
 MASTER_TRANSPORT_TARGET_Y_PX = 240.0
+# 主车收尾判定环带外扩像素。
+FINISH_HOOK_RING_EXPAND_PX = 5
+# 主车收尾判定黄色占比阈值。
+FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.2
+FINISH_HOOK_STABLE_FRAMES = 2
 # 车端协议中的主车搜索状态编号。
 STATE_SEARCH_OBJECT = 1
+# 车端协议中的主车搬运状态编号。
+STATE_TRANSPORT_OBJECT = 4
 # 车端协议中的物体目标编号。
 TARGET_OBJECT = 1
+# 车端协议中的边线目标编号。
+TARGET_EDGE_LINE = 3
 # 车端下发的主车搜索 hook 配置编号。
 MASTER_SEARCH_HOOK_CONFIG_ID = 1
 # 车端下发的主车搬运 hook 配置编号。
 MASTER_TRANSPORT_HOOK_CONFIG_ID = 2
+# 车端下发的主车收尾判定 hook 配置编号。
+MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID = 3
 # 车端协议中的目标找到事件编号。
 EVENT_TARGET_FOUND = 6
 # 车端协议中的对正完成事件编号。
 EVENT_ALIGNED = 7
+# 车端协议中的收尾到达事件编号。
+EVENT_ARRIVED = 8
 # 可靠包序号的环形范围大小。
 SEQ_RING_SIZE = 256
 # 判断环形序号新旧关系使用的半环长度。
@@ -77,6 +90,8 @@ SEQ_HALF_RING = 128
 
 # 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
 TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
+# 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
+FINISH_HOOK_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
 
 
 def compact_number(value):
@@ -401,15 +416,90 @@ def choose_best_candidate(candidates, target_x, target_y):
     )
 
 
-def build_search_target_point(image_width, image_height, config_id=MASTER_SEARCH_HOOK_CONFIG_ID):
+def build_search_target_point(
+    image_width, image_height, config_id=MASTER_SEARCH_HOOK_CONFIG_ID
+):
     """! @brief 根据当前 hook 配置生成主车搜索目标点"""
 
     _ = image_width
     _ = image_height
     target_x = float(MASTER_SEARCH_TARGET_X_PX)
-    if int(config_id) == int(MASTER_TRANSPORT_HOOK_CONFIG_ID):
+    if int(config_id) in (
+        int(MASTER_TRANSPORT_HOOK_CONFIG_ID),
+        int(MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID),
+    ):
         return target_x, float(MASTER_TRANSPORT_TARGET_Y_PX)
     return target_x, float(MASTER_SEARCH_TARGET_Y_PX)
+
+
+def _build_finish_hook_ring_rois(blob, image_width, image_height):
+    """! @brief 根据目标框构造收尾判定环带 roi 列表和总面积"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    expand = int(FINISH_HOOK_RING_EXPAND_PX)
+    outer_left = max(0, int(left) - expand)
+    outer_top = max(0, int(top) - expand)
+    outer_right = min(int(image_width), int(right) + expand)
+    outer_bottom = min(int(image_height), int(bottom) + expand)
+    rois = []
+    if outer_top < int(top):
+        rois.append((outer_left, outer_top, outer_right - outer_left, int(top) - outer_top))
+    if int(bottom) < outer_bottom:
+        rois.append(
+            (outer_left, int(bottom), outer_right - outer_left, outer_bottom - int(bottom))
+        )
+    if outer_left < int(left):
+        rois.append((outer_left, int(top), int(left) - outer_left, int(bottom) - int(top)))
+    if int(right) < outer_right:
+        rois.append((int(right), int(top), outer_right - int(right), int(bottom) - int(top)))
+    ring_area = 0
+    valid_rois = []
+    for roi in rois:
+        _, _, width, height = roi
+        if width <= 0 or height <= 0:
+            continue
+        ring_area += int(width) * int(height)
+        valid_rois.append(roi)
+    return valid_rois, ring_area
+
+
+def _count_yellow_pixels_in_roi(img, roi):
+    """! @brief 统计单个 roi 内的黄色像素数"""
+
+    roi_width = int(roi[2])
+    roi_height = int(roi[3])
+    roi_area = roi_width * roi_height
+    if roi_area <= 0:
+        return 0
+    blobs = img.find_blobs(
+        [FINISH_HOOK_YELLOW_THRESHOLD],
+        roi=roi,
+        pixels_threshold=1,
+        area_threshold=1,
+        merge=True,
+    )
+    if not blobs:
+        return 0
+    yellow_pixels = 0.0
+    for blob in blobs:
+        yellow_pixels += blob_area(blob)
+    if yellow_pixels >= float(roi_area):
+        return roi_area
+    return int(yellow_pixels)
+
+
+def build_finish_hook_yellow_ratio_percent(img, blob, image_width, image_height):
+    """! @brief 计算主车收尾判定环带内的黄色像素百分比"""
+
+    if blob is None:
+        return 0.0
+    rois, ring_area = _build_finish_hook_ring_rois(blob, image_width, image_height)
+    if ring_area <= 0:
+        return 0.0
+    yellow_pixels = 0
+    for roi in rois:
+        yellow_pixels += _count_yellow_pixels_in_roi(img, roi)
+    return float(yellow_pixels) * 100.0 / float(ring_area)
 
 
 def get_marker_corners(blob):
@@ -586,6 +676,7 @@ class MasterVisionHook:
         self._pending_event = None
         self._pending_event_last_sent_ms = None
         self._event_context_id = None
+        self._finish_contact_seen = False
 
     def has_context(self):
         """! @brief 判断是否已经建立视觉上下文
@@ -601,6 +692,17 @@ class MasterVisionHook:
         if self.context is None:
             return MASTER_SEARCH_HOOK_CONFIG_ID
         return int(self.context["arg"])
+
+    def is_finish_hook_context(self):
+        """! @brief 判断当前上下文是否为收尾判定 hook"""
+
+        if self.context is None:
+            return False
+        return (
+            int(self.context["state"]) == int(STATE_TRANSPORT_OBJECT)
+            and int(self.context["target"]) == int(TARGET_EDGE_LINE)
+            and int(self.context["arg"]) == int(MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID)
+        )
 
     def handle_control_line(self, line):
         """! @brief 处理 RT1021 发来的同步或确认短包
@@ -635,6 +737,7 @@ class MasterVisionHook:
             self._last_context_id = context_id
             self._stable_count = 0
             self._event_context_id = None
+            self._finish_contact_seen = False
         return format_ack_frame(packet["reliable_seq"])
 
     def _should_apply_context(self, context_id):
@@ -693,10 +796,11 @@ class MasterVisionHook:
             float(area),
         )
 
-    def accept_observation(self, observation):
+    def accept_observation(self, observation, hook_value=None):
         """! @brief 累计 hook 条件并按需创建可靠事件
 
         @param observation 观测字段元组
+        @param hook_value 当前 hook 使用的附加判定值
         """
 
         if self.context is None:
@@ -711,20 +815,52 @@ class MasterVisionHook:
             return
         if self._pending_event is not None or self._event_context_id == context_id:
             return
-        if self._observation_matches_hook(x, y, value):
+        if self.is_finish_hook_context():
+            self._accept_finish_hook_observation(context_id, value, hook_value, event_type)
+            return
+        if self._observation_matches_hook(x, y, value, hook_value):
             self._stable_count += 1
         else:
             self._stable_count = 0
             return
-        if self._stable_count >= self.required_stable_frames:
-            self._create_event(context_id, value, event_type)
+        if self._stable_count >= self._required_stable_frames():
+            self._create_event(
+                context_id,
+                self._resolve_event_value(value, hook_value),
+                event_type,
+            )
 
-    def _observation_matches_hook(self, x, y, value):
+    def _accept_finish_hook_observation(self, context_id, value, hook_value, event_type):
+        """! @brief 按“未接触 -> 接触 -> 再次脱离”过程处理收尾 hook"""
+
+        if float(value) <= 0.0:
+            self._stable_count = 0
+            return
+        yellow_ratio = float(hook_value or 0.0)
+        if not self._finish_contact_seen:
+            if yellow_ratio > (float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0):
+                self._finish_contact_seen = True
+            self._stable_count = 0
+            return
+        if yellow_ratio <= 0.0:
+            self._stable_count += 1
+        else:
+            self._stable_count = 0
+            return
+        if self._stable_count >= self._required_stable_frames():
+            self._create_event(
+                context_id,
+                self._resolve_event_value(value, hook_value),
+                event_type,
+            )
+
+    def _observation_matches_hook(self, x, y, value, hook_value):
         """! @brief 判断单帧观测是否满足 hook 条件
 
         @param x 横向误差
         @param y 纵向误差
         @param value 目标强度
+        @param hook_value 当前 hook 使用的附加判定值
         @return 观测是否满足当前 hook 条件
         """
 
@@ -733,6 +869,20 @@ class MasterVisionHook:
             and abs(float(x)) <= self.tolerance_x
             and abs(float(y)) <= self.tolerance_y
         )
+
+    def _required_stable_frames(self):
+        """! @brief 返回当前上下文所需的连续稳定帧数"""
+
+        if self.is_finish_hook_context():
+            return int(FINISH_HOOK_STABLE_FRAMES)
+        return self.required_stable_frames
+
+    def _resolve_event_value(self, value, hook_value):
+        """! @brief 返回当前事件应携带的附加值"""
+
+        if self.is_finish_hook_context():
+            return int(float(hook_value or 0.0))
+        return int(float(value))
 
     def _resolve_event_type(self):
         """! @brief 根据当前上下文解析应回报的事件类型
@@ -757,6 +907,12 @@ class MasterVisionHook:
             and arg == MASTER_TRANSPORT_HOOK_CONFIG_ID
         ):
             return EVENT_ALIGNED
+        if (
+            state == STATE_TRANSPORT_OBJECT
+            and target == TARGET_EDGE_LINE
+            and arg == MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID
+        ):
+            return EVENT_ARRIVED
         return None
 
     def _allocate_reliable_seq(self):
@@ -778,12 +934,11 @@ class MasterVisionHook:
         """
 
         reliable_seq = self._allocate_reliable_seq()
-        event_value = int(float(value))
         self._pending_event = {
             "reliable_seq": reliable_seq,
             "context_id": int(context_id),
             "event": int(event),
-            "value": event_value,
+            "value": int(float(value)),
         }
         self._pending_event_last_sent_ms = None
         self._event_context_id = int(context_id)
@@ -903,6 +1058,19 @@ def build_observation_from_image(hook, img, image_width, image_height):
     )
 
 
+def build_hook_event_value(hook, img, best_blob, image_width, image_height):
+    """! @brief 根据当前 hook 生成事件附加判定值"""
+
+    if not hook.is_finish_hook_context():
+        return None
+    return build_finish_hook_yellow_ratio_percent(
+        img,
+        best_blob,
+        image_width,
+        image_height,
+    )
+
+
 def process_search_frame(uart, hook, img, image_width, image_height):
     """! @brief 处理单帧主车搜索速度流和 hook 事件
 
@@ -926,7 +1094,16 @@ def process_search_frame(uart, hook, img, image_width, image_height):
         )
     velocity = build_search_velocity_from_observation(observation, image_height)
     write_data_line(uart, format_search_velocity_frame(*velocity))
-    hook.accept_observation(observation)
+    hook.accept_observation(
+        observation,
+        hook_value=build_hook_event_value(
+            hook,
+            img,
+            best_blob,
+            image_width,
+            image_height,
+        ),
+    )
     event_frame = hook.next_event_frame()
     if event_frame is not None:
         write_reliable_line(uart, event_frame)

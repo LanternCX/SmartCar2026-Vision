@@ -86,6 +86,16 @@ def centered_master_transport_observation(module, hook, area):
     )
 
 
+def finish_hook_control_line(module):
+    """! @brief 构造主车收尾 hook 的同步包"""
+
+    return "s,12,7,%d,%d,%d" % (
+        int(module.STATE_TRANSPORT_OBJECT),
+        int(module.TARGET_EDGE_LINE),
+        int(module.MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID),
+    )
+
+
 def choose_outside_deadzone_offset(target, upper_bound, deadzone, clearance=1.0):
     """! @brief 在图像范围内构造一个稳定超出死区的偏移量"""
 
@@ -134,6 +144,73 @@ def expected_master_y_velocity(module, err_y):
         module.MASTER_SEARCH_KP_Y,
         module.MASTER_SEARCH_MIN_SPEED,
         module.MASTER_SEARCH_MAX_VY,
+    )
+
+
+class FinishHookBlob:
+    """! @brief 收尾 hook 测试使用的固定色块"""
+
+    def __init__(self, left, top, width, height, area):
+        self._rect = (left, top, width, height)
+        self._area = area
+
+    def rect(self):
+        return self._rect
+
+    def cx(self):
+        return self._rect[0] + self._rect[2] / 2
+
+    def cy(self):
+        return self._rect[1] + self._rect[3] / 2
+
+    def area(self):
+        return self._area
+
+
+class FinishHookImage:
+    """! @brief 同时模拟红色主目标和黄色环带统计的图像桩"""
+
+    def __init__(self, blob, yellow_area_by_roi):
+        self._blob = blob
+        self._yellow_area_by_roi = dict(yellow_area_by_roi)
+        self.crosses = []
+
+    def height(self):
+        return IMAGE_HEIGHT
+
+    def find_blobs(
+        self,
+        thresholds,
+        pixels_threshold,
+        area_threshold,
+        merge,
+        roi=None,
+    ):
+        _ = pixels_threshold
+        _ = area_threshold
+        _ = merge
+        if roi is None:
+            return [self._blob]
+        area = self._yellow_area_by_roi.get(tuple(roi), 0)
+        if area <= 0:
+            return []
+        return [FinishHookBlob(roi[0], roi[1], roi[2], roi[3], area)]
+
+    def draw_cross(self, x, y):
+        self.crosses.append((x, y))
+
+
+def finish_hook_blob_and_ring_areas():
+    """! @brief 返回收尾 hook 使用的色块和裁剪后的环带 roi 面积"""
+
+    blob = FinishHookBlob(left=150, top=0, width=20, height=20, area=400)
+    return (
+        blob,
+        {
+            (145, 20, 30, 5): 150,
+            (145, 0, 5, 20): 100,
+            (170, 0, 5, 20): 100,
+        },
     )
 
 
@@ -536,6 +613,151 @@ def test_master_transport_hook_keeps_search_velocity_output() -> None:
     module.process_search_frame(uart, hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
 
     assert uart.writes[0].startswith("v,")
+
+
+def test_master_transport_finish_hook_does_not_arrive_on_yellow_contact_only() -> None:
+    """! @brief 收尾 hook 只接触黄线时不能直接回报 ARRIVED"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(next_reliable_seq=30)
+    hook.handle_control_line(finish_hook_control_line(module))
+    blob, ring_roi_areas = finish_hook_blob_and_ring_areas()
+    positive_yellow_pixels = int(
+        module.FINISH_HOOK_YELLOW_RATIO_THRESHOLD
+        * sum(ring_roi_areas.values())
+    ) + 1
+    img = FinishHookImage(
+        blob,
+        {
+            (145, 20, 30, 5): positive_yellow_pixels,
+        },
+    )
+    uart = FakeUART()
+
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_search_frame(
+        uart,
+        hook,
+        FinishHookImage(
+            blob,
+            {
+                (145, 20, 30, 5): positive_yellow_pixels,
+            },
+        ),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    assert uart.writes[0] == "v,0,0\r\n"
+    assert uart.writes[1] == "v,0,0\r\n"
+    assert uart.writes == ["v,0,0\r\n", "v,0,0\r\n"]
+
+
+def test_master_transport_finish_hook_emits_arrived_after_yellow_contact_then_clear() -> None:
+    """! @brief 收尾 hook 需要经历接触黄线后再次完全脱离才回报 ARRIVED"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(next_reliable_seq=30)
+    hook.handle_control_line(finish_hook_control_line(module))
+    blob, ring_roi_areas = finish_hook_blob_and_ring_areas()
+    positive_yellow_pixels = int(
+        module.FINISH_HOOK_YELLOW_RATIO_THRESHOLD
+        * sum(ring_roi_areas.values())
+    ) + 1
+    uart = FakeUART()
+
+    module.process_search_frame(
+        uart,
+        hook,
+        FinishHookImage(
+            blob,
+            {
+                (145, 20, 30, 5): positive_yellow_pixels,
+            },
+        ),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+    module.process_search_frame(
+        uart,
+        hook,
+        FinishHookImage(blob, {}),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+    module.process_search_frame(
+        uart,
+        hook,
+        FinishHookImage(blob, {}),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    assert uart.writes[0] == "v,0,0\r\n"
+    assert uart.writes[1] == "v,0,0\r\n"
+    assert uart.writes[2] == "v,0,0\r\n"
+    assert uart.writes[3] == "r,30,7,8,0\r\n"
+
+
+def test_master_transport_finish_hook_does_not_arrive_when_yellow_ratio_is_not_enough() -> None:
+    """! @brief 收尾 hook 黄色占比不足时不能回报 ARRIVED"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(next_reliable_seq=30)
+    hook.handle_control_line(finish_hook_control_line(module))
+    blob, ring_roi_areas = finish_hook_blob_and_ring_areas()
+    insufficient_yellow_pixels = int(
+        module.FINISH_HOOK_YELLOW_RATIO_THRESHOLD
+        * sum(ring_roi_areas.values())
+    )
+    uart = FakeUART()
+
+    module.process_search_frame(
+        uart,
+        hook,
+        FinishHookImage(
+            blob,
+            {
+                (145, 20, 30, 5): insufficient_yellow_pixels,
+            },
+        ),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+    module.process_search_frame(
+        uart,
+        hook,
+        FinishHookImage(
+            blob,
+            {
+                (145, 20, 30, 5): insufficient_yellow_pixels,
+            },
+        ),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    assert uart.writes == ["v,0,0\r\n", "v,0,0\r\n"]
+
+
+def test_master_transport_finish_hook_keeps_search_velocity_output() -> None:
+    """! @brief 收尾 hook 配置继续保留现有速度输出主线"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(finish_hook_control_line(module))
+    blob, _ = finish_hook_blob_and_ring_areas()
+    uart = FakeUART()
+
+    module.process_search_frame(
+        uart,
+        hook,
+        FinishHookImage(blob, {}),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    assert uart.writes == ["v,0,0\r\n"]
 
 
 def test_master_hook_throttles_pending_event_retries() -> None:
