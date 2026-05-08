@@ -279,8 +279,8 @@ def test_assistant_transport_observation_uses_transport_target_point() -> None:
         module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
     )
 
-    assert search_target_y == 210.0
-    assert transport_target_y == 240.0
+    assert search_target_y == float(module.OBJECT_APPROACH_TARGET_Y_PX)
+    assert transport_target_y == float(module.ASSISTANT_TRANSPORT_TARGET_Y_PX)
     assert search_observation == pytest.approx((0.0, 0.0, 300.0))
     assert transport_observation == pytest.approx((0.0, 0.0, 300.0))
 
@@ -304,7 +304,11 @@ def test_assistant_transport_config_treats_search_target_as_not_aligned() -> Non
         module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
     )
 
-    assert observation == pytest.approx((0.0, -30.0, 300.0))
+    expected_y = float(module.OBJECT_APPROACH_TARGET_Y_PX) - float(
+        module.ASSISTANT_TRANSPORT_TARGET_Y_PX
+    )
+
+    assert observation == pytest.approx((0.0, expected_y, 300.0))
 
 
 def test_assistant_object_params_stay_within_qvga_bounds() -> None:
