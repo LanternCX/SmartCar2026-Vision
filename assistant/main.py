@@ -35,14 +35,20 @@ SEQ_HALF_RING = 128
 MODE_FOLLOW = "follow"
 # 接收到同步后切换的找物体模式。
 MODE_APPROACH_OBJECT = "approach_object"
+# 接收到同步后切换的绕行修正模式。
+MODE_ORBIT_OBJECT = "orbit_object"
 # 辅车找物体状态编号。
 STATE_APPROACH_OBJECT = 2
+# 辅车绕行状态编号。
+STATE_ORBIT = 3
 # 物体目标编号。
 TARGET_OBJECT = 1
 # 找物体同步参数编号。
 OBJECT_APPROACH_CONFIG_ID = 1
 # 搬运对正同步参数编号。
 ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID = 2
+# 绕行修正同步参数编号。
+ASSISTANT_ORBIT_OBJECT_CONFIG_ID = 3
 # TARGET_FOUND 事件编号。
 EVENT_TARGET_FOUND = 6
 # ALIGNED 事件编号。
@@ -86,10 +92,28 @@ OBJECT_APPROACH_DEADZONE_Y_PX = 8.0
 OBJECT_APPROACH_MAX_VX = 5.0
 # 找物体模式纵向速度限幅。
 OBJECT_APPROACH_MAX_VY = 5.0
+# 绕行修正横向速度 P 环增益。
+OBJECT_ORBIT_KP_X = 0.00
+# 绕行修正纵向速度 P 环增益。
+OBJECT_ORBIT_KP_Y = 0.00
+# 绕行修正误差超出死区后的最小有效速度量。
+OBJECT_ORBIT_MIN_SPEED = 0
+# 绕行修正横向误差死区，单位为像素。
+OBJECT_ORBIT_DEADZONE_X_PX = 15.0
+# 绕行修正纵向误差死区，单位为像素。
+OBJECT_ORBIT_DEADZONE_Y_PX = 8.0
+# 绕行修正横向速度限幅。
+OBJECT_ORBIT_MAX_VX = 5.0
+# 绕行修正纵向速度限幅。
+OBJECT_ORBIT_MAX_VY = 5.0
 # 找物体目标点横向像素坐标。当前图像为 QVGA 320x240, 默认中线 x=160; 若修改图像宽度请同步调整。
 OBJECT_APPROACH_TARGET_X_PX = 160.0
 # 找物体目标点纵向像素坐标。当前图像为 QVGA 320x240, 默认底边 y=240; 若修改图像高度请同步调整。
 OBJECT_APPROACH_TARGET_Y_PX = 200.0
+# 绕行修正目标点横向像素坐标。
+OBJECT_ORBIT_TARGET_X_PX = 160.0
+# 绕行修正目标点纵向像素坐标。
+OBJECT_ORBIT_TARGET_Y_PX = 200.0
 # 搬运入口目标点纵向像素坐标。当前图像为 QVGA 320x240, 推行前对正使用底边 y=240。
 ASSISTANT_TRANSPORT_TARGET_Y_PX = 240.0
 # TARGET_FOUND 最小面积阈值。
@@ -639,6 +663,8 @@ def build_object_target_point(
     _ = image_width
     _ = image_height
     target_x = float(OBJECT_APPROACH_TARGET_X_PX)
+    if int(config_id) == int(ASSISTANT_ORBIT_OBJECT_CONFIG_ID):
+        return float(OBJECT_ORBIT_TARGET_X_PX), float(OBJECT_ORBIT_TARGET_Y_PX)
     if int(config_id) == int(ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID):
         return target_x, float(ASSISTANT_TRANSPORT_TARGET_Y_PX)
     return target_x, float(OBJECT_APPROACH_TARGET_Y_PX)
@@ -695,6 +721,50 @@ def build_object_approach_velocity_from_observation(observation, image_height):
     if float(value) <= 0.0:
         return float(OBJECT_MISSING_SEARCH_VX), float(OBJECT_MISSING_SEARCH_VY)
     return build_object_approach_velocity_from_error(x, y, image_height)
+
+
+def build_object_orbit_velocity_from_observation(observation, image_height):
+    """! @brief 根据绕行目标物体观测生成平移修正量
+
+    @param observation x, y, value 观测字段元组
+    @param image_height 图像高度
+    @return vx, vy 平移修正量
+    """
+
+    _, _, value = observation
+    if float(value) <= 0.0:
+        return 0.0, 0.0
+    x, y, _ = observation
+    return (
+        _axis_p_velocity(
+            x,
+            OBJECT_ORBIT_DEADZONE_X_PX,
+            OBJECT_ORBIT_KP_X,
+            OBJECT_ORBIT_MAX_VX,
+            OBJECT_ORBIT_MIN_SPEED,
+        ),
+        _build_object_orbit_y_velocity(y, image_height),
+    )
+
+
+def _build_object_orbit_y_velocity(err_y, image_height):
+    """! @brief 根据底边纵向误差生成绕行修正纵向速度"""
+
+    err_y = float(err_y)
+    if abs(err_y) <= float(OBJECT_ORBIT_DEADZONE_Y_PX):
+        return 0.0
+    if float(OBJECT_ORBIT_KP_Y) == 0.0:
+        return 0.0
+    scaled_error = err_y * (
+        float(OBJECT_ORBIT_MAX_VY)
+        / abs(float(OBJECT_ORBIT_KP_Y))
+        / float(image_height)
+    )
+    return _apply_min_speed(
+        scaled_error * float(OBJECT_ORBIT_KP_Y),
+        OBJECT_ORBIT_MIN_SPEED,
+        OBJECT_ORBIT_MAX_VY,
+    )
 
 
 class AssistantVisionState:
@@ -800,6 +870,12 @@ class AssistantVisionState:
             )
         ):
             return MODE_APPROACH_OBJECT
+        if (
+            int(sync["state"]) == STATE_ORBIT
+            and int(sync["target"]) == TARGET_OBJECT
+            and int(sync["arg"]) == ASSISTANT_ORBIT_OBJECT_CONFIG_ID
+        ):
+            return MODE_ORBIT_OBJECT
         return MODE_FOLLOW
 
     def current_object_config_id(self):
@@ -1099,7 +1175,13 @@ def process_object_frame(uart, state, img, image_width, image_height):
             config_id,
         )
         draw_selected_marker(img=img, blob=best_blob, pixel_x=pixel_x, pixel_y=pixel_y)
-    vx, vy = build_object_approach_velocity_from_observation(observation, image_height)
+    if state.mode == MODE_ORBIT_OBJECT:
+        vx, vy = build_object_orbit_velocity_from_observation(observation, image_height)
+    else:
+        vx, vy = build_object_approach_velocity_from_observation(
+            observation,
+            image_height,
+        )
     write_line(uart, format_vision_frame(vx, vy))
     state.accept_object_observation(observation)
 
@@ -1114,7 +1196,7 @@ def process_frame(uart, state, img, image_width, image_height):
     @param image_height 图像高度
     """
 
-    if state.mode == MODE_APPROACH_OBJECT:
+    if state.mode == MODE_APPROACH_OBJECT or state.mode == MODE_ORBIT_OBJECT:
         process_object_frame(uart, state, img, image_width, image_height)
     else:
         process_follow_frame(uart, img, image_width, image_height)

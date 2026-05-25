@@ -52,10 +52,28 @@ OBJECT_STABLE_FRAMES = 3
 MASTER_SEARCH_MAX_VX = 5.0
 # 主车搜索纵向速度限幅。
 MASTER_SEARCH_MAX_VY = 5.0
+# 主车绕行修正横向速度 P 环增益。
+MASTER_ORBIT_KP_X = 0.00
+# 主车绕行修正纵向速度 P 环增益。
+MASTER_ORBIT_KP_Y = 0.00
+# 主车绕行修正误差超出死区后的最小有效速度量。
+MASTER_ORBIT_MIN_SPEED = 0
+# 主车绕行修正横向误差死区, 单位为像素。
+MASTER_ORBIT_DEADZONE_X_PX = 15.0
+# 主车绕行修正纵向误差死区, 单位为像素。
+MASTER_ORBIT_DEADZONE_Y_PX = 8.0
+# 主车绕行修正横向速度限幅。
+MASTER_ORBIT_MAX_VX = 5.0
+# 主车绕行修正纵向速度限幅。
+MASTER_ORBIT_MAX_VY = 5.0
 # 主车搜索目标点横向像素坐标。当前图像为 QVGA 320x240, 默认中线 x=160; 若修改图像宽度请同步调整。
 MASTER_SEARCH_TARGET_X_PX = 160.0
 # 主车搜索目标点纵向像素坐标。当前图像为 QVGA 320x240, 默认底边 y=240; 若修改图像高度请同步调整。
 MASTER_SEARCH_TARGET_Y_PX = 210.0
+# 主车绕行修正目标点横向像素坐标。
+MASTER_ORBIT_TARGET_X_PX = 160.0
+# 主车绕行修正目标点纵向像素坐标。
+MASTER_ORBIT_TARGET_Y_PX = 210.0
 # 主车搬运入口目标点纵向像素坐标。当前图像为 QVGA 320x240, 推行前对正使用底边 y=240。
 MASTER_TRANSPORT_TARGET_Y_PX = 240.0
 # 主车收尾判定环带外扩像素。
@@ -65,6 +83,8 @@ FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.2
 FINISH_HOOK_STABLE_FRAMES = 2
 # 车端协议中的主车搜索状态编号。
 STATE_SEARCH_OBJECT = 1
+# 车端协议中的主车绕行状态编号。
+STATE_ORBITING = 2
 # 车端协议中的主车搬运状态编号。
 STATE_TRANSPORT_OBJECT = 4
 # 车端协议中的物体目标编号。
@@ -77,6 +97,8 @@ MASTER_SEARCH_HOOK_CONFIG_ID = 1
 MASTER_TRANSPORT_HOOK_CONFIG_ID = 2
 # 车端下发的主车收尾判定 hook 配置编号。
 MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID = 3
+# 车端下发的主车绕行视觉修正配置编号。
+MASTER_ORBIT_HOOK_CONFIG_ID = 4
 # 车端协议中的目标找到事件编号。
 EVENT_TARGET_FOUND = 6
 # 车端协议中的对正完成事件编号。
@@ -424,6 +446,8 @@ def build_search_target_point(
     _ = image_width
     _ = image_height
     target_x = float(MASTER_SEARCH_TARGET_X_PX)
+    if int(config_id) == int(MASTER_ORBIT_HOOK_CONFIG_ID):
+        return float(MASTER_ORBIT_TARGET_X_PX), float(MASTER_ORBIT_TARGET_Y_PX)
     if int(config_id) in (
         int(MASTER_TRANSPORT_HOOK_CONFIG_ID),
         int(MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID),
@@ -567,13 +591,14 @@ def _apply_min_speed(value, limit, min_speed):
     return value
 
 
-def _axis_p_velocity(error, deadzone, kp, limit):
+def _axis_p_velocity(error, deadzone, kp, limit, min_speed=MASTER_SEARCH_MIN_SPEED):
     """! @brief 生成单轴 P 控制速度
 
     @param error 当前轴像素误差
     @param deadzone 当前轴死区
     @param kp 当前轴 P 环增益
     @param limit 当前轴速度限幅
+    @param min_speed 当前轴最小有效速度
     @return 当前轴速度控制量
     """
 
@@ -583,7 +608,7 @@ def _axis_p_velocity(error, deadzone, kp, limit):
     return _apply_min_speed(
         error * float(kp),
         limit,
-        MASTER_SEARCH_MIN_SPEED,
+        min_speed,
     )
 
 
@@ -616,7 +641,10 @@ def build_search_velocity_from_error(err_x, err_y, image_height):
 
     return (
         _axis_p_velocity(
-            err_x, MASTER_SEARCH_DEADZONE_X_PX, MASTER_SEARCH_KP_X, MASTER_SEARCH_MAX_VX
+            err_x,
+            MASTER_SEARCH_DEADZONE_X_PX,
+            MASTER_SEARCH_KP_X,
+            MASTER_SEARCH_MAX_VX,
         ),
         _build_search_y_velocity(err_y, image_height),
     )
@@ -634,6 +662,50 @@ def build_search_velocity_from_observation(observation, image_height):
     if float(value) <= 0.0:
         return float(MASTER_MISSING_SEARCH_VX), float(MASTER_MISSING_SEARCH_VY)
     return build_search_velocity_from_error(x, y, image_height)
+
+
+def build_orbit_correction_velocity_from_observation(observation, image_height):
+    """! @brief 根据主车绕行物体观测生成平移修正量
+
+    @param observation context_id, x, y, value 观测字段元组
+    @param image_height 图像高度
+    @return vx, vy 平移修正量
+    """
+
+    _, _, _, value = observation
+    if float(value) <= 0.0:
+        return 0.0, 0.0
+    _, x, y, _ = observation
+    return (
+        _axis_p_velocity(
+            x,
+            MASTER_ORBIT_DEADZONE_X_PX,
+            MASTER_ORBIT_KP_X,
+            MASTER_ORBIT_MAX_VX,
+            MASTER_ORBIT_MIN_SPEED,
+        ),
+        _build_orbit_y_velocity(y, image_height),
+    )
+
+
+def _build_orbit_y_velocity(err_y, image_height):
+    """! @brief 根据图像高度归一化绕行纵向误差并生成速度"""
+
+    err_y = float(err_y)
+    if abs(err_y) <= float(MASTER_ORBIT_DEADZONE_Y_PX):
+        return 0.0
+    if float(MASTER_ORBIT_KP_Y) == 0.0:
+        return 0.0
+    scaled_error = err_y * (
+        float(MASTER_ORBIT_MAX_VY)
+        / abs(float(MASTER_ORBIT_KP_Y))
+        / float(image_height)
+    )
+    return _apply_min_speed(
+        scaled_error * float(MASTER_ORBIT_KP_Y),
+        MASTER_ORBIT_MAX_VY,
+        MASTER_ORBIT_MIN_SPEED,
+    )
 
 
 class MasterVisionHook:
@@ -702,6 +774,17 @@ class MasterVisionHook:
             int(self.context["state"]) == int(STATE_TRANSPORT_OBJECT)
             and int(self.context["target"]) == int(TARGET_EDGE_LINE)
             and int(self.context["arg"]) == int(MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID)
+        )
+
+    def is_orbit_correction_context(self):
+        """! @brief 判断当前上下文是否为绕行视觉修正 hook"""
+
+        if self.context is None:
+            return False
+        return (
+            int(self.context["state"]) == int(STATE_ORBITING)
+            and int(self.context["target"]) == int(TARGET_OBJECT)
+            and int(self.context["arg"]) == int(MASTER_ORBIT_HOOK_CONFIG_ID)
         )
 
     def handle_control_line(self, line):
@@ -908,6 +991,12 @@ class MasterVisionHook:
         ):
             return EVENT_ALIGNED
         if (
+            state == STATE_ORBITING
+            and target == TARGET_OBJECT
+            and arg == MASTER_ORBIT_HOOK_CONFIG_ID
+        ):
+            return None
+        if (
             state == STATE_TRANSPORT_OBJECT
             and target == TARGET_EDGE_LINE
             and arg == MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID
@@ -1092,7 +1181,13 @@ def process_search_frame(uart, hook, img, image_width, image_height):
             pixel_x=int(float(x) + image_width / 2.0),
             pixel_y=best_blob.cy(),
         )
-    velocity = build_search_velocity_from_observation(observation, image_height)
+    if hook.is_orbit_correction_context():
+        velocity = build_orbit_correction_velocity_from_observation(
+            observation,
+            image_height,
+        )
+    else:
+        velocity = build_search_velocity_from_observation(observation, image_height)
     write_data_line(uart, format_search_velocity_frame(*velocity))
     hook.accept_observation(
         observation,

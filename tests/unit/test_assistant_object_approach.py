@@ -85,6 +85,24 @@ def centered_transport_observation(module, area):
     )
 
 
+def centered_orbit_observation(module, area):
+    """构造命中绕行修正目标点的观测."""
+
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+    )
+    return module.build_object_observation(
+        1,
+        target_x,
+        target_y,
+        area,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+    )
+
+
 def choose_outside_deadzone_offset(target, upper_bound, deadzone, clearance=1.0):
     """在图像范围内构造一个稳定超出死区的偏移量."""
 
@@ -153,6 +171,118 @@ def test_assistant_sync_packet_switches_to_object_mode_and_replies_ack() -> None
 
     assert state.handle_control_line("s,12,2,1,1") == "a,12"
     assert state.mode == module.MODE_APPROACH_OBJECT
+
+
+def test_assistant_sync_packet_switches_to_orbit_correction_mode() -> None:
+    """绕行同步包切换到绕行修正模式并回复 ACK."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState()
+
+    line = "s,12,%d,%d,%d" % (
+        module.STATE_ORBIT,
+        module.TARGET_OBJECT,
+        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+    )
+
+    assert state.handle_control_line(line) == "a,12"
+    assert state.mode == module.MODE_ORBIT_OBJECT
+    assert state.current_object_config_id() == module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID
+
+
+def test_assistant_orbit_correction_uses_independent_velocity_params_without_event() -> None:
+    """绕行修正模式使用独立速度参数且不产生可靠事件."""
+
+    module = load_assistant()
+    module.OBJECT_ORBIT_KP_X = 0.2
+    module.OBJECT_ORBIT_KP_Y = -0.3
+    module.OBJECT_ORBIT_MIN_SPEED = 0.0
+    module.OBJECT_ORBIT_MAX_VX = 9.0
+    module.OBJECT_ORBIT_MAX_VY = 9.0
+    module.OBJECT_ORBIT_DEADZONE_X_PX = 3.0
+    module.OBJECT_ORBIT_DEADZONE_Y_PX = 3.0
+    state = module.AssistantVisionState(stable_frames=1)
+    line = "s,12,%d,%d,%d" % (
+        module.STATE_ORBIT,
+        module.TARGET_OBJECT,
+        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+    )
+    state.handle_control_line(line)
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+    )
+    err_x = 10.0
+    err_y = 12.0
+    observation = module.build_object_observation(
+        1,
+        target_x + err_x,
+        target_y + err_y,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+    )
+
+    velocity = module.build_object_orbit_velocity_from_observation(
+        observation,
+        IMAGE_HEIGHT,
+    )
+    state.accept_object_observation(observation)
+
+    expected_y = err_y * (
+        float(module.OBJECT_ORBIT_MAX_VY)
+        / abs(float(module.OBJECT_ORBIT_KP_Y))
+        / float(IMAGE_HEIGHT)
+    ) * float(module.OBJECT_ORBIT_KP_Y)
+    assert velocity == pytest.approx((err_x * module.OBJECT_ORBIT_KP_X, expected_y))
+    assert state.next_event_frame() is None
+
+
+def test_assistant_orbit_correction_missing_target_outputs_zero_velocity() -> None:
+    """绕行修正模式无目标时输出零速度."""
+
+    module = load_assistant()
+    observation = module.build_object_observation(
+        0,
+        0,
+        0,
+        0,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+    )
+
+    assert module.build_object_orbit_velocity_from_observation(
+        observation,
+        IMAGE_HEIGHT,
+    ) == (0.0, 0.0)
+
+
+def test_assistant_orbit_correction_zero_kp_outputs_zero_velocity() -> None:
+    """绕行修正增益为零时保持零修正."""
+
+    module = load_assistant()
+    module.OBJECT_ORBIT_KP_X = 0.0
+    module.OBJECT_ORBIT_KP_Y = 0.0
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+    )
+    observation = module.build_object_observation(
+        1,
+        target_x + module.OBJECT_ORBIT_DEADZONE_X_PX + 10.0,
+        target_y + module.OBJECT_ORBIT_DEADZONE_Y_PX + 10.0,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+    )
+
+    assert module.build_object_orbit_velocity_from_observation(
+        observation,
+        IMAGE_HEIGHT,
+    ) == (0.0, 0.0)
 
 
 def test_assistant_older_sync_only_replies_ack_without_reverting_mode() -> None:
