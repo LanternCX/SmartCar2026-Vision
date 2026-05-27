@@ -93,9 +93,9 @@ OBJECT_APPROACH_MAX_VX = 5.0
 # 找物体模式纵向速度限幅。
 OBJECT_APPROACH_MAX_VY = 5.0
 # 绕行修正横向速度 P 环增益。
-OBJECT_ORBIT_KP_X = 0.00
+OBJECT_ORBIT_KP_X = 0.05
 # 绕行修正纵向速度 P 环增益。
-OBJECT_ORBIT_KP_Y = 0.00
+OBJECT_ORBIT_KP_Y = -0.15
 # 绕行修正误差超出死区后的最小有效速度量。
 OBJECT_ORBIT_MIN_SPEED = 0
 # 绕行修正横向误差死区，单位为像素。
