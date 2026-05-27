@@ -96,6 +96,16 @@ def finish_hook_control_line(module):
     )
 
 
+def orbit_hook_control_line(module):
+    """! @brief 构造主车绕行修正 hook 的同步包"""
+
+    return "s,12,7,%d,%d,%d" % (
+        int(module.STATE_ORBITING),
+        int(module.TARGET_OBJECT),
+        int(module.MASTER_ORBIT_HOOK_CONFIG_ID),
+    )
+
+
 def choose_outside_deadzone_offset(target, upper_bound, deadzone, clearance=1.0):
     """! @brief 在图像范围内构造一个稳定超出死区的偏移量"""
 
@@ -225,6 +235,100 @@ def test_master_sync_packet_records_context_and_replies_ack() -> None:
 
     assert reply == "a,12"
     assert observation == (7, 0.0, 0.0, 180.0)
+
+
+def test_master_orbit_sync_switches_to_orbit_correction_context() -> None:
+    """! @brief 主车绕行同步建立只输出速度修正的上下文"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+
+    assert hook.handle_control_line(orbit_hook_control_line(module)) == "a,12"
+
+    assert hook.is_orbit_correction_context()
+    assert hook.current_target_config_id() == module.MASTER_ORBIT_HOOK_CONFIG_ID
+
+
+def test_master_orbit_correction_uses_independent_velocity_params_without_event() -> None:
+    """! @brief 主车绕行修正使用独立速度参数且不产生可靠事件"""
+
+    module = load_master()
+    module.MASTER_ORBIT_KP_X = 0.2
+    module.MASTER_ORBIT_KP_Y = -0.3
+    module.MASTER_ORBIT_MIN_SPEED = 0.0
+    module.MASTER_ORBIT_MAX_VX = 9.0
+    module.MASTER_ORBIT_MAX_VY = 9.0
+    module.MASTER_ORBIT_DEADZONE_X_PX = 3.0
+    module.MASTER_ORBIT_DEADZONE_Y_PX = 3.0
+    hook = module.MasterVisionHook(stable_frames=1)
+    hook.handle_control_line(orbit_hook_control_line(module))
+    target_x, target_y = master_target_point(
+        module,
+        module.MASTER_ORBIT_HOOK_CONFIG_ID,
+    )
+    err_x = 10.0
+    err_y = 12.0
+    observation = hook.build_observation(
+        1,
+        target_x + err_x,
+        target_y + err_y,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    velocity = module.build_orbit_correction_velocity_from_observation(
+        observation,
+        IMAGE_HEIGHT,
+    )
+    hook.accept_observation(observation)
+
+    expected_y = err_y * (
+        float(module.MASTER_ORBIT_MAX_VY)
+        / abs(float(module.MASTER_ORBIT_KP_Y))
+        / float(IMAGE_HEIGHT)
+    ) * float(module.MASTER_ORBIT_KP_Y)
+    assert velocity == pytest.approx((err_x * module.MASTER_ORBIT_KP_X, expected_y))
+    assert hook.next_event_frame() is None
+
+
+def test_master_orbit_correction_missing_target_outputs_zero_velocity() -> None:
+    """! @brief 主车绕行修正无目标时输出零修正速度"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(orbit_hook_control_line(module))
+    observation = hook.build_observation(0, 0, 0, 0, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert module.build_orbit_correction_velocity_from_observation(
+        observation,
+        IMAGE_HEIGHT,
+    ) == (0.0, 0.0)
+
+
+def test_master_orbit_correction_zero_kp_outputs_zero_velocity() -> None:
+    """! @brief 主车绕行修正增益为零时保持零修正"""
+
+    module = load_master()
+    module.MASTER_ORBIT_KP_X = 0.0
+    module.MASTER_ORBIT_KP_Y = 0.0
+    target_x, target_y = master_target_point(
+        module,
+        module.MASTER_ORBIT_HOOK_CONFIG_ID,
+    )
+    observation = module.MasterVisionHook().build_observation(
+        1,
+        target_x + module.MASTER_ORBIT_DEADZONE_X_PX + 10.0,
+        target_y + module.MASTER_ORBIT_DEADZONE_Y_PX + 10.0,
+        300,
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    assert module.build_orbit_correction_velocity_from_observation(
+        observation,
+        IMAGE_HEIGHT,
+    ) == (0.0, 0.0)
 
 
 def test_master_repeated_sync_replies_ack_without_reapplying() -> None:
