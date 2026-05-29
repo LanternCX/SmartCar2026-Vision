@@ -25,17 +25,24 @@
 
 ## 角色职责
 
+当前视觉链路统一使用固定长度短帧:
+
+- 每帧固定 13 字节, 由 `head/mode/topic/seq/body[8]/crc8` 组成。
+- `head=0xA5`, `crc8` 覆盖 `mode/topic/seq/body[8]`, 用于串口字节流重新对齐。
+- 本地视觉速度使用 `MODE_UDP + TOPIC_LOCAL_VISION_VELOCITY`。
+- 本地视觉同步与事件回报使用 `MODE_TCP`。
+- 可靠确认使用 `MODE_ACK`, `topic` 与被确认的可靠帧保持一致。
+
 ### OpenART Vision master
 
 `master/main.py` 运行在主车 OpenART 上, 负责物体搜索视觉链路:
 
-- 接收 RT1021 下发的 hook 上下文 `s,<reliable_seq>,<context_id>,<state>,<target>,<arg>`。
-- 使用 `a,<reliable_seq>` 确认可靠同步包。
+- 接收 RT1021 下发的主车视觉同步帧, body 字段为 `context_id/state/target/arg`。
+- 使用主车视觉同步 topic 的 ACK 帧确认可靠同步包。
 - 基于候选目标识别框中心点计算搜索 P 环。
-- 输出主车搜索速度数据流 `v,<vx>,<vy>`。
-- `v` 数据流独立于 hook 上下文, 每帧直接根据色块识别结果输出。
-- `v` 数据流包不携带 `omega` 和阶段元信息。
-- 在 hook 条件满足时输出可靠事件 `r,<reliable_seq>,<context_id>,<event>,<value>`。
+- 输出主车搜索速度短帧, body 字段为 `vx/vy/omega/has_omega`, 其中 `omega=0`、`has_omega=0`。
+- 速度短帧独立于 hook 上下文, 每帧直接根据色块识别结果输出。
+- 在 hook 条件满足时输出主车视觉事件回报帧, body 字段为 `context_id/event/value`。
 - `arg=1` 表示主车物体搜索 hook 配置, 稳定满足条件后回报 `TARGET_FOUND=6`。
 - `arg=2` 表示主车搬运入口对正 hook 配置, 稳定满足条件后回报 `ALIGNED=7`。
 - 主车搜索目标点按 hook 配置编号切换：`arg=1` 使用寻找阶段目标点，默认 `x=160, y=210`；`arg=2` 使用搬运入口对正目标点，默认 `x=160, y=240`。
@@ -51,12 +58,11 @@
 - 跟随模式识别主车色标。
 - 找物体模式识别红色目标物体。
 - 在 OpenART 端完成角色内阶段判断。
-- 输出辅车视觉速度修正数据流 `v,<vx>,<vy>`。
-- `v` 数据流包不携带 `omega` 和阶段元信息。
-- 接收辅车 RT1021 下发的找物体同步 `s,<seq>,2,1,<arg>`。
-- 使用 `a,<seq>` 确认本地同步包。
-- 找物体同步 `arg=1` 稳定满足条件后输出可靠事件 `r,<seq>,6,<value>`。
-- 搬运入口同步 `arg=2` 稳定满足条件后输出可靠事件 `r,<seq>,7,<value>`。
+- 输出辅车视觉速度修正短帧, body 字段为 `vx/vy/omega/has_omega`, 其中 `omega=0`、`has_omega=0`。
+- 接收辅车 RT1021 下发的本地任务同步帧, body 字段为 `state/target/arg`。
+- 使用本地任务同步 topic 的 ACK 帧确认可靠同步包。
+- 找物体同步 `arg=1` 稳定满足条件后输出辅车视觉事件回报帧 `event=6`。
+- 搬运入口同步 `arg=2` 稳定满足条件后输出辅车视觉事件回报帧 `event=7`。
 
 
 ## 辅车找物体规则
@@ -75,7 +81,7 @@
 
 - `master/main.py` 的 `v` 数据流包直接写出, 不执行发送前后延时。
 - `master/main.py` 的 `v` 数据流包不等待 hook 上下文建立。
-- `master/main.py` 的 `s/a/r` 可靠包按可靠发送规则写出, 发送前后各执行一次 1 ms 延时。
+- `master/main.py` 的可靠帧在当前入口层直接写出, 不额外插入发送保护延时。
 - 未确认的 `r` 事件按低频节奏重复发送, 不随每帧图像重复写出。
 - 主通信串口: `UART(2)`。
 - RT1021 接收串口: `UART6`。
@@ -100,5 +106,5 @@ TARGET_DIR=/path/to/device ./master/build.sh
 ## 验证命令
 
 ```bash
-python3 -m pytest tests/unit tests/contract -q
+uv run --with pytest python -m pytest tests/unit tests/contract -q
 ```

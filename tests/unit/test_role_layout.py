@@ -20,9 +20,25 @@ def test_role_main_modules_expose_role_protocol_api() -> None:
     assistant = load_role_main_module("assistant", "assistant_role_main_module")
     master = load_role_main_module("master", "master_role_main_module")
 
-    assert assistant.format_vision_frame(0, 0) == "v,0,0"
-    assert master.format_search_velocity_frame(0, 0) == "v,0,0"
+    assistant_frame = assistant.decode_frame(assistant.format_vision_frame(0, 0))
+    master_frame = master.decode_frame(master.format_search_velocity_frame(0, 0))
+
+    assert assistant_frame is not None
+    assert assistant_frame["mode"] == assistant.MODE_UDP
+    assert assistant_frame["topic"] == assistant.TOPIC_LOCAL_VISION_VELOCITY
+    assert master_frame is not None
+    assert master_frame["mode"] == master.MODE_UDP
+    assert master_frame["topic"] == master.TOPIC_LOCAL_VISION_VELOCITY
     assert not hasattr(master, "format_observation_frame")
+
+
+def test_role_main_files_avoid_board_unstable_int_byte_helpers() -> None:
+    """! @brief 角色入口不得保留板端不稳定的整数打包辅助写法"""
+
+    for role in ("assistant", "master"):
+        source = role_main_path(role).read_text(encoding="utf-8")
+        assert ".to_bytes(" not in source
+        assert "int.from_bytes(" not in source
 
 
 def test_role_build_scripts_copy_local_main_to_device_entry(tmp_path) -> None:

@@ -22,10 +22,23 @@ UART_ID = 2
 UART_BAUDRATE = 115200
 # 摄像头固定曝光时间，单位为微秒。
 EXP_TIME_US = 300
-# 可靠包发送前后的保护延时，单位为秒。
-RELIABLE_WRITE_DELAY_S = 0.001
 # TARGET_FOUND 未确认时的重复发送间隔，单位为毫秒。
 RELIABLE_RESEND_INTERVAL_MS = 100
+# 固定帧模式编号。
+MODE_UDP = 0x01
+MODE_TCP = 0x02
+MODE_ACK = 0x03
+# 固定帧 body 槽位长度。
+FRAME_BODY_SIZE = 8
+FRAME_HEAD = 0xA5
+# 固定帧总长度。
+FRAME_SIZE = 13
+# 本地视觉速度 topic。
+TOPIC_LOCAL_VISION_VELOCITY = 0x01
+# 主车视觉同步 topic。
+TOPIC_MASTER_VISION_HOOK_SYNC = 0x10
+# 主车视觉事件回报 topic。
+TOPIC_MASTER_VISION_EVENT_REPORT = 0x12
 # 红色候选目标的最小面积，小于该值不会触发找到事件。
 OBJECT_MIN_AREA = 50.0
 # 主车搜索目标丢失时输出的配置横向速度。
@@ -115,115 +128,190 @@ TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
 # 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
 FINISH_HOOK_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
 
-
-def compact_number(value):
-    """! @brief 将数值编码为短包中的紧凑文本
-
-    @param value 原始数值
-    @return 短包载荷使用的紧凑数值文本
-    """
-
-    number = float(value)
-    if -0.0005 < number < 0.0005:
-        number = 0.0
-    text = ("%.3f" % number).rstrip("0").rstrip(".")
-    if not text or text == "-0":
-        text = "0"
-    return text
+_I16_MIN = -32768
+_I16_MAX = 32767
+_SCALE = 1000
 
 
-def _parse_int(text):
-    """! @brief 解析严格整数字段
-
-    @param text 数值文本
-    @return 整数, 输入无效时返回 None
-    """
-
-    try:
-        value = int(text)
-    except ValueError:
-        return None
-    if str(value) != text.strip():
-        return None
+def _require_u8(value):
+    value = int(value)
+    if value < 0 or value > 0xFF:
+        raise ValueError("u8 out of range")
     return value
 
 
-def _parse_u8(text):
-    """! @brief 解析 0..255 范围内的整数字段
-
-    @param text 数值文本
-    @return 整数, 输入无效时返回 None
-    """
-
-    value = _parse_int(text)
-    if value is None or value < 0 or value > 255:
-        return None
+def _saturate_i16(value):
+    if value < _I16_MIN:
+        return _I16_MIN
+    if value > _I16_MAX:
+        return _I16_MAX
     return value
 
 
-def _split_fields(line):
-    """! @brief 拆分短包字段并过滤空字段
+def _pack_i16(value):
+    value = _saturate_i16(int(value))
+    if value < 0:
+        value += 0x10000
+    return bytes((value & 0xFF, (value >> 8) & 0xFF))
 
-    @param line 原始输入行
-    @return 字段列表, 输入无效时返回 None
-    """
 
-    text = str(line).strip()
-    if not text:
+def _unpack_i16(body, offset):
+    value = int(body[offset]) | (int(body[offset + 1]) << 8)
+    if value >= 0x8000:
+        value -= 0x10000
+    return value
+
+
+def _pack_scaled(value):
+    return _pack_i16(round(float(value) * _SCALE))
+
+
+def _unpack_scaled(body, offset):
+    return _unpack_i16(body, offset) / float(_SCALE)
+
+
+def encode_frame(mode, topic, seq, body):
+    """! @brief 编码固定长度短帧"""
+
+    mode = _require_u8(mode)
+    topic = _require_u8(topic)
+    seq = _require_u8(seq)
+    if not isinstance(body, bytes):
+        body = bytes(body)
+    if len(body) > FRAME_BODY_SIZE:
+        raise ValueError("body too large")
+    payload = bytes([mode, topic, seq]) + body + (b"\x00" * (FRAME_BODY_SIZE - len(body)))
+    return bytes([FRAME_HEAD]) + payload + bytes([_crc8(payload)])
+
+
+def decode_frame(frame_bytes):
+    """! @brief 解码固定长度短帧"""
+
+    if isinstance(frame_bytes, memoryview):
+        frame_bytes = frame_bytes.tobytes()
+    elif isinstance(frame_bytes, bytearray):
+        frame_bytes = bytes(frame_bytes)
+    if not isinstance(frame_bytes, bytes):
         return None
-    fields = [part.strip() for part in text.split(",")]
-    for field in fields:
-        if field == "":
-            return None
-    return fields
-
-
-def parse_sync_packet(line):
-    """! @brief 解析 RT1021 下发的视觉上下文同步包
-
-    @param line 原始输入行
-    @return 同步包字段字典, 输入无效时返回 None
-    """
-
-    fields = _split_fields(line)
-    if fields is None or len(fields) != 6 or fields[0].lower() != "s":
+    if len(frame_bytes) != FRAME_SIZE:
         return None
-    reliable_seq = _parse_u8(fields[1])
-    context_id = _parse_u8(fields[2])
-    state = _parse_u8(fields[3])
-    target = _parse_u8(fields[4])
-    arg = _parse_int(fields[5])
-    if (
-        reliable_seq is None
-        or context_id is None
-        or state is None
-        or target is None
-        or arg is None
-    ):
+    if frame_bytes[0] != FRAME_HEAD:
+        return None
+    payload = frame_bytes[1:-1]
+    if _crc8(payload) != frame_bytes[-1]:
         return None
     return {
-        "reliable_seq": reliable_seq,
-        "context_id": context_id,
-        "state": state,
-        "target": target,
-        "arg": arg,
+        "mode": payload[0],
+        "topic": payload[1],
+        "seq": payload[2],
+        "body": payload[3:],
     }
 
 
-def parse_ack_packet(line):
-    """! @brief 解析可靠事件确认包
+def _crc8(data):
+    """! @brief 计算固定帧 CRC8"""
 
-    @param line 原始输入行
+    crc = 0
+    for value in data:
+        crc ^= int(value)
+        for _ in range(8):
+            if crc & 0x80:
+                crc = ((crc << 1) ^ 0x07) & 0xFF
+            else:
+                crc = (crc << 1) & 0xFF
+    return crc
+
+
+def encode_velocity_body(vx, vy, omega=0.0, has_omega=False):
+    """! @brief 编码本地视觉速度 body"""
+
+    return (
+        _pack_scaled(vx)
+        + _pack_scaled(vy)
+        + _pack_scaled(omega)
+        + bytes([1 if has_omega else 0])
+    )
+
+
+def decode_velocity_body(body):
+    """! @brief 解码本地视觉速度 body"""
+
+    return {
+        "vx": _unpack_scaled(body, 0),
+        "vy": _unpack_scaled(body, 2),
+        "omega": _unpack_scaled(body, 4),
+        "has_omega": bool(body[6]),
+    }
+
+
+def encode_master_vision_hook_sync_body(context_id, state, target, arg):
+    """! @brief 编码主车视觉同步 body"""
+
+    return bytes([_require_u8(context_id), _require_u8(state), _require_u8(target)]) + _pack_i16(arg)
+
+
+def decode_master_vision_hook_sync_body(body):
+    """! @brief 解码主车视觉同步 body"""
+
+    return {
+        "context_id": int(body[0]),
+        "state": int(body[1]),
+        "target": int(body[2]),
+        "arg": _unpack_i16(body, 3),
+    }
+
+
+def encode_master_vision_event_report_body(context_id, event, value):
+    """! @brief 编码主车视觉事件回报 body"""
+
+    return bytes([_require_u8(context_id), _require_u8(event)]) + _pack_i16(value)
+
+
+def decode_master_vision_event_report_body(body):
+    """! @brief 解码主车视觉事件回报 body"""
+
+    return {
+        "context_id": int(body[0]),
+        "event": int(body[1]),
+        "value": _unpack_i16(body, 2),
+    }
+
+
+def parse_sync_packet(frame_bytes):
+    """! @brief 解析 RT1021 下发的视觉上下文同步帧
+
+    @param frame_bytes 原始固定帧
+    @return 同步包字段字典, 输入无效时返回 None
+    """
+
+    frame = decode_frame(frame_bytes)
+    if frame is None:
+        return None
+    if frame["mode"] != MODE_TCP or frame["topic"] != TOPIC_MASTER_VISION_HOOK_SYNC:
+        return None
+    packet = decode_master_vision_hook_sync_body(frame["body"])
+    return {
+        "reliable_seq": int(frame["seq"]),
+        "context_id": int(packet["context_id"]),
+        "state": int(packet["state"]),
+        "target": int(packet["target"]),
+        "arg": int(packet["arg"]),
+    }
+
+
+def parse_ack_packet(frame_bytes):
+    """! @brief 解析可靠事件确认帧
+
+    @param frame_bytes 原始固定帧
     @return 确认包字段字典, 输入无效时返回 None
     """
 
-    fields = _split_fields(line)
-    if fields is None or len(fields) != 2 or fields[0].lower() != "a":
+    frame = decode_frame(frame_bytes)
+    if frame is None:
         return None
-    reliable_seq = _parse_u8(fields[1])
-    if reliable_seq is None:
+    if frame["mode"] != MODE_ACK or frame["topic"] != TOPIC_MASTER_VISION_EVENT_REPORT:
         return None
-    return {"reliable_seq": reliable_seq}
+    return {"reliable_seq": int(frame["seq"])}
 
 
 def is_newer_seq(seq, last_seq):
@@ -277,10 +365,10 @@ def format_ack_frame(reliable_seq):
     """! @brief 格式化可靠包确认帧
 
     @param reliable_seq 被确认的可靠包序号
-    @return 确认帧文本
+    @return ACK 短帧
     """
 
-    return "a,%d" % int(reliable_seq)
+    return encode_frame(MODE_ACK, TOPIC_MASTER_VISION_HOOK_SYNC, reliable_seq, b"")
 
 
 def format_search_velocity_frame(vx, vy):
@@ -288,10 +376,15 @@ def format_search_velocity_frame(vx, vy):
 
     @param vx 主车搜索横向速度控制量
     @param vy 主车搜索纵向速度控制量
-    @return 速度帧文本
+    @return 速度短帧
     """
 
-    return "v,%s,%s" % (compact_number(vx), compact_number(vy))
+    return encode_frame(
+        MODE_UDP,
+        TOPIC_LOCAL_VISION_VELOCITY,
+        0,
+        encode_velocity_body(vx, vy, 0.0, False),
+    )
 
 
 def format_event_frame(reliable_seq, context_id, event, value):
@@ -301,26 +394,28 @@ def format_event_frame(reliable_seq, context_id, event, value):
     @param context_id 视觉上下文编号
     @param event 事件编号
     @param value 事件附加值
-    @return 事件帧文本
+    @return 事件短帧
     """
 
-    return "r,%d,%d,%d,%d" % (
-        int(reliable_seq),
-        int(context_id),
-        int(event),
-        int(value),
+    return encode_frame(
+        MODE_TCP,
+        TOPIC_MASTER_VISION_EVENT_REPORT,
+        reliable_seq,
+        encode_master_vision_event_report_body(context_id, event, value),
     )
 
 
 def _write_all(uart, line):
-    """! @brief 向串口完整写出一行文本
+    """! @brief 向串口完整写出一帧 bytes
 
     @param uart 目标串口对象
-    @param line 不含行尾的短包文本
-    @return 是否完整写出整行短包
+    @param line 固定长度短帧
+    @return 是否完整写出整帧
     """
 
-    remaining = str(line) + "\r\n"
+    if not isinstance(line, bytes):
+        line = bytes(line)
+    remaining = line
     while remaining:
         written = uart.write(remaining)
         if written is None:
@@ -333,36 +428,41 @@ def _write_all(uart, line):
 
 
 def write_data_line(uart, line):
-    """! @brief 写出 v/o 数据流短包, 不执行发送延时
+    """! @brief 写出速度数据流短帧
 
     @param uart 目标串口对象
-    @param line 不含行尾的数据流短包文本
+    @param line 固定长度速度短帧
     """
 
     _write_all(uart, line)
 
 
-def sleep_reliable_delay():
-    """! @brief 可靠包发送保护延时"""
-
-    try:
-        time.sleep(RELIABLE_WRITE_DELAY_S)
-    except AttributeError:
-        pass
-
-
 def write_reliable_line(uart, line):
-    """! @brief 写出 s/a/r 可靠短包, 发送前后各延时 1 ms
+    """! @brief 写出可靠短帧
 
     @param uart 目标串口对象
-    @param line 不含行尾的可靠短包文本
-    @return 是否完整写出整行短包
+    @param line 固定长度可靠短帧
+    @return 是否完整写出整帧
     """
 
-    sleep_reliable_delay()
-    success = _write_all(uart, line)
-    sleep_reliable_delay()
-    return success
+    return _write_all(uart, line)
+
+
+def _find_control_frame_start(rx_buffer):
+    """! @brief 查找视觉控制链路合法帧起点"""
+
+    limit = len(rx_buffer) - FRAME_SIZE + 1
+    for index in range(limit):
+        frame = decode_frame(rx_buffer[index : index + FRAME_SIZE])
+        if frame is None:
+            continue
+        mode = frame["mode"]
+        topic = frame["topic"]
+        if mode == MODE_TCP and topic == TOPIC_MASTER_VISION_HOOK_SYNC:
+            return index
+        if mode == MODE_ACK and topic == TOPIC_MASTER_VISION_EVENT_REPORT:
+            return index
+    return -1
 
 
 def blob_rect_to_bbox(rect):
@@ -758,6 +858,11 @@ class MasterVisionHook:
 
         return self.context is not None
 
+    def has_pending_event(self):
+        """! @brief 判断是否存在等待确认的可靠事件"""
+
+        return self._pending_event is not None
+
     def current_target_config_id(self):
         """! @brief 返回当前 hook 使用的目标点配置编号"""
 
@@ -788,10 +893,10 @@ class MasterVisionHook:
         )
 
     def handle_control_line(self, line):
-        """! @brief 处理 RT1021 发来的同步或确认短包
+        """! @brief 处理 RT1021 发来的同步或确认短帧
 
-        @param line 原始控制短包文本
-        @return 需要回复的确认帧, 无需回复时返回 None
+        @param line 原始控制短帧
+        @return 需要回复的 ACK 帧, 无需回复时返回 None
         """
 
         sync_packet = parse_sync_packet(line)
@@ -1088,10 +1193,10 @@ def init_sensor():
 
 
 def process_uart_input(uart, rx_buffer, hook):
-    """! @brief 处理 RT1021 发来的控制短包
+    """! @brief 处理 RT1021 发来的控制短帧
 
     @param uart 控制链路串口对象
-    @param rx_buffer 上一轮遗留的未完整输入
+    @param rx_buffer 上一轮遗留的未完整输入 bytes
     @param hook 主车视觉 hook 状态对象
     @return 更新后的接收缓冲区
     """
@@ -1106,18 +1211,29 @@ def process_uart_input(uart, rx_buffer, hook):
         data = uart.read(size)
         if data is None:
             return rx_buffer
-        rx_buffer += data.decode()
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+        elif isinstance(data, bytearray):
+            data = bytes(data)
+        elif not isinstance(data, bytes):
+            return rx_buffer
+        rx_buffer += data
     except Exception:
         return rx_buffer
-    while True:
-        idx = rx_buffer.find("\n")
-        if idx == -1:
+    while len(rx_buffer) >= FRAME_SIZE:
+        frame_start = _find_control_frame_start(rx_buffer)
+        if frame_start < 0:
+            return rx_buffer[-(FRAME_SIZE - 1):]
+        if frame_start > 0:
+            rx_buffer = rx_buffer[frame_start:]
+        if len(rx_buffer) < FRAME_SIZE:
             return rx_buffer
-        line = rx_buffer[:idx].rstrip("\r").strip()
-        rx_buffer = rx_buffer[idx + 1 :]
+        line = rx_buffer[:FRAME_SIZE]
+        rx_buffer = rx_buffer[FRAME_SIZE:]
         reply = hook.handle_control_line(line)
         if reply is not None:
             write_reliable_line(uart, reply)
+    return rx_buffer
 
 
 def build_observation_from_image(hook, img, image_width, image_height):
@@ -1170,6 +1286,14 @@ def process_search_frame(uart, hook, img, image_width, image_height):
     @param image_height 图像高度
     """
 
+    if hook.has_pending_event():
+        event_frame = hook.next_event_frame()
+        if event_frame is not None:
+            write_reliable_line(uart, event_frame)
+        return
+    if not hook.has_context():
+        return
+
     observation, best_blob = build_observation_from_image(
         hook, img, image_width, image_height
     )
@@ -1199,9 +1323,6 @@ def process_search_frame(uart, hook, img, image_width, image_height):
             image_height,
         ),
     )
-    event_frame = hook.next_event_frame()
-    if event_frame is not None:
-        write_reliable_line(uart, event_frame)
 
 
 def run():
@@ -1210,7 +1331,7 @@ def run():
     uart = init_uart()
     image_width, image_height = init_sensor()
     hook = MasterVisionHook()
-    rx_buffer = ""
+    rx_buffer = b""
 
     while True:
         rx_buffer = process_uart_input(uart, rx_buffer, hook)
