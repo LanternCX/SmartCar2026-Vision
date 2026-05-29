@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.test_support import load_role_main_module
+from tests.test_support import load_role_main_module, master_event_ack_frame, master_sync_frame
 
 
 class FakeUART:
@@ -35,6 +35,26 @@ class BadReadUART:
 
     def read(self, size):
         return b"\xff"
+
+
+class ReadWriteUART:
+    """! @brief 同时提供读写能力的测试串口"""
+
+    def __init__(self, data):
+        self._data = data
+        self.writes = []
+
+    def any(self):
+        return len(self._data)
+
+    def read(self, size):
+        data = self._data[:size]
+        self._data = self._data[size:]
+        return data
+
+    def write(self, data):
+        self.writes.append(data)
+        return len(data)
 
 
 def load_master():
@@ -86,10 +106,78 @@ def centered_master_transport_observation(module, hook, area):
     )
 
 
+class CenteredMasterBlob:
+    """! @brief 位于默认目标点附近的测试色块"""
+
+    def rect(self):
+        return (150, 150, 20, 20)
+
+    def cx(self):
+        return 160
+
+    def cy(self):
+        return 160
+
+    def area(self):
+        return 300
+
+
+class CenteredMasterImage:
+    """! @brief 输出单个默认命中色块的测试图像"""
+
+    def __init__(self):
+        self.crosses = []
+
+    def height(self):
+        return IMAGE_HEIGHT
+
+    def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+        return [CenteredMasterBlob()]
+
+    def draw_cross(self, x, y):
+        self.crosses.append((x, y))
+
+
+def aligned_master_image(module, config_id=None, area=300):
+    """! @brief 构造底边对齐当前目标点的测试图像"""
+
+    target_x, target_y = master_target_point(module, config_id)
+
+    class AlignedMasterBlob:
+        def rect(self):
+            return (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10
+
+        def area(self):
+            return area
+
+    class AlignedMasterImage:
+        def __init__(self):
+            self.crosses = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [AlignedMasterBlob()]
+
+        def draw_cross(self, x, y):
+            self.crosses.append((x, y))
+
+    return AlignedMasterImage()
+
+
 def finish_hook_control_line(module):
     """! @brief 构造主车收尾 hook 的同步包"""
 
-    return "s,12,7,%d,%d,%d" % (
+    return master_sync_frame(
+        12,
+        7,
         int(module.STATE_TRANSPORT_OBJECT),
         int(module.TARGET_EDGE_LINE),
         int(module.MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID),
@@ -99,11 +187,32 @@ def finish_hook_control_line(module):
 def orbit_hook_control_line(module):
     """! @brief 构造主车绕行修正 hook 的同步包"""
 
-    return "s,12,7,%d,%d,%d" % (
+    return master_sync_frame(
+        12,
+        7,
         int(module.STATE_ORBITING),
         int(module.TARGET_OBJECT),
         int(module.MASTER_ORBIT_HOOK_CONFIG_ID),
     )
+
+
+def search_hook_control_line(
+    module,
+    seq=12,
+    context_id=7,
+    state=None,
+    target=None,
+    arg=None,
+):
+    """! @brief 构造主车搜索或修正同步包"""
+
+    if state is None:
+        state = int(module.STATE_SEARCH_OBJECT)
+    if target is None:
+        target = int(module.TARGET_OBJECT)
+    if arg is None:
+        arg = int(module.MASTER_SEARCH_HOOK_CONFIG_ID)
+    return master_sync_frame(seq, context_id, state, target, arg)
 
 
 def choose_outside_deadzone_offset(target, upper_bound, deadzone, clearance=1.0):
@@ -155,6 +264,32 @@ def expected_master_y_velocity(module, err_y):
         module.MASTER_SEARCH_MIN_SPEED,
         module.MASTER_SEARCH_MAX_VY,
     )
+
+
+def assert_master_ack(module, frame_bytes, seq):
+    """! @brief 断言主车 ACK 帧"""
+
+    assert frame_bytes == module.format_ack_frame(seq)
+
+
+def assert_master_event(module, frame_bytes, seq, context_id, event, value):
+    """! @brief 断言主车事件帧"""
+
+    assert frame_bytes == module.format_event_frame(seq, context_id, event, value)
+
+
+def assert_velocity_frame(module, frame_bytes, vx, vy):
+    """! @brief 断言主车速度帧"""
+
+    frame = module.decode_frame(frame_bytes)
+    assert frame is not None
+    assert frame["mode"] == module.MODE_UDP
+    assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+    body = module.decode_velocity_body(frame["body"])
+    assert body["vx"] == pytest.approx(vx)
+    assert body["vy"] == pytest.approx(vy)
+    assert body["omega"] == pytest.approx(0.0)
+    assert body["has_omega"] is False
 
 
 class FinishHookBlob:
@@ -230,11 +365,53 @@ def test_master_sync_packet_records_context_and_replies_ack() -> None:
     module = load_master()
     hook = module.MasterVisionHook()
 
-    reply = hook.handle_control_line("s,12,7,1,1,1")
+    reply = hook.handle_control_line(search_hook_control_line(module))
     observation = centered_master_observation(module, hook, 180)
 
-    assert reply == "a,12"
+    assert_master_ack(module, reply, 12)
     assert observation == (7, 0.0, 0.0, 180.0)
+
+
+def test_process_uart_input_replies_ack_for_master_sync_frame() -> None:
+    """! @brief UART 收到主车同步帧后立即回复 ACK"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    uart = ReadWriteUART(search_hook_control_line(module))
+
+    rx_buffer = module.process_uart_input(uart, b"", hook)
+
+    assert rx_buffer == b""
+    assert_master_ack(module, uart.writes[0], 12)
+    assert hook.has_context()
+
+
+def test_process_uart_input_resyncs_before_master_sync_frame() -> None:
+    """! @brief UART 从半帧或残留字节开始读取时重新对齐同步帧"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    uart = ReadWriteUART(b"\x02" + search_hook_control_line(module))
+
+    rx_buffer = module.process_uart_input(uart, b"", hook)
+
+    assert rx_buffer == b""
+    assert_master_ack(module, uart.writes[0], 12)
+    assert hook.has_context()
+
+
+def test_process_uart_input_skips_crc_invalid_false_ack_before_master_sync_frame() -> None:
+    """! @brief UART 错位假 ACK 不能吞掉后续真实同步帧"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    uart = ReadWriteUART(b"\x03" + search_hook_control_line(module))
+
+    rx_buffer = module.process_uart_input(uart, b"", hook)
+
+    assert rx_buffer == b""
+    assert_master_ack(module, uart.writes[0], 12)
+    assert hook.has_context()
 
 
 def test_master_orbit_sync_switches_to_orbit_correction_context() -> None:
@@ -243,7 +420,7 @@ def test_master_orbit_sync_switches_to_orbit_correction_context() -> None:
     module = load_master()
     hook = module.MasterVisionHook()
 
-    assert hook.handle_control_line(orbit_hook_control_line(module)) == "a,12"
+    assert_master_ack(module, hook.handle_control_line(orbit_hook_control_line(module)), 12)
 
     assert hook.is_orbit_correction_context()
     assert hook.current_target_config_id() == module.MASTER_ORBIT_HOOK_CONFIG_ID
@@ -337,13 +514,13 @@ def test_master_repeated_sync_replies_ack_without_reapplying() -> None:
     module = load_master()
     hook = module.MasterVisionHook(stable_frames=2, next_reliable_seq=30)
 
-    assert hook.handle_control_line("s,12,7,1,1,1") == "a,12"
+    assert_master_ack(module, hook.handle_control_line(search_hook_control_line(module)), 12)
     observation = centered_master_observation(module, hook, 180)
     hook.accept_observation(observation)
-    assert hook.handle_control_line("s,12,7,1,1,1") == "a,12"
+    assert_master_ack(module, hook.handle_control_line(search_hook_control_line(module)), 12)
     hook.accept_observation(observation)
 
-    assert hook.next_event_frame() == "r,30,7,6,180"
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 180)
 
 
 def test_master_non_new_context_does_not_override_active_context() -> None:
@@ -352,8 +529,8 @@ def test_master_non_new_context_does_not_override_active_context() -> None:
     module = load_master()
     hook = module.MasterVisionHook()
 
-    assert hook.handle_control_line("s,12,7,1,1,1") == "a,12"
-    assert hook.handle_control_line("s,13,6,2,1,9") == "a,13"
+    assert_master_ack(module, hook.handle_control_line(search_hook_control_line(module)), 12)
+    assert_master_ack(module, hook.handle_control_line(master_sync_frame(13, 6, 2, 1, 9)), 13)
     observation = centered_master_observation(module, hook, 180)
 
     assert observation == (7, 0.0, 0.0, 180.0)
@@ -370,15 +547,15 @@ def test_master_reliable_seq_is_separate_from_context_id() -> None:
         now_ms=lambda: now_ms[0],
         event_resend_interval_ms=20,
     )
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
     observation = centered_master_observation(module, hook, 180)
 
     hook.accept_observation(observation)
     event_frame = hook.next_event_frame()
-    hook.handle_control_line("a,12")
+    hook.handle_control_line(master_event_ack_frame(12))
     now_ms[0] += 20
 
-    assert event_frame == "r,30,7,6,180"
+    assert_master_event(module, event_frame, 30, 7, module.EVENT_TARGET_FOUND, 180)
     assert hook.next_event_frame() == event_frame
 
 
@@ -387,7 +564,7 @@ def test_master_object_observation_uses_configured_target_point() -> None:
 
     module = load_master()
     hook = module.MasterVisionHook()
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
     target_x, target_y = master_target_point(module)
 
     observation = hook.build_observation(
@@ -403,10 +580,10 @@ def test_master_transport_observation_uses_transport_target_point() -> None:
     module = load_master()
     hook = module.MasterVisionHook()
     hook.handle_control_line(
-        "s,12,7,%d,1,%d"
-        % (
-            int(module.STATE_SEARCH_OBJECT),
-            int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+        search_hook_control_line(
+            module,
+            state=int(module.STATE_SEARCH_OBJECT),
+            arg=int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
         )
     )
     search_target_x, search_target_y = master_target_point(
@@ -470,7 +647,7 @@ def test_master_search_target_can_be_reconfigured(monkeypatch) -> None:
 
     module = load_master()
     hook = module.MasterVisionHook()
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
     monkeypatch.setattr(module, "MASTER_SEARCH_TARGET_X_PX", 80.0)
     monkeypatch.setattr(module, "MASTER_SEARCH_TARGET_Y_PX", 120.0)
 
@@ -510,7 +687,7 @@ def test_master_missing_target_outputs_zero_observation() -> None:
 
     module = load_master()
     hook = module.MasterVisionHook()
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
 
     observation = hook.build_observation(0, 0, 0, 0, IMAGE_WIDTH, IMAGE_HEIGHT)
 
@@ -592,7 +769,7 @@ def test_master_hook_waits_for_stable_target_before_event() -> None:
         stable_frames=2,
         next_reliable_seq=30,
     )
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
     observation = centered_master_observation(module, hook, 150)
 
     hook.accept_observation(observation)
@@ -601,7 +778,7 @@ def test_master_hook_waits_for_stable_target_before_event() -> None:
     second_frame = hook.next_event_frame()
 
     assert first_frame is None
-    assert second_frame == "r,30,7,6,150"
+    assert_master_event(module, second_frame, 30, 7, module.EVENT_TARGET_FOUND, 150)
 
 
 def test_master_hook_does_not_event_when_condition_is_not_met() -> None:
@@ -615,7 +792,7 @@ def test_master_hook_does_not_event_when_condition_is_not_met() -> None:
         stable_frames=1,
         next_reliable_seq=30,
     )
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
 
     weak = centered_master_observation(module, hook, 99)
     target_x, target_y = master_target_point(module)
@@ -644,7 +821,7 @@ def test_master_hook_does_not_event_for_unsupported_hook_config() -> None:
 
     module = load_master()
     hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
-    hook.handle_control_line("s,12,7,1,1,99")
+    hook.handle_control_line(search_hook_control_line(module, arg=99))
     observation = centered_master_observation(module, hook, 180)
 
     hook.accept_observation(observation)
@@ -661,17 +838,17 @@ def test_master_transport_hook_emits_aligned_for_transport_config() -> None:
         next_reliable_seq=30,
     )
     hook.handle_control_line(
-        "s,12,7,%d,1,%d"
-        % (
-            int(module.STATE_SEARCH_OBJECT),
-            int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+        search_hook_control_line(
+            module,
+            state=int(module.STATE_SEARCH_OBJECT),
+            arg=int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
         )
     )
     observation = centered_master_transport_observation(module, hook, 180)
 
     hook.accept_observation(observation)
 
-    assert hook.next_event_frame() == "r,30,7,7,180"
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_ALIGNED, 180)
 
 
 def test_master_transport_hook_keeps_search_velocity_output() -> None:
@@ -680,10 +857,10 @@ def test_master_transport_hook_keeps_search_velocity_output() -> None:
     module = load_master()
     hook = module.MasterVisionHook()
     hook.handle_control_line(
-        "s,12,7,%d,1,%d"
-        % (
-            int(module.STATE_SEARCH_OBJECT),
-            int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+        search_hook_control_line(
+            module,
+            state=int(module.STATE_SEARCH_OBJECT),
+            arg=int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
         )
     )
 
@@ -714,9 +891,58 @@ def test_master_transport_hook_keeps_search_velocity_output() -> None:
             self.crosses.append((x, y))
 
     uart = FakeUART()
-    module.process_search_frame(uart, hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_search_frame(uart, hook, CenteredMasterImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
 
-    assert uart.writes[0].startswith("v,")
+    frame = module.decode_frame(uart.writes[0])
+    assert frame is not None
+    assert frame["mode"] == module.MODE_UDP
+    assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+
+
+def test_master_target_found_sends_stable_zero_before_event() -> None:
+    """! @brief 搜索 hook 稳定命中前先输出足够的零速度"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(stable_frames=2, next_reliable_seq=30)
+    hook.handle_control_line(search_hook_control_line(module))
+    uart = FakeUART()
+    img = aligned_master_image(module)
+
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert len(uart.writes) == 3
+    assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
+    assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
+    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 300)
+
+
+def test_master_pending_event_suppresses_velocity_between_retries() -> None:
+    """! @brief 可靠事件等待确认期间不再继续输出速度流"""
+
+    module = load_master()
+    now_ms = [100]
+    hook = module.MasterVisionHook(
+        stable_frames=1,
+        next_reliable_seq=30,
+        now_ms=lambda: now_ms[0],
+        event_resend_interval_ms=20,
+    )
+    hook.handle_control_line(search_hook_control_line(module))
+    uart = FakeUART()
+    img = aligned_master_image(module)
+
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+    now_ms[0] += 20
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert len(uart.writes) == 3
+    assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
+    assert_master_event(module, uart.writes[1], 30, 7, module.EVENT_TARGET_FOUND, 300)
+    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 300)
 
 
 def test_master_transport_finish_hook_does_not_arrive_on_yellow_contact_only() -> None:
@@ -752,9 +978,9 @@ def test_master_transport_finish_hook_does_not_arrive_on_yellow_contact_only() -
         IMAGE_HEIGHT,
     )
 
-    assert uart.writes[0] == "v,0,0\r\n"
-    assert uart.writes[1] == "v,0,0\r\n"
-    assert uart.writes == ["v,0,0\r\n", "v,0,0\r\n"]
+    assert len(uart.writes) == 2
+    assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
+    assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
 
 
 def test_master_transport_finish_hook_emits_arrived_after_yellow_contact_then_clear() -> None:
@@ -796,11 +1022,18 @@ def test_master_transport_finish_hook_emits_arrived_after_yellow_contact_then_cl
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
     )
+    module.process_search_frame(
+        uart,
+        hook,
+        FinishHookImage(blob, {}),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
 
-    assert uart.writes[0] == "v,0,0\r\n"
-    assert uart.writes[1] == "v,0,0\r\n"
-    assert uart.writes[2] == "v,0,0\r\n"
-    assert uart.writes[3] == "r,30,7,8,0\r\n"
+    assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
+    assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
+    assert_velocity_frame(module, uart.writes[2], 0.0, 0.0)
+    assert_master_event(module, uart.writes[3], 30, 7, module.EVENT_ARRIVED, 0)
 
 
 def test_master_transport_finish_hook_does_not_arrive_when_yellow_ratio_is_not_enough() -> None:
@@ -841,11 +1074,13 @@ def test_master_transport_finish_hook_does_not_arrive_when_yellow_ratio_is_not_e
         IMAGE_HEIGHT,
     )
 
-    assert uart.writes == ["v,0,0\r\n", "v,0,0\r\n"]
+    assert len(uart.writes) == 2
+    assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
+    assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
 
 
-def test_master_transport_finish_hook_keeps_search_velocity_output() -> None:
-    """! @brief 收尾 hook 配置继续保留现有速度输出主线"""
+def test_master_transport_finish_hook_outputs_zero_before_stable() -> None:
+    """! @brief 收尾 hook 稳定前继续输出零速度"""
 
     module = load_master()
     hook = module.MasterVisionHook()
@@ -861,7 +1096,8 @@ def test_master_transport_finish_hook_keeps_search_velocity_output() -> None:
         IMAGE_HEIGHT,
     )
 
-    assert uart.writes == ["v,0,0\r\n"]
+    assert len(uart.writes) == 1
+    assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
 
 
 def test_master_hook_throttles_pending_event_retries() -> None:
@@ -875,7 +1111,7 @@ def test_master_hook_throttles_pending_event_retries() -> None:
         now_ms=lambda: now_ms[0],
         event_resend_interval_ms=20,
     )
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
     observation = centered_master_observation(module, hook, 180)
 
     hook.accept_observation(observation)
@@ -886,7 +1122,7 @@ def test_master_hook_throttles_pending_event_retries() -> None:
     now_ms[0] += 1
     fourth = hook.next_event_frame()
 
-    assert first == "r,30,7,6,180"
+    assert_master_event(module, first, 30, 7, module.EVENT_TARGET_FOUND, 180)
     assert second is None
     assert third is None
     assert fourth == first
@@ -902,7 +1138,7 @@ def test_master_hook_default_event_retry_interval_is_low_frequency() -> None:
         next_reliable_seq=30,
         now_ms=lambda: now_ms[0],
     )
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
     observation = centered_master_observation(module, hook, 180)
 
     hook.accept_observation(observation)
@@ -910,7 +1146,7 @@ def test_master_hook_default_event_retry_interval_is_low_frequency() -> None:
     now_ms[0] += 20
     second = hook.next_event_frame()
 
-    assert first == "r,30,7,6,180"
+    assert_master_event(module, first, 30, 7, module.EVENT_TARGET_FOUND, 180)
     assert second is None
 
 
@@ -925,19 +1161,19 @@ def test_master_hook_repeats_event_until_matching_ack() -> None:
         now_ms=lambda: now_ms[0],
         event_resend_interval_ms=20,
     )
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
     observation = centered_master_observation(module, hook, 180)
 
     hook.accept_observation(observation)
     first = hook.next_event_frame()
-    hook.handle_control_line("a,29")
+    hook.handle_control_line(master_event_ack_frame(29))
     now_ms[0] += 20
     second = hook.next_event_frame()
     now_ms[0] += 20
     third = hook.next_event_frame()
-    hook.handle_control_line("a,30")
+    hook.handle_control_line(master_event_ack_frame(30))
 
-    assert first == "r,30,7,6,180"
+    assert_master_event(module, first, 30, 7, module.EVENT_TARGET_FOUND, 180)
     assert second == first
     assert third == first
     assert hook.next_event_frame() is None
@@ -954,17 +1190,17 @@ def test_master_hook_keeps_unacked_event_after_new_context_sync() -> None:
         now_ms=lambda: now_ms[0],
         event_resend_interval_ms=20,
     )
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
     observation = centered_master_observation(module, hook, 180)
 
     hook.accept_observation(observation)
     first = hook.next_event_frame()
-    hook.handle_control_line("s,13,8,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module, seq=13, context_id=8))
     now_ms[0] += 20
     second = hook.next_event_frame()
-    hook.handle_control_line("a,30")
+    hook.handle_control_line(master_event_ack_frame(30))
 
-    assert first == "r,30,7,6,180"
+    assert_master_event(module, first, 30, 7, module.EVENT_TARGET_FOUND, 180)
     assert second == first
     assert hook.next_event_frame() is None
 
@@ -974,12 +1210,12 @@ def test_master_hook_creates_target_found_once_per_context() -> None:
 
     module = load_master()
     hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
     observation = centered_master_observation(module, hook, 180)
 
     hook.accept_observation(observation)
-    assert hook.next_event_frame() == "r,30,7,6,180"
-    hook.handle_control_line("a,30")
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 180)
+    hook.handle_control_line(master_event_ack_frame(30))
     hook.accept_observation(observation)
 
     assert hook.next_event_frame() is None
@@ -991,9 +1227,9 @@ def test_process_uart_input_ignores_bad_decode() -> None:
     module = load_master()
     hook = module.MasterVisionHook()
 
-    rx_buffer = module.process_uart_input(BadReadUART(), "partial", hook)
+    rx_buffer = module.process_uart_input(BadReadUART(), b"partial", hook)
 
-    assert rx_buffer == "partial"
+    assert rx_buffer == b"partial\xff"
     assert not hook.has_context()
 
 
@@ -1005,9 +1241,9 @@ def test_data_stream_write_does_not_sleep(monkeypatch) -> None:
     monkeypatch.setattr(module.time, "sleep", lambda delay: sleeps.append(delay))
     uart = FakeUART()
 
-    module.write_data_line(uart, "v,0,0")
+    module.write_data_line(uart, module.format_search_velocity_frame(0, 0))
 
-    assert uart.writes == ["v,0,0\r\n"]
+    assert uart.writes == [module.format_search_velocity_frame(0, 0)]
     assert sleeps == []
 
 
@@ -1019,10 +1255,10 @@ def test_reliable_write_sleeps_one_ms_before_and_after(monkeypatch) -> None:
     monkeypatch.setattr(module.time, "sleep", lambda delay: sleeps.append(delay))
     uart = FakeUART()
 
-    assert module.write_reliable_line(uart, "a,12") is True
+    assert module.write_reliable_line(uart, module.format_ack_frame(12)) is True
 
-    assert uart.writes == ["a,12\r\n"]
-    assert sleeps == [0.001, 0.001]
+    assert uart.writes == [module.format_ack_frame(12)]
+    assert sleeps == []
 
 
 def test_reliable_write_reports_blocked_uart(monkeypatch) -> None:
@@ -1033,10 +1269,10 @@ def test_reliable_write_reports_blocked_uart(monkeypatch) -> None:
     monkeypatch.setattr(module.time, "sleep", lambda delay: sleeps.append(delay))
     uart = BlockedUART()
 
-    assert module.write_reliable_line(uart, "a,12") is False
+    assert module.write_reliable_line(uart, module.format_ack_frame(12)) is False
 
-    assert uart.writes == ["a,12\r\n"]
-    assert sleeps == [0.001, 0.001]
+    assert uart.writes == [module.format_ack_frame(12)]
+    assert sleeps == []
 
 
 def test_master_formats_search_velocity_frame() -> None:
@@ -1044,8 +1280,8 @@ def test_master_formats_search_velocity_frame() -> None:
 
     module = load_master()
 
-    assert module.format_search_velocity_frame(-1.2, 0.0) == "v,-1.2,0"
-    assert module.format_search_velocity_frame(0, 0) == "v,0,0"
+    assert_velocity_frame(module, module.format_search_velocity_frame(-1.2, 0.0), -1.2, 0.0)
+    assert_velocity_frame(module, module.format_search_velocity_frame(0, 0), 0.0, 0.0)
 
 
 def test_master_search_velocity_uses_observation_entry_only() -> None:
@@ -1066,7 +1302,7 @@ def test_master_missing_target_outputs_configured_search_velocity() -> None:
             return []
 
     hook = module.MasterVisionHook()
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
 
     observation, best_blob = module.build_observation_from_image(
         hook, EmptyImage(), IMAGE_WIDTH, IMAGE_HEIGHT
@@ -1125,7 +1361,7 @@ def test_master_target_point_generates_p_search_velocity() -> None:
             return [FakeBlob()]
 
     hook = module.MasterVisionHook()
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
 
     observation, best_blob = module.build_observation_from_image(
         hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT
@@ -1191,7 +1427,7 @@ def test_master_search_y_velocity_decreases_when_target_gets_closer() -> None:
             return [self._blob]
 
     hook = module.MasterVisionHook()
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
 
     far_observation, _ = module.build_observation_from_image(
         hook, FakeImage(FarBlob()), IMAGE_WIDTH, IMAGE_HEIGHT
@@ -1238,7 +1474,7 @@ def test_master_search_velocity_deadzone_zeroes_each_axis() -> None:
             return [FakeBlob()]
 
     hook = module.MasterVisionHook()
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
 
     observation, best_blob = module.build_observation_from_image(
         hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT
@@ -1315,12 +1551,12 @@ def test_master_target_found_uses_bbox_center_and_bottom_error() -> None:
         stable_frames=1,
         next_reliable_seq=30,
     )
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
 
     observation = centered_master_observation(module, hook, 150)
     hook.accept_observation(observation)
 
-    assert hook.next_event_frame() == "r,30,7,6,150"
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 150)
 
 
 def test_master_search_control_does_not_require_marker_span_or_min_corners() -> None:
@@ -1351,7 +1587,7 @@ def test_master_search_control_does_not_require_marker_span_or_min_corners() -> 
             return [CenterOnlyBlob()]
 
     hook = module.MasterVisionHook()
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
 
     observation, best_blob = module.build_observation_from_image(
         hook, CenterOnlyImage(), IMAGE_WIDTH, IMAGE_HEIGHT
@@ -1364,8 +1600,8 @@ def test_master_search_control_does_not_require_marker_span_or_min_corners() -> 
     assert velocity == (0.0, 0.0)
 
 
-def test_master_search_frame_outputs_velocity_without_hook_context() -> None:
-    """! @brief 主车速度流不依赖 hook 上下文, 直接按当前目标点误差输出"""
+def test_master_search_frame_waits_for_hook_context_before_velocity() -> None:
+    """! @brief 主车视觉收到同步上下文后才输出速度"""
 
     module = load_master()
     target_x, target_y = master_target_point(module)
@@ -1413,14 +1649,8 @@ def test_master_search_frame_outputs_velocity_without_hook_context() -> None:
 
     module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
-    expected_vx = expected_axis_velocity(
-        err_x,
-        module.MASTER_SEARCH_KP_X,
-        module.MASTER_SEARCH_MIN_SPEED,
-        module.MASTER_SEARCH_MAX_VX,
-    )
-    assert uart.writes == [f"v,{module.compact_number(expected_vx)},0\r\n"]
-    assert img.crosses[-1] == (center_x, blob_top)
+    assert uart.writes == []
+    assert img.crosses == []
     assert hook.next_event_frame() is None
 
 
@@ -1487,6 +1717,7 @@ def test_master_search_frame_draws_blob_center_not_bottom() -> None:
 
     uart = FakeUART()
     hook = module.MasterVisionHook()
+    hook.handle_control_line(search_hook_control_line(module))
     img = FakeImage()
 
     module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
@@ -1505,7 +1736,7 @@ def test_master_hook_event_uses_configured_target_y_not_blob_center_y() -> None:
         stable_frames=1,
         next_reliable_seq=30,
     )
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
     target_x, target_y = master_target_point(module)
     blob_top = IMAGE_HEIGHT - target_y
 
@@ -1535,7 +1766,7 @@ def test_master_hook_event_uses_configured_target_y_not_blob_center_y() -> None:
     hook.accept_observation(observation)
 
     assert observation == (7, 0.0, 0.0, 4800.0)
-    assert hook.next_event_frame() == "r,30,7,6,4800"
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 4800)
 
 
 def test_master_candidate_selection_uses_configured_target_point() -> None:
@@ -1584,7 +1815,7 @@ def test_master_candidate_selection_uses_configured_target_point() -> None:
             return [HigherBottomBlob(), LowerBottomBlob()]
 
     hook = module.MasterVisionHook()
-    hook.handle_control_line("s,12,7,1,1,1")
+    hook.handle_control_line(search_hook_control_line(module))
 
     observation, best_blob = module.build_observation_from_image(
         hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT

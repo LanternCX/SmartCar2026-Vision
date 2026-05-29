@@ -90,6 +90,20 @@ def build_cross_direction_dual_axis_sample(module):
     )
 
 
+def assert_velocity_frame(module, frame_bytes, vx, vy):
+    """断言辅车速度短帧."""
+
+    frame = module.decode_frame(frame_bytes)
+    assert frame is not None
+    assert frame["mode"] == module.MODE_UDP
+    assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+    body = module.decode_velocity_body(frame["body"])
+    assert body["vx"] == pytest.approx(vx)
+    assert body["vy"] == pytest.approx(vy)
+    assert body["omega"] == pytest.approx(0.0)
+    assert body["has_omega"] is False
+
+
 def test_follow_target_y_stays_positive() -> None:
     """纵向目标尺度量保持正数语义."""
     module = load_main_module("vision_main_test_module_unit")
@@ -340,26 +354,24 @@ def test_draw_selected_marker_draws_corners_without_bounding_box() -> None:
 
 
 def test_format_vision_frame_outputs_short_velocity_packet_with_compact_numbers() -> None:
-    """视觉主线必须输出紧凑的 v 短包文本."""
+    """视觉主线必须输出紧凑的固定速度短帧."""
     module = load_main_module("vision_main_test_module_unit")
     frame = module.format_vision_frame(vx=1.2, vy=0.0)
-    assert frame == "v,1.2,0"
-    assert frame.split(",") == ["v", "1.2", "0"]
-    assert "=" not in frame
+    assert_velocity_frame(module, frame, 1.2, 0.0)
 
 
 def test_format_vision_frame_outputs_zero_short_velocity_packet() -> None:
-    """无目标或保持阶段时也必须输出零速度短包."""
+    """无目标或保持阶段时也必须输出零速度短帧."""
     module = load_main_module("vision_main_test_module_unit")
     frame = module.format_vision_frame(vx=0, vy=0)
-    assert frame == "v,0,0"
+    assert_velocity_frame(module, frame, 0.0, 0.0)
 
 
 def test_format_vision_frame_preserves_nonzero_vy_in_short_velocity_packet() -> None:
-    """纵向速度非零时也必须输出完整的 v 短包文本."""
+    """纵向速度非零时也必须输出完整的速度短帧."""
     module = load_main_module("vision_main_test_module_unit")
     frame = module.format_vision_frame(vx=0, vy=0.6)
-    assert frame == "v,0,0.6"
+    assert_velocity_frame(module, frame, 0.0, 0.6)
 
 
 def test_build_follow_command_align_x_outputs_only_lateral_velocity_delta() -> None:
@@ -565,9 +577,8 @@ def test_follow_command_values_flow_into_short_packet_without_value_change() -> 
 
 
 def test_write_line_appends_crlf_to_short_packet(monkeypatch) -> None:
-    """串口发送必须继续使用 CRLF 作为单行结束符."""
+    """串口发送必须直接写出固定长度短帧."""
     module = load_main_module("vision_main_test_module_unit")
-    monkeypatch.setattr(module, "WRITE_DELAY_S", 0)
 
     class FakeUART:
         def __init__(self):
@@ -581,4 +592,4 @@ def test_write_line_appends_crlf_to_short_packet(monkeypatch) -> None:
 
     module.write_line(uart, module.format_vision_frame(vx=0, vy=0))
 
-    assert uart.writes == ["v,0,0\r\n"]
+    assert uart.writes == [module.format_vision_frame(vx=0, vy=0)]
