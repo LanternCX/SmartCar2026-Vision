@@ -694,6 +694,279 @@ def test_master_missing_target_outputs_zero_observation() -> None:
     assert observation == (7, 0.0, 0.0, 0.0)
 
 
+class ReturnGarageYellowImage:
+    """! @brief 回库黄线算法测试图像"""
+
+    def __init__(self, top=80, bottom=100, width=IMAGE_WIDTH, height=IMAGE_HEIGHT):
+        self._top = int(top)
+        self._bottom = int(bottom)
+        self._width = int(width)
+        self._height = int(height)
+
+    def get_pixel(self, x, y):
+        if int(self._width / 2) - 5 <= int(x) <= int(self._width / 2) + 5:
+            if self._top <= int(y) <= self._bottom:
+                return (255, 255, 0)
+        return (0, 0, 0)
+
+    def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+        _ = thresholds
+        _ = pixels_threshold
+        _ = area_threshold
+        _ = merge
+        return []
+
+
+class ReturnGarageMarkerBlob:
+    """! @brief 回库色标测试色块"""
+
+    def __init__(self, left, top, width, height, area):
+        self._rect = (left, top, width, height)
+        self._area = area
+
+    def rect(self):
+        return self._rect
+
+    def cx(self):
+        return self._rect[0] + self._rect[2] / 2
+
+    def cy(self):
+        return self._rect[1] + self._rect[3] / 2
+
+    def area(self):
+        return self._area
+
+
+class ReturnGarageYellowBlobImage:
+    """! @brief 使用黄色阈值 blob 的回库黄线测试图像"""
+
+    def __init__(self, blob):
+        self._blob = blob
+        self.thresholds = []
+
+    def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+        self.thresholds.append((thresholds, pixels_threshold, area_threshold, merge))
+        return [self._blob]
+
+
+class ReturnGarageMarkerImage:
+    """! @brief 回库色标测试图像"""
+
+    def __init__(self, blob):
+        self._blob = blob
+        self.crosses = []
+
+    def height(self):
+        return IMAGE_HEIGHT
+
+    def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+        _ = thresholds
+        _ = pixels_threshold
+        _ = area_threshold
+        _ = merge
+        if self._blob is None:
+            return []
+        return [self._blob]
+
+    def draw_cross(self, x, y):
+        self.crosses.append((x, y))
+
+
+def test_master_return_line_y_uses_center_columns_bounds_average() -> None:
+    """! @brief 回库黄线 Y 使用矫正后的屏幕中线附近上下界均值"""
+
+    module = load_master()
+    img = ReturnGarageYellowImage(top=80, bottom=100)
+
+    line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert line_y == pytest.approx(150.0)
+
+
+def test_master_return_line_y_reuses_tuned_yellow_blob_threshold() -> None:
+    """! @brief 回库黄线 Y 复用已调黄色阈值提取黄线"""
+
+    module = load_master()
+    blob = ReturnGarageMarkerBlob(
+        int(IMAGE_WIDTH / 2) - 20,
+        80,
+        40,
+        20,
+        800,
+    )
+    img = ReturnGarageYellowBlobImage(blob)
+
+    line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert line_y == pytest.approx(150.0)
+    assert img.thresholds == [([module.FINISH_HOOK_YELLOW_THRESHOLD], 20, 20, True)]
+
+
+def test_master_return_line_velocity_uses_y_target_only() -> None:
+    """! @brief 回库黄线速度只输出纵向速度"""
+
+    module = load_master()
+    module.RETURN_GARAGE_LINE_TARGET_Y_PX = 90.0
+    module.RETURN_GARAGE_LINE_DEADZONE_Y_PX = 2.0
+    module.RETURN_GARAGE_LINE_KP_Y = -0.5
+    module.RETURN_GARAGE_LINE_MAX_VY = 10.0
+    module.RETURN_GARAGE_LINE_MIN_SPEED = 0.0
+
+    assert module.build_return_line_velocity_from_y(None) == (0.0, 0.0)
+    assert module.build_return_line_velocity_from_y(100.0) == pytest.approx((0.0, -5.0))
+
+
+def test_master_return_retreat_line_alignment_reports_reliable_event() -> None:
+    """! @brief 回库后退配置中黄线越过目标 Y 后回报对正事件"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
+    hook.handle_control_line(
+        master_sync_frame(
+            12,
+            7,
+            int(module.STATE_RETURN_GARAGE_RETREAT),
+            int(module.TARGET_EDGE_LINE),
+            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+        )
+    )
+    module.RETURN_GARAGE_LINE_TARGET_Y_PX = 90.0
+
+    observation = hook.build_return_line_observation(80.0)
+    hook.accept_observation(observation)
+
+    assert_master_event(
+        module,
+        hook.next_event_frame(),
+        30,
+        7,
+        module.EVENT_RETURN_LINE_ALIGNED,
+        80,
+    )
+
+
+def test_master_return_retreat_line_before_target_does_not_report_event() -> None:
+    """! @brief 回库后退配置中黄线未越过目标 Y 时不回报对正事件"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
+    hook.handle_control_line(
+        master_sync_frame(
+            12,
+            7,
+            int(module.STATE_RETURN_GARAGE_RETREAT),
+            int(module.TARGET_EDGE_LINE),
+            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+        )
+    )
+    module.RETURN_GARAGE_LINE_TARGET_Y_PX = 90.0
+
+    observation = hook.build_return_line_observation(100.0)
+    hook.accept_observation(observation)
+
+    assert hook.next_event_frame() is None
+
+
+def test_master_return_line_marker_found_reports_marker_event() -> None:
+    """! @brief 回库黄线平移配置中识别色标后回报色标事件"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
+    hook.handle_control_line(
+        master_sync_frame(
+            12,
+            7,
+            int(module.STATE_RETURN_GARAGE_LINE),
+            int(module.TARGET_EDGE_LINE),
+            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+        )
+    )
+
+    observation = hook.build_return_marker_found_observation(module.RETURN_GARAGE_MARKER_MIN_AREA)
+    hook.accept_observation(observation)
+
+    assert_master_event(
+        module,
+        hook.next_event_frame(),
+        30,
+        7,
+        module.EVENT_RETURN_MARKER_FOUND,
+        int(module.RETURN_GARAGE_MARKER_MIN_AREA),
+    )
+
+
+def test_master_return_marker_velocity_and_finish_event() -> None:
+    """! @brief 回库色标配置输出色标跟随速度并在目标窗口内完成"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
+    hook.handle_control_line(
+        master_sync_frame(
+            12,
+            8,
+            int(module.STATE_RETURN_GARAGE_MARKER),
+            int(module.TARGET_EDGE_LINE),
+            int(module.MASTER_RETURN_GARAGE_MARKER_HOOK_CONFIG_ID),
+        )
+    )
+    module.RETURN_GARAGE_MARKER_TARGET_X_PX = 160.0
+    module.RETURN_GARAGE_MARKER_TARGET_Y_PX = 220.0
+    module.RETURN_GARAGE_MARKER_DEADZONE_X_PX = 1.0
+    module.RETURN_GARAGE_MARKER_DEADZONE_Y_PX = 1.0
+    blob = ReturnGarageMarkerBlob(150, 20, 20, 20, module.RETURN_GARAGE_MARKER_MIN_AREA)
+    observation, best_blob = module.build_return_marker_observation_from_image(
+        hook,
+        ReturnGarageMarkerImage(blob),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    velocity = module.build_return_marker_velocity_from_observation(observation)
+    hook.accept_observation(observation)
+
+    assert best_blob is blob
+    assert velocity == pytest.approx((0.0, 0.0))
+    assert_master_event(
+        module,
+        hook.next_event_frame(),
+        30,
+        8,
+        module.EVENT_RETURN_GARAGE_FINISHED,
+        int(module.RETURN_GARAGE_MARKER_MIN_AREA),
+    )
+
+
+def test_master_return_marker_finish_uses_marker_window_not_object_window() -> None:
+    """! @brief 回库色标完成事件使用回库色标自己的目标窗口"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
+    hook.handle_control_line(
+        master_sync_frame(
+            12,
+            8,
+            int(module.STATE_RETURN_GARAGE_MARKER),
+            int(module.TARGET_EDGE_LINE),
+            int(module.MASTER_RETURN_GARAGE_MARKER_HOOK_CONFIG_ID),
+        )
+    )
+    module.RETURN_GARAGE_MARKER_TARGET_X_PX = 160.0
+    module.RETURN_GARAGE_MARKER_TARGET_Y_PX = 220.0
+    module.RETURN_GARAGE_MARKER_DEADZONE_X_PX = 1.0
+    module.RETURN_GARAGE_MARKER_DEADZONE_Y_PX = 1.0
+    blob = ReturnGarageMarkerBlob(155, 20, 20, 20, module.RETURN_GARAGE_MARKER_MIN_AREA)
+    observation, _ = module.build_return_marker_observation_from_image(
+        hook,
+        ReturnGarageMarkerImage(blob),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    hook.accept_observation(observation)
+
+    assert hook.next_event_frame() is None
+
+
 def test_master_blob_candidates_report_area_as_value() -> None:
     """! @brief 候选物体强度使用 blob 面积"""
 

@@ -50,7 +50,7 @@ MASTER_SEARCH_KP_X = 0.05
 # 主车搜索纵向速度 P 环增益。
 MASTER_SEARCH_KP_Y = -0.15
 # 主车搜索误差超出死区后的最小有效速度量。
-MASTER_SEARCH_MIN_SPEED = 2
+MASTER_SEARCH_MIN_SPEED = 2.0
 # 主车搜索横向误差死区, 单位为像素。
 MASTER_SEARCH_DEADZONE_X_PX = 15.0
 # 主车搜索纵向误差死区, 单位为像素。
@@ -100,6 +100,12 @@ STATE_SEARCH_OBJECT = 1
 STATE_ORBITING = 2
 # 车端协议中的主车搬运状态编号。
 STATE_TRANSPORT_OBJECT = 4
+# 车端协议中的主车回库后退状态编号。
+STATE_RETURN_GARAGE_RETREAT = 6
+# 车端协议中的主车回库黄线平移状态编号。
+STATE_RETURN_GARAGE_LINE = 7
+# 车端协议中的主车回库色标跟随状态编号。
+STATE_RETURN_GARAGE_MARKER = 8
 # 车端协议中的物体目标编号。
 TARGET_OBJECT = 1
 # 车端协议中的边线目标编号。
@@ -112,12 +118,22 @@ MASTER_TRANSPORT_HOOK_CONFIG_ID = 2
 MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID = 3
 # 车端下发的主车绕行视觉修正配置编号。
 MASTER_ORBIT_HOOK_CONFIG_ID = 4
+# 车端下发的主车回库黄线配置编号。
+MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID = 5
+# 车端下发的主车回库色标配置编号。
+MASTER_RETURN_GARAGE_MARKER_HOOK_CONFIG_ID = 6
 # 车端协议中的目标找到事件编号。
 EVENT_TARGET_FOUND = 6
 # 车端协议中的对正完成事件编号。
 EVENT_ALIGNED = 7
 # 车端协议中的收尾到达事件编号。
 EVENT_ARRIVED = 8
+# 车端协议中的回库黄线对正事件编号。
+EVENT_RETURN_LINE_ALIGNED = 10
+# 车端协议中的回库色标发现事件编号。
+EVENT_RETURN_MARKER_FOUND = 11
+# 车端协议中的回库完成事件编号。
+EVENT_RETURN_GARAGE_FINISHED = 12
 # 可靠包序号的环形范围大小。
 SEQ_RING_SIZE = 256
 # 判断环形序号新旧关系使用的半环长度。
@@ -127,6 +143,40 @@ SEQ_HALF_RING = 128
 TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
 # 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
 FINISH_HOOK_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
+# 回库黄线采样半宽, 单位像素。
+RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX = 5
+# 回库黄线目标 Y 坐标。
+RETURN_GARAGE_LINE_TARGET_Y_PX = 220.0
+# 回库黄线 Y 死区, 单位像素。
+RETURN_GARAGE_LINE_DEADZONE_Y_PX = 4.0
+# 回库黄线对正容差, 单位像素。
+RETURN_GARAGE_LINE_ALIGN_TOLERANCE_PX = 4.0
+# 回库黄线纵向速度 P 环增益。
+RETURN_GARAGE_LINE_KP_Y = -0.08
+# 回库黄线纵向速度限幅。
+RETURN_GARAGE_LINE_MAX_VY = 5.0
+# 回库黄线纵向最小有效速度。
+RETURN_GARAGE_LINE_MIN_SPEED = 0.0
+# 回库色标阈值，格式为 OpenART LAB 阈值。
+RETURN_GARAGE_MARKER_THRESHOLD = (50, 100, 50, 127, -128, 127)
+# 回库色标最小面积。
+RETURN_GARAGE_MARKER_MIN_AREA = 50.0
+# 回库色标目标 X 坐标。
+RETURN_GARAGE_MARKER_TARGET_X_PX = 160.0
+# 回库色标目标 Y 坐标。
+RETURN_GARAGE_MARKER_TARGET_Y_PX = 220.0
+# 回库色标横向死区, 单位像素。
+RETURN_GARAGE_MARKER_DEADZONE_X_PX = 8.0
+# 回库色标纵向死区, 单位像素。
+RETURN_GARAGE_MARKER_DEADZONE_Y_PX = 8.0
+# 回库色标横向速度 P 环增益。
+RETURN_GARAGE_MARKER_KP_X = 0.05
+# 回库色标纵向速度 P 环增益。
+RETURN_GARAGE_MARKER_KP_Y = -0.08
+# 回库色标速度限幅。
+RETURN_GARAGE_MARKER_MAX_SPEED = 5.0
+# 回库色标最小有效速度。
+RETURN_GARAGE_MARKER_MIN_SPEED = 0.0
 
 _I16_MIN = -32768
 _I16_MAX = 32767
@@ -548,6 +598,11 @@ def build_search_target_point(
     target_x = float(MASTER_SEARCH_TARGET_X_PX)
     if int(config_id) == int(MASTER_ORBIT_HOOK_CONFIG_ID):
         return float(MASTER_ORBIT_TARGET_X_PX), float(MASTER_ORBIT_TARGET_Y_PX)
+    if int(config_id) == int(MASTER_RETURN_GARAGE_MARKER_HOOK_CONFIG_ID):
+        return (
+            float(RETURN_GARAGE_MARKER_TARGET_X_PX),
+            float(RETURN_GARAGE_MARKER_TARGET_Y_PX),
+        )
     if int(config_id) in (
         int(MASTER_TRANSPORT_HOOK_CONFIG_ID),
         int(MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID),
@@ -649,6 +704,12 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     for corner_x, corner_y in get_marker_corners(blob):
         img.draw_cross(corner_x, corner_y)
     img.draw_cross(pixel_x, pixel_y)
+
+
+def normalize_return_line_y(image_y, image_height):
+    """! @brief 将画面 Y 转换到回库黄线判定使用的矫正坐标"""
+
+    return float(image_height) - float(image_y)
 
 
 def _clamp(value, limit):
@@ -788,6 +849,185 @@ def build_orbit_correction_velocity_from_observation(observation, image_height):
     )
 
 
+def _pixel_is_yellow(pixel):
+    """! @brief 判断测试或运行图像像素是否属于回库黄线"""
+
+    if pixel is None:
+        return False
+    try:
+        red = int(pixel[0])
+        green = int(pixel[1])
+        blue = int(pixel[2])
+    except Exception:
+        return False
+    return red >= 180 and green >= 160 and blue <= 120
+
+
+def _build_return_line_y_from_blobs(img, image_width, image_height):
+    """! @brief 使用已调黄色阈值提取回库黄线中心 Y"""
+
+    find_blobs = getattr(img, "find_blobs", None)
+    if find_blobs is None:
+        return None
+    blobs = find_blobs(
+        [FINISH_HOOK_YELLOW_THRESHOLD],
+        pixels_threshold=20,
+        area_threshold=20,
+        merge=True,
+    )
+    if not blobs:
+        return None
+    center_x = int(int(image_width) / 2)
+    half_width = int(RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX)
+    centers = []
+    for x in range(center_x - half_width, center_x + half_width + 1):
+        if x < 0 or x >= int(image_width):
+            continue
+        top = None
+        bottom = None
+        for blob in blobs:
+            left, blob_top, right, blob_bottom = blob_rect_to_bbox(blob.rect())
+            if int(left) <= int(x) <= int(right):
+                if top is None or int(blob_top) < int(top):
+                    top = int(blob_top)
+                if bottom is None or int(blob_bottom) > int(bottom):
+                    bottom = int(blob_bottom)
+        if top is not None and bottom is not None:
+            image_y = (float(top) + float(bottom)) / 2.0
+            centers.append(normalize_return_line_y(image_y, image_height))
+    if not centers:
+        return None
+    return sum(centers) / float(len(centers))
+
+
+def _build_return_line_y_from_pixels(img, image_width, image_height):
+    """! @brief 按屏幕中线左右采样列计算回库黄线中心 Y"""
+
+    get_pixel = getattr(img, "get_pixel", None)
+    if get_pixel is None:
+        return None
+    center_x = int(int(image_width) / 2)
+    half_width = int(RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX)
+    centers = []
+    for x in range(center_x - half_width, center_x + half_width + 1):
+        if x < 0 or x >= int(image_width):
+            continue
+        top = None
+        bottom = None
+        for y in range(int(image_height)):
+            if not _pixel_is_yellow(get_pixel(x, y)):
+                continue
+            if top is None:
+                top = y
+            bottom = y
+        if top is not None and bottom is not None:
+            image_y = (float(top) + float(bottom)) / 2.0
+            centers.append(normalize_return_line_y(image_y, image_height))
+    if not centers:
+        return None
+    return sum(centers) / float(len(centers))
+
+
+def build_return_line_y_from_image(img, image_width, image_height):
+    """! @brief 按屏幕中线左右采样列计算回库黄线中心 Y"""
+
+    line_y = _build_return_line_y_from_blobs(img, image_width, image_height)
+    if line_y is not None:
+        return line_y
+    return _build_return_line_y_from_pixels(img, image_width, image_height)
+
+
+def build_return_line_velocity_from_y(line_y):
+    """! @brief 根据回库黄线 Y 生成纵向保持速度"""
+
+    if line_y is None:
+        return 0.0, 0.0
+    err_y = float(line_y) - float(RETURN_GARAGE_LINE_TARGET_Y_PX)
+    return (
+        0.0,
+        _axis_p_velocity(
+            err_y,
+            RETURN_GARAGE_LINE_DEADZONE_Y_PX,
+            RETURN_GARAGE_LINE_KP_Y,
+            RETURN_GARAGE_LINE_MAX_VY,
+            RETURN_GARAGE_LINE_MIN_SPEED,
+        ),
+    )
+
+
+def is_return_line_aligned(line_y):
+    """! @brief 判断回库黄线 Y 是否进入目标容差"""
+
+    if line_y is None:
+        return False
+    return abs(float(line_y) - float(RETURN_GARAGE_LINE_TARGET_Y_PX)) <= float(
+        RETURN_GARAGE_LINE_ALIGN_TOLERANCE_PX
+    )
+
+
+def build_return_marker_candidates(img):
+    """! @brief 提取回库色标候选"""
+
+    blobs = img.find_blobs(
+        [RETURN_GARAGE_MARKER_THRESHOLD],
+        pixels_threshold=200,
+        area_threshold=200,
+        merge=True,
+    )
+    if not blobs:
+        return []
+    img_height = img.height()
+    candidates = []
+    for blob in blobs:
+        left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+        _, _, _, bottom = normalize_bbox_for_protocol(
+            left, top, right, bottom, img_height
+        )
+        candidates.append(("marker", blob.cx(), bottom, blob_area(blob), blob))
+    return candidates
+
+
+def build_return_marker_observation_from_image(hook, img, image_width, image_height):
+    """! @brief 从图像生成回库色标观测"""
+
+    candidates = build_return_marker_candidates(img)
+    if not candidates:
+        return hook.build_observation(0, 0, 0, 0, image_width, image_height), None
+    _, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
+        candidates,
+        RETURN_GARAGE_MARKER_TARGET_X_PX,
+        RETURN_GARAGE_MARKER_TARGET_Y_PX,
+    )
+    return (
+        hook.build_observation(1, pixel_x, bottom_y, area, image_width, image_height),
+        best_blob,
+    )
+
+
+def build_return_marker_velocity_from_observation(observation):
+    """! @brief 根据回库色标观测生成跟随速度"""
+
+    _, x, y, value = observation
+    if float(value) <= 0.0:
+        return 0.0, 0.0
+    return (
+        _axis_p_velocity(
+            x,
+            RETURN_GARAGE_MARKER_DEADZONE_X_PX,
+            RETURN_GARAGE_MARKER_KP_X,
+            RETURN_GARAGE_MARKER_MAX_SPEED,
+            RETURN_GARAGE_MARKER_MIN_SPEED,
+        ),
+        _axis_p_velocity(
+            y,
+            RETURN_GARAGE_MARKER_DEADZONE_Y_PX,
+            RETURN_GARAGE_MARKER_KP_Y,
+            RETURN_GARAGE_MARKER_MAX_SPEED,
+            RETURN_GARAGE_MARKER_MIN_SPEED,
+        ),
+    )
+
+
 def _build_orbit_y_velocity(err_y, image_height):
     """! @brief 根据图像高度归一化绕行纵向误差并生成速度"""
 
@@ -849,7 +1089,6 @@ class MasterVisionHook:
         self._pending_event_last_sent_ms = None
         self._event_context_id = None
         self._finish_contact_seen = False
-
     def has_context(self):
         """! @brief 判断是否已经建立视觉上下文
 
@@ -890,6 +1129,31 @@ class MasterVisionHook:
             int(self.context["state"]) == int(STATE_ORBITING)
             and int(self.context["target"]) == int(TARGET_OBJECT)
             and int(self.context["arg"]) == int(MASTER_ORBIT_HOOK_CONFIG_ID)
+        )
+
+    def is_return_line_context(self):
+        """! @brief 判断当前上下文是否为回库黄线 hook"""
+
+        if self.context is None:
+            return False
+        return (
+            int(self.context["target"]) == int(TARGET_EDGE_LINE)
+            and int(self.context["arg"]) == int(MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID)
+            and (
+                int(self.context["state"]) == int(STATE_RETURN_GARAGE_RETREAT)
+                or int(self.context["state"]) == int(STATE_RETURN_GARAGE_LINE)
+            )
+        )
+
+    def is_return_marker_context(self):
+        """! @brief 判断当前上下文是否为回库色标 hook"""
+
+        if self.context is None:
+            return False
+        return (
+            int(self.context["state"]) == int(STATE_RETURN_GARAGE_MARKER)
+            and int(self.context["target"]) == int(TARGET_EDGE_LINE)
+            and int(self.context["arg"]) == int(MASTER_RETURN_GARAGE_MARKER_HOOK_CONFIG_ID)
         )
 
     def handle_control_line(self, line):
@@ -984,6 +1248,29 @@ class MasterVisionHook:
             float(area),
         )
 
+    def build_return_line_observation(self, line_y):
+        """! @brief 根据回库黄线 Y 生成 hook 观测"""
+
+        context_id = 0
+        if self.context is not None:
+            context_id = int(self.context["context_id"])
+        if line_y is None:
+            return context_id, 0.0, 0.0, 0.0
+        return (
+            context_id,
+            0.0,
+            float(line_y) - float(RETURN_GARAGE_LINE_TARGET_Y_PX),
+            float(line_y),
+        )
+
+    def build_return_marker_found_observation(self, area):
+        """! @brief 根据回库色标面积生成发现事件观测"""
+
+        context_id = 0
+        if self.context is not None:
+            context_id = int(self.context["context_id"])
+        return context_id, 0.0, 0.0, float(area)
+
     def accept_observation(self, observation, hook_value=None):
         """! @brief 累计 hook 条件并按需创建可靠事件
 
@@ -1006,6 +1293,9 @@ class MasterVisionHook:
         if self.is_finish_hook_context():
             self._accept_finish_hook_observation(context_id, value, hook_value, event_type)
             return
+        if self.is_return_line_context():
+            self._accept_return_line_observation(context_id, x, y, value, event_type)
+            return
         if self._observation_matches_hook(x, y, value, hook_value):
             self._stable_count += 1
         else:
@@ -1015,6 +1305,33 @@ class MasterVisionHook:
             self._create_event(
                 context_id,
                 self._resolve_event_value(value, hook_value),
+                event_type,
+            )
+
+    def _accept_return_line_observation(self, context_id, x, y, value, event_type):
+        """! @brief 处理回库黄线配置下的对正与色标发现事件"""
+
+        if event_type == EVENT_RETURN_LINE_ALIGNED:
+            if (
+                float(value) > 0.0
+                and float(value) <= float(RETURN_GARAGE_LINE_TARGET_Y_PX)
+            ):
+                self._stable_count += 1
+            else:
+                self._stable_count = 0
+                return
+        elif event_type == EVENT_RETURN_MARKER_FOUND:
+            if float(value) >= float(RETURN_GARAGE_MARKER_MIN_AREA):
+                self._stable_count += 1
+            else:
+                self._stable_count = 0
+                return
+        else:
+            return
+        if self._stable_count >= self._required_stable_frames():
+            self._create_event(
+                context_id,
+                self._resolve_event_value(value, None),
                 event_type,
             )
 
@@ -1052,6 +1369,12 @@ class MasterVisionHook:
         @return 观测是否满足当前 hook 条件
         """
 
+        if self.is_return_marker_context():
+            return (
+                float(value) >= float(RETURN_GARAGE_MARKER_MIN_AREA)
+                and abs(float(x)) <= float(RETURN_GARAGE_MARKER_DEADZONE_X_PX)
+                and abs(float(y)) <= float(RETURN_GARAGE_MARKER_DEADZONE_Y_PX)
+            )
         return (
             float(value) >= self.min_area
             and abs(float(x)) <= self.tolerance_x
@@ -1070,6 +1393,8 @@ class MasterVisionHook:
 
         if self.is_finish_hook_context():
             return int(float(hook_value or 0.0))
+        if self.is_return_line_context():
+            return int(float(value))
         return int(float(value))
 
     def _resolve_event_type(self):
@@ -1107,6 +1432,24 @@ class MasterVisionHook:
             and arg == MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID
         ):
             return EVENT_ARRIVED
+        if (
+            state == STATE_RETURN_GARAGE_RETREAT
+            and target == TARGET_EDGE_LINE
+            and arg == MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID
+        ):
+            return EVENT_RETURN_LINE_ALIGNED
+        if (
+            state == STATE_RETURN_GARAGE_LINE
+            and target == TARGET_EDGE_LINE
+            and arg == MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID
+        ):
+            return EVENT_RETURN_MARKER_FOUND
+        if (
+            state == STATE_RETURN_GARAGE_MARKER
+            and target == TARGET_EDGE_LINE
+            and arg == MASTER_RETURN_GARAGE_MARKER_HOOK_CONFIG_ID
+        ):
+            return EVENT_RETURN_GARAGE_FINISHED
         return None
 
     def _allocate_reliable_seq(self):
@@ -1276,6 +1619,52 @@ def build_hook_event_value(hook, img, best_blob, image_width, image_height):
     )
 
 
+def _process_return_line_frame(uart, hook, img, image_width, image_height):
+    """! @brief 处理回库黄线配置的一帧输出"""
+
+    line_y = build_return_line_y_from_image(img, image_width, image_height)
+    velocity = build_return_line_velocity_from_y(line_y)
+    write_data_line(uart, format_search_velocity_frame(*velocity))
+    if int(hook.context["state"]) == int(STATE_RETURN_GARAGE_RETREAT):
+        hook.accept_observation(hook.build_return_line_observation(line_y))
+        return
+    candidates = build_return_marker_candidates(img)
+    marker_area = 0.0
+    if candidates:
+        _, _, _, marker_area, _ = choose_best_candidate(
+            candidates,
+            RETURN_GARAGE_MARKER_TARGET_X_PX,
+            RETURN_GARAGE_MARKER_TARGET_Y_PX,
+        )
+    hook.accept_observation(hook.build_return_marker_found_observation(marker_area))
+
+
+def _process_return_marker_frame(uart, hook, img, image_width, image_height):
+    """! @brief 处理回库色标配置的一帧输出"""
+
+    observation, best_blob = build_return_marker_observation_from_image(
+        hook,
+        img,
+        image_width,
+        image_height,
+    )
+    if best_blob is not None:
+        _, x, _, _ = observation
+        draw_selected_marker(
+            img=img,
+            blob=best_blob,
+            pixel_x=int(float(x) + RETURN_GARAGE_MARKER_TARGET_X_PX),
+            pixel_y=best_blob.cy(),
+        )
+    write_data_line(
+        uart,
+        format_search_velocity_frame(
+            *build_return_marker_velocity_from_observation(observation)
+        ),
+    )
+    hook.accept_observation(observation)
+
+
 def process_search_frame(uart, hook, img, image_width, image_height):
     """! @brief 处理单帧主车搜索速度流和 hook 事件
 
@@ -1290,8 +1679,15 @@ def process_search_frame(uart, hook, img, image_width, image_height):
         event_frame = hook.next_event_frame()
         if event_frame is not None:
             write_reliable_line(uart, event_frame)
-        return
+        if not hook.is_return_line_context():
+            return
     if not hook.has_context():
+        return
+    if hook.is_return_line_context():
+        _process_return_line_frame(uart, hook, img, image_width, image_height)
+        return
+    if hook.is_return_marker_context():
+        _process_return_marker_frame(uart, hook, img, image_width, image_height)
         return
 
     observation, best_blob = build_observation_from_image(
@@ -1325,6 +1721,18 @@ def process_search_frame(uart, hook, img, image_width, image_height):
     )
 
 
+def apply_lens_correction(img):
+    """! @brief 尝试执行画面畸变矫正, 失败时保持原图继续运行"""
+
+    lens_corr = getattr(img, "lens_corr", None)
+    if lens_corr is None:
+        return
+    try:
+        lens_corr(strength=2.8, zoom=1.0)
+    except Exception:
+        return
+
+
 def run():
     """! @brief 运行主车物体搜索视觉主循环"""
 
@@ -1336,10 +1744,7 @@ def run():
     while True:
         rx_buffer = process_uart_input(uart, rx_buffer, hook)
         img = sensor.snapshot()  # type: ignore
-        try:
-            img.lens_corr(strength=2.8, zoom=1.0)
-        except MemoryError:
-            pass
+        apply_lens_correction(img)
         process_search_frame(uart, hook, img, image_width, image_height)
 
 
