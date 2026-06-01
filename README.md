@@ -45,6 +45,7 @@
 - 在 hook 条件满足时输出主车视觉事件回报帧, body 字段为 `context_id/event/value`。
 - `arg=1` 表示主车物体搜索 hook 配置, 稳定满足条件后回报 `TARGET_FOUND=6`。
 - `arg=2` 表示主车搬运入口对正 hook 配置, 稳定满足条件后回报 `ALIGNED=7`。
+- `arg=5` 表示主车回库黄线 hook 配置, 后退段回报 `RETURN_LINE_ALIGNED=10`, 平移段在有效跟随区域连续 5 帧算不出黄线时回报 `RETURN_GARAGE_FINISHED=12`。
 - 主车搜索目标点按 hook 配置编号切换：`arg=1` 使用寻找阶段目标点，默认 `x=160, y=210`；`arg=2` 使用搬运入口对正目标点，默认 `x=160, y=240`。
 - hook 判定使用物体中心相对目标点的横向误差。
 - hook 判定使用物体底边相对目标点的纵向误差。

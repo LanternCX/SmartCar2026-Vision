@@ -279,30 +279,19 @@ def test_master_missing_target_velocity_frame_uses_configured_search_speed() -> 
 
 
 def test_master_return_garage_events_use_reliable_event_topic() -> None:
-    """! @brief 主车回库新增事件仍使用主车可靠事件短帧"""
+    """! @brief 主车回库完成事件仍使用主车可靠事件短帧"""
     module = load_role_main_module("master", "vision_master_return_contract_module")
 
-    marker_frame = decode_frame(
-        module.format_event_frame(31, 7, module.EVENT_RETURN_MARKER_FOUND, 80)
-    )
     finished_frame = decode_frame(
-        module.format_event_frame(32, 8, module.EVENT_RETURN_GARAGE_FINISHED, 80)
+        module.format_event_frame(32, 7, module.EVENT_RETURN_GARAGE_FINISHED, 0)
     )
 
     assert int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID) == 5
-    assert int(module.MASTER_RETURN_GARAGE_MARKER_HOOK_CONFIG_ID) == 6
-    assert len(module.RETURN_GARAGE_MARKER_THRESHOLD) == 6
-    assert marker_frame is not None
-    assert marker_frame["mode"] == MODE_TCP
-    assert marker_frame["topic"] == TOPIC_MASTER_VISION_EVENT_REPORT
-    assert decode_master_vision_event_report_body(marker_frame["body"]) == {
-        "context_id": 7,
-        "event": module.EVENT_RETURN_MARKER_FOUND,
-        "value": 80,
-    }
     assert finished_frame is not None
+    assert finished_frame["mode"] == MODE_TCP
+    assert finished_frame["topic"] == TOPIC_MASTER_VISION_EVENT_REPORT
     assert decode_master_vision_event_report_body(finished_frame["body"]) == {
-        "context_id": 8,
+        "context_id": 7,
         "event": module.EVENT_RETURN_GARAGE_FINISHED,
-        "value": 80,
+        "value": 0,
     }

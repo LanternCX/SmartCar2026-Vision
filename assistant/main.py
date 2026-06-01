@@ -67,8 +67,8 @@ EVENT_TARGET_FOUND = 6
 # ALIGNED 事件编号。
 EVENT_ALIGNED = 7
 
-# 跟随模式使用的绿色色标阈值。
-FOLLOW_TASKS = (("green", (37, 8, -57, -8, -36, 6)),)
+# 跟随模式使用的色标阈值。
+FOLLOW_TASKS = (("marker", (35, 100, 50, 127, -128, 127)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
 OBJECT_TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
 
