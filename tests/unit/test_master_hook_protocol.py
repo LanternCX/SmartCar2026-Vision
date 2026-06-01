@@ -708,7 +708,7 @@ def test_master_missing_target_outputs_zero_observation() -> None:
 
 
 class ReturnGarageYellowImage:
-    """! @brief 回库黄线算法测试图像"""
+    """! @brief 回库黄线逐像素算法测试图像"""
 
     def __init__(
         self,
@@ -725,18 +725,25 @@ class ReturnGarageYellowImage:
         self._height = int(height)
         self._left = int(left) if left is not None else int(self._width / 2) - 5
         self._right = int(right) if right is not None else int(self._width / 2) + 5
+        self.pixel_reads = []
 
     def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-        self.thresholds = (thresholds, pixels_threshold, area_threshold, merge)
-        return [
-            ReturnGarageYellowBlob(
-                self._left,
-                self._top,
-                self._right - self._left,
-                self._bottom - self._top,
-                (self._right - self._left) * (self._bottom - self._top),
-            )
-        ]
+        _ = thresholds
+        _ = pixels_threshold
+        _ = area_threshold
+        _ = merge
+        raise AssertionError("回库黄线算法不应调用 find_blobs")
+
+    def get_pixel(self, x, y):
+        self.pixel_reads.append((int(x), int(y)))
+        logical_x = self._width - 1 - int(x)
+        logical_y = self._height - 1 - int(y)
+        if (
+            self._left <= logical_x <= self._right
+            and self._top <= logical_y <= self._bottom
+        ):
+            return (50, 0, 50)
+        return (0, 0, 0)
 
 
 class ReturnGarageYellowBlob:
@@ -782,23 +789,16 @@ def test_master_return_line_y_uses_center_columns_bounds_average() -> None:
     assert line_y == pytest.approx(190.0)
 
 
-def test_master_return_line_y_reuses_tuned_yellow_blob_threshold() -> None:
-    """! @brief 回库黄线 Y 复用已调黄色阈值提取黄线"""
+def test_master_return_line_y_uses_pixel_threshold_without_blob_detection() -> None:
+    """! @brief 回库黄线 Y 在采样区逐像素比对黄色阈值"""
 
     module = load_master()
-    blob = ReturnGarageYellowBlob(
-        int(IMAGE_WIDTH / 2) - 20,
-        180,
-        40,
-        20,
-        800,
-    )
-    img = ReturnGarageYellowBlobImage(blob)
+    img = ReturnGarageYellowImage(top=180, bottom=200)
 
     line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
     assert line_y == pytest.approx(190.0)
-    assert img.thresholds == [([module.FINISH_HOOK_YELLOW_THRESHOLD], 20, 20, True)]
+    assert img.pixel_reads
 
 
 def test_master_return_line_velocity_uses_y_target_only() -> None:
@@ -909,8 +909,8 @@ def test_master_return_line_missing_yellow_does_not_report_finished_event() -> N
     assert hook.next_event_frame() is None
 
 
-def test_master_return_line_runtime_does_not_read_raw_pixels() -> None:
-    """! @brief 回库黄线正式路径不访问原始像素"""
+def test_master_return_line_runtime_does_not_use_blob_detection() -> None:
+    """! @brief 回库黄线正式路径不使用色块检测"""
 
     module = load_master()
     hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
@@ -927,10 +927,16 @@ def test_master_return_line_runtime_does_not_read_raw_pixels() -> None:
 
     class RawPixelForbiddenImage:
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            return []
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            raise AssertionError("回库黄线算法不应调用 find_blobs")
 
         def get_pixel(self, x, y):
-            raise AssertionError("正式路径不允许访问原始像素")
+            _ = x
+            _ = y
+            return (0, 0, 0)
 
     module.process_search_frame(
         uart,
@@ -943,8 +949,8 @@ def test_master_return_line_runtime_does_not_read_raw_pixels() -> None:
     assert len(uart.writes) == 1
 
 
-def test_master_return_line_error_uses_flipped_y_160_to_220_range() -> None:
-    """! @brief 回库黄线只在翻转后 Y=160..220 区间计算误差"""
+def test_master_return_line_ignores_y_before_160() -> None:
+    """! @brief 回库黄线忽略翻转后 Y 小于 160 的黄线"""
 
     module = load_master()
     line_y = module.build_return_line_y_from_image(
@@ -1053,6 +1059,29 @@ def test_master_return_line_inside_follow_roi_does_not_report_finished_event() -
     )
     uart = FakeUART()
     img = ReturnGarageYellowImage(top=180, bottom=200, left=150, right=165)
+
+    for _ in range(6):
+        module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert master_event_frames(module, uart.writes) == []
+
+
+def test_master_return_line_below_target_y_does_not_report_finished_event() -> None:
+    """! @brief 回库黄线平移配置保留 Y 大于 160 的黄线判定"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
+    hook.handle_control_line(
+        master_sync_frame(
+            12,
+            7,
+            int(module.STATE_RETURN_GARAGE_LINE),
+            int(module.TARGET_EDGE_LINE),
+            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+        )
+    )
+    uart = FakeUART()
+    img = ReturnGarageYellowImage(top=230, bottom=250, left=150, right=165)
 
     for _ in range(6):
         module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)

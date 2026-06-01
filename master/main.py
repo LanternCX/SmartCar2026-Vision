@@ -6,6 +6,11 @@
 import time
 
 try:
+    import image as omv_image
+except ImportError:
+    omv_image = None
+
+try:
     import sensor
 except ImportError:
     sensor = None
@@ -150,7 +155,7 @@ RETURN_GARAGE_LINE_KP_Y = -0.15
 # 回库黄线纵向速度限幅。
 RETURN_GARAGE_LINE_MAX_VY = 5.0
 # 回库黄线纵向最小有效速度。
-RETURN_GARAGE_LINE_MIN_SPEED = 2.0
+RETURN_GARAGE_LINE_MIN_SPEED = 0.0
 # 回库黄线平移阶段有效跟随区域上边界, 单位像素。
 RETURN_GARAGE_LINE_FOLLOW_ROI_TOP_Y_PX = 160
 
@@ -830,58 +835,76 @@ def _clamp_return_line_scan_range(image_height, min_y, max_y):
     return start_y, end_y
 
 
-def _build_return_line_y_from_blobs(img, image_width, image_height, min_y=None, max_y=None):
-    """! @brief 使用已调黄色阈值提取回库黄线中心 Y"""
+def _pixel_to_lab(pixel):
+    """! @brief 将单点像素转换为 LAB 阈值比较用三元组"""
 
-    find_blobs = getattr(img, "find_blobs", None)
-    if find_blobs is None:
+    if pixel is None:
+        return None
+    if omv_image is not None:
+        try:
+            return omv_image.rgb_to_lab(pixel)
+        except Exception:
+            pass
+    return pixel
+
+
+def _pixel_matches_threshold(pixel, threshold):
+    """! @brief 判断单点像素是否落在 LAB 阈值内"""
+
+    lab = _pixel_to_lab(pixel)
+    if lab is None:
+        return False
+    try:
+        if len(lab) < 3:
+            return False
+    except TypeError:
+        return False
+    return (
+        float(threshold[0]) <= float(lab[0]) <= float(threshold[1])
+        and float(threshold[2]) <= float(lab[1]) <= float(threshold[3])
+        and float(threshold[4]) <= float(lab[2]) <= float(threshold[5])
+    )
+
+
+def _build_return_line_y_from_pixels(img, image_width, image_height, min_y=None, max_y=None):
+    """! @brief 在中心采样区逐像素按黄色阈值计算回库黄线中心 Y"""
+
+    get_pixel = getattr(img, "get_pixel", None)
+    if get_pixel is None:
         return None
     scan_range = _clamp_return_line_scan_range(image_height, min_y, max_y)
     if scan_range is None:
         return None
     scan_top, scan_bottom = scan_range
-    blobs = find_blobs(
-        [FINISH_HOOK_YELLOW_THRESHOLD],
-        pixels_threshold=20,
-        area_threshold=20,
-        merge=True,
-    )
-    if not blobs:
-        return None
     center_x = int(int(image_width) / 2)
     half_width = int(RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX)
-    centers = []
+    top = None
+    bottom = None
+    max_x = int(image_width) - 1
+    max_y = int(image_height) - 1
     for x in range(center_x - half_width, center_x + half_width + 1):
         if x < 0 or x >= int(image_width):
             continue
-        top = None
-        bottom = None
-        for blob in blobs:
-            left, blob_top, right, blob_bottom = blob_rect_to_bbox(blob.rect())
-            if int(left) <= int(x) <= int(right):
-                clipped_top = int(blob_top)
-                clipped_bottom = int(blob_bottom)
-                if clipped_top < scan_top:
-                    clipped_top = scan_top
-                if clipped_bottom > scan_bottom:
-                    clipped_bottom = scan_bottom
-                if clipped_top > clipped_bottom:
-                    continue
-                if top is None or clipped_top < int(top):
-                    top = clipped_top
-                if bottom is None or clipped_bottom > int(bottom):
-                    bottom = clipped_bottom
-        if top is not None and bottom is not None:
-            centers.append((float(top) + float(bottom)) / 2.0)
-    if not centers:
+        for y in range(scan_top, scan_bottom + 1):
+            # 显示坐标按翻转后坐标标注, 但 get_pixel 读取表现为原始坐标。
+            if not _pixel_matches_threshold(
+                get_pixel(max_x - int(x), max_y - int(y)),
+                FINISH_HOOK_YELLOW_THRESHOLD,
+            ):
+                continue
+            if top is None or int(y) < int(top):
+                top = int(y)
+            if bottom is None or int(y) > int(bottom):
+                bottom = int(y)
+    if top is None or bottom is None:
         return None
-    return sum(centers) / float(len(centers))
+    return (float(top) + float(bottom)) / 2.0
 
 
 def build_return_line_y_from_image(img, image_width, image_height, min_y=None, max_y=None):
     """! @brief 按屏幕中线左右色块范围计算回库黄线中心 Y"""
 
-    return _build_return_line_y_from_blobs(
+    return _build_return_line_y_from_pixels(
         img, image_width, image_height, min_y, max_y
     )
 
@@ -1488,7 +1511,6 @@ def _process_return_line_frame(uart, hook, img, image_width, image_height):
     roi_bottom_y = None
     if int(hook.context["state"]) == int(STATE_RETURN_GARAGE_LINE):
         roi_top_y = int(RETURN_GARAGE_LINE_FOLLOW_ROI_TOP_Y_PX)
-        roi_bottom_y = int(RETURN_GARAGE_LINE_TARGET_Y_PX)
     line_y = build_return_line_y_from_image(
         img, image_width, image_height, roi_top_y, roi_bottom_y
     )

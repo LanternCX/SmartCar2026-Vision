@@ -6,6 +6,11 @@
 import time
 
 try:
+    import image as omv_image
+except ImportError:
+    omv_image = None
+
+try:
     import sensor
 except ImportError:
     sensor = None
@@ -160,7 +165,7 @@ RETURN_LINE_KP_Y = -0.15
 # 回库黄线纵向速度限幅。
 RETURN_LINE_MAX_VY = 5.0
 # 回库黄线纵向最小有效速度。
-RETURN_LINE_MIN_SPEED = 2.0
+RETURN_LINE_MIN_SPEED = 0.0
 # 回库黄线误差计算下边界，使用翻转后业务 Y 坐标。
 RETURN_LINE_FOLLOW_ROI_TOP_Y_PX = 160
 # 回库黄线连续丢线停车帧数。
@@ -730,46 +735,68 @@ def _clamp_return_line_scan_range(image_height, min_y, max_y):
     return start_y, end_y
 
 
-def _build_return_line_y_from_blobs(img, image_width, image_height, min_y=None, max_y=None):
+def _pixel_to_lab(pixel):
+    if pixel is None:
+        return None
+    if omv_image is not None:
+        try:
+            return omv_image.rgb_to_lab(pixel)
+        except Exception:
+            pass
+    return pixel
+
+
+def _pixel_matches_threshold(pixel, threshold):
+    lab = _pixel_to_lab(pixel)
+    if lab is None:
+        return False
+    try:
+        if len(lab) < 3:
+            return False
+    except TypeError:
+        return False
+    return (
+        float(threshold[0]) <= float(lab[0]) <= float(threshold[1])
+        and float(threshold[2]) <= float(lab[1]) <= float(threshold[3])
+        and float(threshold[4]) <= float(lab[2]) <= float(threshold[5])
+    )
+
+
+def _build_return_line_y_from_pixels(img, image_width, image_height, min_y=None, max_y=None):
+    get_pixel = getattr(img, "get_pixel", None)
+    if get_pixel is None:
+        return None
     center_x = int(float(image_width) / 2.0)
     half_width = int(RETURN_LINE_SAMPLE_HALF_WIDTH_PX)
-    left_limit = center_x - half_width
-    right_limit = center_x + half_width
     scan_range = _clamp_return_line_scan_range(image_height, min_y, max_y)
     if scan_range is None:
         return None
     scan_top, scan_bottom = scan_range
-    top_sum = 0.0
-    bottom_sum = 0.0
-    count = 0
-    blobs = img.find_blobs(
-        [RETURN_LINE_YELLOW_THRESHOLD],
-        pixels_threshold=20,
-        area_threshold=20,
-        merge=True,
-    )
-    for blob in blobs:
-        left, top, width, height = blob.rect()
-        right = left + width
-        if right < left_limit or left > right_limit:
+    top = None
+    bottom = None
+    max_x = int(image_width) - 1
+    max_y = int(image_height) - 1
+    for x in range(center_x - half_width, center_x + half_width + 1):
+        if x < 0 or x >= int(image_width):
             continue
-        bottom = top + height
-        if top < scan_top:
-            top = scan_top
-        if bottom > scan_bottom:
-            bottom = scan_bottom
-        if top > bottom:
-            continue
-        top_sum += float(top)
-        bottom_sum += float(bottom)
-        count += 1
-    if count <= 0:
+        for y in range(scan_top, scan_bottom + 1):
+            # 显示坐标按翻转后坐标标注, 但 get_pixel 读取表现为原始坐标。
+            if not _pixel_matches_threshold(
+                get_pixel(max_x - int(x), max_y - int(y)),
+                RETURN_LINE_YELLOW_THRESHOLD,
+            ):
+                continue
+            if top is None or int(y) < int(top):
+                top = int(y)
+            if bottom is None or int(y) > int(bottom):
+                bottom = int(y)
+    if top is None or bottom is None:
         return None
-    return (top_sum + bottom_sum) / (2.0 * float(count))
+    return (float(top) + float(bottom)) / 2.0
 
 
 def build_return_line_y_from_image(img, image_width, image_height, min_y=None, max_y=None):
-    return _build_return_line_y_from_blobs(img, image_width, image_height, min_y, max_y)
+    return _build_return_line_y_from_pixels(img, image_width, image_height, min_y, max_y)
 
 
 def build_return_line_velocity_from_y(line_y):
@@ -1441,7 +1468,6 @@ def process_return_line_frame(uart, state, img, image_width, image_height):
         image_width,
         image_height,
         RETURN_LINE_FOLLOW_ROI_TOP_Y_PX,
-        RETURN_LINE_TARGET_Y_PX,
     )
     vx, vy = build_return_line_velocity_from_y(line_y)
     write_line(uart, format_vision_frame(vx, vy))

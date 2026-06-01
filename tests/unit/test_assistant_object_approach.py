@@ -884,14 +884,25 @@ def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
 
     class YellowImage:
         def __init__(self):
-            self.thresholds = []
+            self.pixel_reads = []
 
         def height(self):
             return IMAGE_HEIGHT
 
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            self.thresholds.append((thresholds, pixels_threshold, area_threshold, merge))
-            return [YellowBlob()]
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            raise AssertionError("回库黄线算法不应调用 find_blobs")
+
+        def get_pixel(self, x, y):
+            self.pixel_reads.append((int(x), int(y)))
+            logical_x = IMAGE_WIDTH - 1 - int(x)
+            logical_y = IMAGE_HEIGHT - 1 - int(y)
+            if 150 <= logical_x <= 170 and 180 <= logical_y <= 200:
+                return (50, 0, 50)
+            return (0, 0, 0)
 
     img = YellowImage()
     module.process_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
@@ -901,11 +912,11 @@ def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
     body = module.decode_velocity_body(frame["body"])
     assert body["vx"] == pytest.approx(0.0)
     assert body["vy"] == pytest.approx(10.0)
-    assert img.thresholds == [([module.RETURN_LINE_YELLOW_THRESHOLD], 20, 20, True)]
+    assert img.pixel_reads
 
 
-def test_assistant_return_line_error_uses_flipped_y_160_to_220_range() -> None:
-    """辅车回库黄线只在翻转后 Y=160..220 区间计算误差."""
+def test_assistant_return_line_ignores_y_before_160() -> None:
+    """辅车回库黄线忽略翻转后 Y 小于 160 的黄线."""
 
     module = load_assistant()
     module.RETURN_LINE_TARGET_Y_PX = 220.0
@@ -932,7 +943,18 @@ def test_assistant_return_line_error_uses_flipped_y_160_to_220_range() -> None:
             return IMAGE_HEIGHT
 
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            return [OutsideBlob()]
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            raise AssertionError("回库黄线算法不应调用 find_blobs")
+
+        def get_pixel(self, x, y):
+            logical_x = IMAGE_WIDTH - 1 - int(x)
+            logical_y = IMAGE_HEIGHT - 1 - int(y)
+            if 150 <= logical_x <= 170 and 80 <= logical_y <= 100:
+                return (50, 0, 50)
+            return (0, 0, 0)
 
     module.process_frame(uart, state, OutsideImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
 
@@ -963,7 +985,16 @@ def test_assistant_return_line_missing_yellow_reports_finished_after_five_frames
             return IMAGE_HEIGHT
 
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            return []
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            raise AssertionError("回库黄线算法不应调用 find_blobs")
+
+        def get_pixel(self, x, y):
+            _ = x
+            _ = y
+            return (0, 0, 0)
 
     img = EmptyImage()
     for _ in range(5):
@@ -985,8 +1016,60 @@ def test_assistant_return_line_missing_yellow_reports_finished_after_five_frames
     }
 
 
-def test_assistant_return_line_runtime_does_not_read_raw_pixels() -> None:
-    """辅车回库黄线正式路径不访问原始像素."""
+def test_assistant_return_line_below_target_y_does_not_report_finished_event() -> None:
+    """辅车回库黄线模式保留 Y 大于 160 的黄线判定."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState()
+    state.handle_control_line(
+        assistant_sync_frame(
+            30,
+            module.STATE_RETURN_FOLLOW,
+            module.TARGET_NONE,
+            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+        )
+    )
+    uart = FakeUART()
+
+    class LowerYellowBlob:
+        def rect(self):
+            return (150, 230, 20, 20)
+
+        def area(self):
+            return 400
+
+    class LowerYellowImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            raise AssertionError("回库黄线算法不应调用 find_blobs")
+
+        def get_pixel(self, x, y):
+            logical_x = IMAGE_WIDTH - 1 - int(x)
+            logical_y = IMAGE_HEIGHT - 1 - int(y)
+            if 150 <= logical_x <= 170 and 230 <= logical_y <= 250:
+                return (50, 0, 50)
+            return (0, 0, 0)
+
+    for _ in range(6):
+        module.process_frame(uart, state, LowerYellowImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    event_frames = [
+        module.decode_frame(frame)
+        for frame in uart.writes
+        if module.decode_frame(frame) is not None
+        and module.decode_frame(frame)["topic"] == module.TOPIC_ASSISTANT_VISION_EVENT_REPORT
+    ]
+    assert event_frames == []
+
+
+def test_assistant_return_line_runtime_does_not_use_blob_detection() -> None:
+    """辅车回库黄线正式路径不使用色块检测."""
 
     module = load_assistant()
     state = module.AssistantVisionState()
@@ -1005,10 +1088,16 @@ def test_assistant_return_line_runtime_does_not_read_raw_pixels() -> None:
             return IMAGE_HEIGHT
 
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            return []
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            raise AssertionError("回库黄线算法不应调用 find_blobs")
 
         def get_pixel(self, x, y):
-            raise AssertionError("正式路径不允许访问原始像素")
+            _ = x
+            _ = y
+            return (0, 0, 0)
 
     module.process_frame(uart, state, RawPixelForbiddenImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
 
