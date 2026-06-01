@@ -151,13 +151,15 @@ RETURN_GARAGE_LINE_DEADZONE_Y_PX = 4.0
 # 回库黄线对正容差, 单位像素。
 RETURN_GARAGE_LINE_ALIGN_TOLERANCE_PX = 4.0
 # 回库黄线纵向速度 P 环增益。
-RETURN_GARAGE_LINE_KP_Y = -0.15
+RETURN_GARAGE_LINE_KP_Y = -0.05
 # 回库黄线纵向速度限幅。
 RETURN_GARAGE_LINE_MAX_VY = 5.0
 # 回库黄线纵向最小有效速度。
 RETURN_GARAGE_LINE_MIN_SPEED = 0.0
-# 回库黄线平移阶段有效跟随区域上边界, 单位像素。
-RETURN_GARAGE_LINE_FOLLOW_ROI_TOP_Y_PX = 160
+# 回库黄线参与中心计算的最大厚度, 单位像素。
+RETURN_GARAGE_LINE_MAX_THICKNESS_PX = 30
+# 回库黄线候选点左右水平联通黄线的最小合计长度, 单位像素。
+RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
 
 _I16_MIN = -32768
 _I16_MAX = 32767
@@ -819,22 +821,6 @@ def build_orbit_correction_velocity_from_observation(observation, image_height):
     )
 
 
-def _clamp_return_line_scan_range(image_height, min_y, max_y):
-    """! @brief 归一化翻转后图像的回库黄线扫描范围"""
-
-    start_y = 0 if min_y is None else int(min_y)
-    end_y = int(image_height) - 1 if max_y is None else int(max_y)
-    if start_y > end_y:
-        start_y, end_y = end_y, start_y
-    if start_y < 0:
-        start_y = 0
-    if end_y >= int(image_height):
-        end_y = int(image_height) - 1
-    if start_y > end_y:
-        return None
-    return start_y, end_y
-
-
 def _pixel_to_lab(pixel):
     """! @brief 将单点像素转换为 LAB 阈值比较用三元组"""
 
@@ -866,46 +852,98 @@ def _pixel_matches_threshold(pixel, threshold):
     )
 
 
-def _build_return_line_y_from_pixels(img, image_width, image_height, min_y=None, max_y=None):
+def _return_line_pixel_matches(img, x, y, image_width, image_height):
+    max_x = int(image_width) - 1
+    max_y = int(image_height) - 1
+    return _pixel_matches_threshold(
+        img.get_pixel(max_x - int(x), max_y - int(y)),
+        FINISH_HOOK_YELLOW_THRESHOLD,
+    )
+
+
+def _return_line_has_horizontal_connected_at(
+    img, x, y, image_width, image_height, required_connected
+):
+    if not _return_line_pixel_matches(img, x, y, image_width, image_height):
+        return False
+    connected = 0
+    left = int(x) - 1
+    while left >= 0 and _return_line_pixel_matches(img, left, y, image_width, image_height):
+        connected += 1
+        if connected >= int(required_connected):
+            return True
+        left -= 1
+    right = int(x) + 1
+    max_x = int(image_width) - 1
+    while right <= max_x and _return_line_pixel_matches(img, right, y, image_width, image_height):
+        connected += 1
+        if connected >= int(required_connected):
+            return True
+        right += 1
+    return False
+
+
+def _return_line_sample_columns(center_x, half_width):
+    yield int(center_x)
+    for offset in range(1, int(half_width) + 1):
+        yield int(center_x) - offset
+        yield int(center_x) + offset
+
+
+def _return_line_y_on_column(img, x, image_width, image_height):
+    top = None
+    bottom = None
+    for y in range(0, int(image_height)):
+        # 显示坐标按翻转后坐标标注, 但 get_pixel 读取表现为原始坐标。
+        if not _return_line_pixel_matches(img, x, y, image_width, image_height):
+            continue
+        if top is None:
+            top = int(y)
+        bottom = int(y)
+    if top is None or bottom is None:
+        return None
+    max_thickness = int(RETURN_GARAGE_LINE_MAX_THICKNESS_PX)
+    if max_thickness > 0 and int(bottom) - int(top) > max_thickness:
+        top = int(bottom) - max_thickness
+    return (float(top) + float(bottom)) / 2.0
+
+
+def _build_return_line_y_from_pixels(img, image_width, image_height, previous_line_y=None):
     """! @brief 在中心采样区逐像素按黄色阈值计算回库黄线中心 Y"""
 
     get_pixel = getattr(img, "get_pixel", None)
     if get_pixel is None:
         return None
-    scan_range = _clamp_return_line_scan_range(image_height, min_y, max_y)
-    if scan_range is None:
-        return None
-    scan_top, scan_bottom = scan_range
     center_x = int(int(image_width) / 2)
     half_width = int(RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX)
-    top = None
-    bottom = None
-    max_x = int(image_width) - 1
-    max_y = int(image_height) - 1
-    for x in range(center_x - half_width, center_x + half_width + 1):
+    saw_candidate = False
+    for x in _return_line_sample_columns(center_x, half_width):
         if x < 0 or x >= int(image_width):
             continue
-        for y in range(scan_top, scan_bottom + 1):
-            # 显示坐标按翻转后坐标标注, 但 get_pixel 读取表现为原始坐标。
-            if not _pixel_matches_threshold(
-                get_pixel(max_x - int(x), max_y - int(y)),
-                FINISH_HOOK_YELLOW_THRESHOLD,
-            ):
-                continue
-            if top is None or int(y) < int(top):
-                top = int(y)
-            if bottom is None or int(y) > int(bottom):
-                bottom = int(y)
-    if top is None or bottom is None:
-        return None
-    return (float(top) + float(bottom)) / 2.0
+        line_y = _return_line_y_on_column(img, x, image_width, image_height)
+        if line_y is None:
+            continue
+        saw_candidate = True
+        has_horizontal_connected = _return_line_has_horizontal_connected_at(
+            img,
+            x,
+            int(round(line_y)),
+            image_width,
+            image_height,
+            RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX,
+        )
+        if has_horizontal_connected:
+            return line_y
+    if saw_candidate:
+        return previous_line_y
+    return None
 
 
-def build_return_line_y_from_image(img, image_width, image_height, min_y=None, max_y=None):
+def build_return_line_y_from_image(img, image_width, image_height, previous_line_y=None):
     """! @brief 按屏幕中线左右色块范围计算回库黄线中心 Y"""
 
     return _build_return_line_y_from_pixels(
-        img, image_width, image_height, min_y, max_y
+        img, image_width, image_height, previous_line_y
     )
 
 
@@ -998,6 +1036,8 @@ class MasterVisionHook:
         self._pending_event_last_sent_ms = None
         self._event_context_id = None
         self._finish_contact_seen = False
+        self._last_return_line_y = None
+
     def has_context(self):
         """! @brief 判断是否已经建立视觉上下文
 
@@ -1054,6 +1094,17 @@ class MasterVisionHook:
             )
         )
 
+    def last_return_line_y(self):
+        """! @brief 返回上一帧有效回库黄线 Y"""
+
+        return self._last_return_line_y
+
+    def remember_return_line_y(self, line_y):
+        """! @brief 保存当前有效回库黄线 Y"""
+
+        if line_y is not None:
+            self._last_return_line_y = float(line_y)
+
     def handle_control_line(self, line):
         """! @brief 处理 RT1021 发来的同步或确认短帧
 
@@ -1088,6 +1139,7 @@ class MasterVisionHook:
             self._stable_count = 0
             self._event_context_id = None
             self._finish_contact_seen = False
+            self._last_return_line_y = None
         return format_ack_frame(packet["reliable_seq"])
 
     def _should_apply_context(self, context_id):
@@ -1215,11 +1267,8 @@ class MasterVisionHook:
                 self._stable_count = 0
                 return
         elif event_type == EVENT_RETURN_GARAGE_FINISHED:
-            if float(hook_value or 0.0) > 0.0:
-                self._stable_count += 1
-            else:
-                self._stable_count = 0
-                return
+            self._stable_count = 0
+            return
         else:
             return
         required_stable_frames = self._required_stable_frames()
@@ -1507,13 +1556,13 @@ def build_hook_event_value(hook, img, best_blob, image_width, image_height):
 def _process_return_line_frame(uart, hook, img, image_width, image_height):
     """! @brief 处理回库黄线配置的一帧输出"""
 
-    roi_top_y = None
-    roi_bottom_y = None
-    if int(hook.context["state"]) == int(STATE_RETURN_GARAGE_LINE):
-        roi_top_y = int(RETURN_GARAGE_LINE_FOLLOW_ROI_TOP_Y_PX)
     line_y = build_return_line_y_from_image(
-        img, image_width, image_height, roi_top_y, roi_bottom_y
+        img,
+        image_width,
+        image_height,
+        hook.last_return_line_y(),
     )
+    hook.remember_return_line_y(line_y)
     velocity = build_return_line_velocity_from_y(line_y)
     write_data_line(uart, format_search_velocity_frame(*velocity))
     if int(hook.context["state"]) == int(STATE_RETURN_GARAGE_RETREAT):
@@ -1523,6 +1572,94 @@ def _process_return_line_frame(uart, hook, img, image_width, image_height):
         hook.accept_observation(hook.build_return_line_observation(None), 1.0)
         return
     hook.accept_observation(hook.build_return_line_observation(line_y))
+
+
+def _draw_debug_line(img, x0, y0, x1, y1):
+    draw_line = getattr(img, "draw_line", None)
+    if draw_line is None:
+        return
+    try:
+        draw_line(int(x0), int(y0), int(x1), int(y1), color=(255, 255, 0))
+    except TypeError:
+        draw_line(int(x0), int(y0), int(x1), int(y1))
+
+
+def _draw_debug_cross(img, x, y):
+    draw_cross = getattr(img, "draw_cross", None)
+    if draw_cross is None:
+        return
+    try:
+        draw_cross(int(x), int(y), color=(255, 0, 0))
+    except TypeError:
+        draw_cross(int(x), int(y))
+
+
+def _draw_debug_text(img, x, y, text):
+    draw_string = getattr(img, "draw_string", None)
+    if draw_string is None:
+        return
+    try:
+        draw_string(int(x), int(y), str(text), color=(255, 255, 255))
+    except TypeError:
+        draw_string(int(x), int(y), str(text))
+
+
+def draw_master_return_line_debug(img, image_width, image_height, line_y, vx, vy):
+    """! @brief 绘制主车回库黄线判定调试信息"""
+
+    center_x = int(float(image_width) / 2.0)
+    half_width = int(RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX)
+    max_thickness = int(RETURN_GARAGE_LINE_MAX_THICKNESS_PX)
+    target_y = int(RETURN_GARAGE_LINE_TARGET_Y_PX)
+    bottom_y = int(image_height) - 1
+
+    def flip_x(x):
+        return int(image_width) - 1 - int(x)
+
+    def flip_y(y):
+        return int(image_height) - 1 - int(y)
+
+    def draw_line(x0, y0, x1, y1):
+        _draw_debug_line(img, flip_x(x0), flip_y(y0), flip_x(x1), flip_y(y1))
+
+    draw_line(center_x - half_width, 0, center_x - half_width, bottom_y)
+    draw_line(center_x + half_width, 0, center_x + half_width, bottom_y)
+    draw_line(0, target_y, int(image_width) - 1, target_y)
+    if line_y is not None:
+        draw_line(0, int(line_y), int(image_width) - 1, int(line_y))
+        _draw_debug_cross(img, flip_x(center_x), flip_y(int(line_y)))
+        line_text = "line_y=%.1f" % float(line_y)
+    else:
+        line_text = "line_y=none"
+
+    _draw_debug_text(img, 2, 2, "master return line debug")
+    _draw_debug_text(img, 2, 14, "max h=%d x=%d..%d" % (
+        max_thickness,
+        center_x - half_width,
+        center_x + half_width,
+    ))
+    _draw_debug_text(img, 2, 26, "%s found=%d" % (line_text, 1 if line_y is not None else 0))
+    _draw_debug_text(img, 2, 38, "vx=%.1f vy=%.1f" % (float(vx), float(vy)))
+
+
+def run_master_return_line_debug():
+    """! @brief 只显示主车回库黄线判定调试画面"""
+
+    image_width, image_height = init_sensor()
+    last_line_y = None
+    while True:
+        img = sensor.snapshot()  # type: ignore
+        apply_lens_correction(img)
+        line_y = build_return_line_y_from_image(
+            img,
+            image_width,
+            image_height,
+            last_line_y,
+        )
+        if line_y is not None:
+            last_line_y = line_y
+        vx, vy = build_return_line_velocity_from_y(line_y)
+        draw_master_return_line_debug(img, image_width, image_height, line_y, vx, vy)
 
 
 def process_search_frame(uart, hook, img, image_width, image_height):

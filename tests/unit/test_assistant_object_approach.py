@@ -900,7 +900,7 @@ def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
             self.pixel_reads.append((int(x), int(y)))
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
-            if 150 <= logical_x <= 170 and 180 <= logical_y <= 200:
+            if 130 <= logical_x <= 190 and 180 <= logical_y <= 200:
                 return (50, 0, 50)
             return (0, 0, 0)
 
@@ -915,11 +915,15 @@ def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
     assert img.pixel_reads
 
 
-def test_assistant_return_line_ignores_y_before_160() -> None:
-    """辅车回库黄线忽略翻转后 Y 小于 160 的黄线."""
+def test_assistant_return_line_does_not_filter_y_before_160() -> None:
+    """辅车回库黄线不再按固定 160px 顶边过滤黄线."""
 
     module = load_assistant()
     module.RETURN_LINE_TARGET_Y_PX = 220.0
+    module.RETURN_LINE_DEADZONE_Y_PX = 2.0
+    module.RETURN_LINE_KP_Y = -0.5
+    module.RETURN_LINE_MAX_VY = 10.0
+    module.RETURN_LINE_MIN_SPEED = 0.0
     state = module.AssistantVisionState()
     state.handle_control_line(
         assistant_sync_frame(
@@ -930,13 +934,6 @@ def test_assistant_return_line_ignores_y_before_160() -> None:
         )
     )
     uart = FakeUART()
-
-    class OutsideBlob:
-        def rect(self):
-            return (150, 80, 20, 20)
-
-        def area(self):
-            return 400
 
     class OutsideImage:
         def height(self):
@@ -952,7 +949,7 @@ def test_assistant_return_line_ignores_y_before_160() -> None:
         def get_pixel(self, x, y):
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
-            if 150 <= logical_x <= 170 and 80 <= logical_y <= 100:
+            if 130 <= logical_x <= 190 and 80 <= logical_y <= 100:
                 return (50, 0, 50)
             return (0, 0, 0)
 
@@ -962,11 +959,82 @@ def test_assistant_return_line_ignores_y_before_160() -> None:
     assert frame is not None
     body = module.decode_velocity_body(frame["body"])
     assert body["vx"] == pytest.approx(0.0)
-    assert body["vy"] == pytest.approx(0.0)
+    assert body["vy"] == pytest.approx(10.0)
 
 
-def test_assistant_return_line_missing_yellow_reports_finished_after_five_frames() -> None:
-    """辅车回库黄线模式连续丢线后回报完成事件."""
+def test_assistant_return_line_limits_wide_yellow_to_lower_30px() -> None:
+    """辅车回库黄线过厚时保留下界并限制参与计算的厚度."""
+
+    module = load_assistant()
+    module.RETURN_LINE_MAX_THICKNESS_PX = 30
+
+    class WideYellowImage:
+        def get_pixel(self, x, y):
+            logical_x = IMAGE_WIDTH - 1 - int(x)
+            logical_y = IMAGE_HEIGHT - 1 - int(y)
+            if 130 <= logical_x <= 190 and 80 <= logical_y <= 200:
+                return (50, 0, 50)
+            return (0, 0, 0)
+
+    line_y = module.build_return_line_y_from_image(
+        WideYellowImage(),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    assert line_y == pytest.approx(185.0)
+
+
+def test_assistant_return_line_keeps_previous_when_horizontal_connected_is_too_short() -> None:
+    """辅车回库黄线候选点左右水平联通不足时沿用上一帧有效值."""
+
+    module = load_assistant()
+    module.RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
+
+    class NarrowYellowImage:
+        def get_pixel(self, x, y):
+            logical_x = IMAGE_WIDTH - 1 - int(x)
+            logical_y = IMAGE_HEIGHT - 1 - int(y)
+            if 150 <= logical_x <= 170 and 180 <= logical_y <= 200:
+                return (50, 0, 50)
+            return (0, 0, 0)
+
+    line_y = module.build_return_line_y_from_image(
+        NarrowYellowImage(),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        188.0,
+    )
+
+    assert line_y == pytest.approx(188.0)
+
+
+def test_assistant_return_line_stops_horizontal_scan_after_required_connected_pixels() -> None:
+    """辅车回库黄线水平联通满足阈值后不继续扫完整行."""
+
+    module = load_assistant()
+    module.RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
+
+    class LongYellowImage:
+        def __init__(self):
+            self.pixel_reads = []
+
+        def get_pixel(self, x, y):
+            self.pixel_reads.append((int(x), int(y)))
+            logical_y = IMAGE_HEIGHT - 1 - int(y)
+            if 180 <= logical_y <= 200:
+                return (50, 0, 50)
+            return (0, 0, 0)
+
+    img = LongYellowImage()
+    line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert line_y == pytest.approx(190.0)
+    assert len(img.pixel_reads) < 400
+
+
+def test_assistant_return_line_missing_yellow_keeps_following_without_finished_event() -> None:
+    """辅车回库黄线模式连续丢线后不回报完成事件."""
 
     module = load_assistant()
     state = module.AssistantVisionState()
@@ -1008,12 +1076,7 @@ def test_assistant_return_line_missing_yellow_reports_finished_after_five_frames
         if module.decode_frame(frame) is not None
         and module.decode_frame(frame)["topic"] == module.TOPIC_ASSISTANT_VISION_EVENT_REPORT
     ]
-    assert len(event_frames) == 1
-    event = module.decode_assistant_vision_event_report_body(event_frames[0]["body"])
-    assert event == {
-        "event": module.EVENT_RETURN_GARAGE_FINISHED,
-        "value": 0,
-    }
+    assert event_frames == []
 
 
 def test_assistant_return_line_below_target_y_does_not_report_finished_event() -> None:
@@ -1052,7 +1115,7 @@ def test_assistant_return_line_below_target_y_does_not_report_finished_event() -
         def get_pixel(self, x, y):
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
-            if 150 <= logical_x <= 170 and 230 <= logical_y <= 250:
+            if 130 <= logical_x <= 190 and 230 <= logical_y <= 250:
                 return (50, 0, 50)
             return (0, 0, 0)
 
