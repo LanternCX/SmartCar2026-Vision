@@ -50,10 +50,16 @@ MODE_FOLLOW = "follow"
 MODE_APPROACH_OBJECT = "approach_object"
 # 接收到同步后切换的绕行修正模式。
 MODE_ORBIT_OBJECT = "orbit_object"
+# 接收到同步后切换的回库黄线巡线模式。
+MODE_RETURN_LINE = "return_line"
 # 辅车找物体状态编号。
 STATE_APPROACH_OBJECT = 2
 # 辅车绕行状态编号。
 STATE_ORBIT = 3
+# 辅车回库黄线状态编号。
+STATE_RETURN_FOLLOW = 6
+# 无目标编号。
+TARGET_NONE = 0
 # 物体目标编号。
 TARGET_OBJECT = 1
 # 找物体同步参数编号。
@@ -62,15 +68,21 @@ OBJECT_APPROACH_CONFIG_ID = 1
 ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID = 2
 # 绕行修正同步参数编号。
 ASSISTANT_ORBIT_OBJECT_CONFIG_ID = 3
+# 回库黄线同步参数编号。
+ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID = 5
 # TARGET_FOUND 事件编号。
 EVENT_TARGET_FOUND = 6
 # ALIGNED 事件编号。
 EVENT_ALIGNED = 7
+# RETURN_GARAGE_FINISHED 事件编号。
+EVENT_RETURN_GARAGE_FINISHED = 12
 
 # 跟随模式使用的色标阈值。
 FOLLOW_TASKS = (("marker", (35, 100, 50, 127, -128, 127)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
 OBJECT_TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
+# 回库黄线使用的黄色阈值，与主车回库黄线保持一致。
+RETURN_LINE_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
 
 # 跟随控制使用的横向死区，单位为像素。
 FOLLOW_X_DEADZONE_PX = 5.0
@@ -137,6 +149,22 @@ OBJECT_X_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_X_PX
 OBJECT_Y_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_Y_PX
 # 连续满足 hook 条件多少帧后确认找到目标。
 OBJECT_STABLE_FRAMES = 3
+# 回库黄线采样半宽，单位像素。
+RETURN_LINE_SAMPLE_HALF_WIDTH_PX = 5
+# 回库黄线目标 Y 坐标。
+RETURN_LINE_TARGET_Y_PX = 220.0
+# 回库黄线 Y 死区，单位像素。
+RETURN_LINE_DEADZONE_Y_PX = 4.0
+# 回库黄线纵向速度 P 环增益。
+RETURN_LINE_KP_Y = -0.15
+# 回库黄线纵向速度限幅。
+RETURN_LINE_MAX_VY = 5.0
+# 回库黄线纵向最小有效速度。
+RETURN_LINE_MIN_SPEED = 2.0
+# 回库黄线误差计算下边界，使用翻转后业务 Y 坐标。
+RETURN_LINE_FOLLOW_ROI_TOP_Y_PX = 160
+# 回库黄线连续丢线停车帧数。
+RETURN_LINE_MISSING_FINISH_FRAMES = 5
 
 _I16_MIN = -32768
 _I16_MAX = 32767
@@ -688,6 +716,75 @@ def build_object_blob_candidates(img):
     return candidates
 
 
+def _clamp_return_line_scan_range(image_height, min_y, max_y):
+    start_y = 0 if min_y is None else int(min_y)
+    end_y = int(image_height) - 1 if max_y is None else int(max_y)
+    if start_y > end_y:
+        start_y, end_y = end_y, start_y
+    if start_y < 0:
+        start_y = 0
+    if end_y >= int(image_height):
+        end_y = int(image_height) - 1
+    if start_y > end_y:
+        return None
+    return start_y, end_y
+
+
+def _build_return_line_y_from_blobs(img, image_width, image_height, min_y=None, max_y=None):
+    center_x = int(float(image_width) / 2.0)
+    half_width = int(RETURN_LINE_SAMPLE_HALF_WIDTH_PX)
+    left_limit = center_x - half_width
+    right_limit = center_x + half_width
+    scan_range = _clamp_return_line_scan_range(image_height, min_y, max_y)
+    if scan_range is None:
+        return None
+    scan_top, scan_bottom = scan_range
+    top_sum = 0.0
+    bottom_sum = 0.0
+    count = 0
+    blobs = img.find_blobs(
+        [RETURN_LINE_YELLOW_THRESHOLD],
+        pixels_threshold=20,
+        area_threshold=20,
+        merge=True,
+    )
+    for blob in blobs:
+        left, top, width, height = blob.rect()
+        right = left + width
+        if right < left_limit or left > right_limit:
+            continue
+        bottom = top + height
+        if top < scan_top:
+            top = scan_top
+        if bottom > scan_bottom:
+            bottom = scan_bottom
+        if top > bottom:
+            continue
+        top_sum += float(top)
+        bottom_sum += float(bottom)
+        count += 1
+    if count <= 0:
+        return None
+    return (top_sum + bottom_sum) / (2.0 * float(count))
+
+
+def build_return_line_y_from_image(img, image_width, image_height, min_y=None, max_y=None):
+    return _build_return_line_y_from_blobs(img, image_width, image_height, min_y, max_y)
+
+
+def build_return_line_velocity_from_y(line_y):
+    if line_y is None:
+        return 0.0, 0.0
+    err_y = float(line_y) - float(RETURN_LINE_TARGET_Y_PX)
+    if abs(err_y) <= float(RETURN_LINE_DEADZONE_Y_PX):
+        return 0.0, 0.0
+    return 0.0, _apply_min_speed(
+        err_y * float(RETURN_LINE_KP_Y),
+        RETURN_LINE_MIN_SPEED,
+        RETURN_LINE_MAX_VY,
+    )
+
+
 def choose_best_candidate(candidates, cx_screen, img_height):
     """! @brief 选择当前帧最值得上报的目标
 
@@ -975,6 +1072,12 @@ class AssistantVisionState:
             and int(sync["arg"]) == ASSISTANT_ORBIT_OBJECT_CONFIG_ID
         ):
             return MODE_ORBIT_OBJECT
+        if (
+            int(sync["state"]) == STATE_RETURN_FOLLOW
+            and int(sync["target"]) == TARGET_NONE
+            and int(sync["arg"]) == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
+        ):
+            return MODE_RETURN_LINE
         return MODE_FOLLOW
 
     def current_object_config_id(self):
@@ -1028,6 +1131,28 @@ class AssistantVisionState:
         if self._stable_count >= self.required_stable_frames:
             self._create_event(current_sync_seq, event_id, value)
 
+    def accept_return_line_observation(self, line_y):
+        """! @brief 累计回库黄线丢失条件并按需创建完成事件"""
+
+        if self.mode != MODE_RETURN_LINE or self.current_sync is None:
+            self._stable_count = 0
+            return
+        current_sync_seq = int(self.current_sync["reliable_seq"])
+        if self._pending_event is not None:
+            return
+        if self._completed_event_sync_seq == current_sync_seq:
+            return
+        event_id = self._current_event_id()
+        if event_id is None:
+            self._stable_count = 0
+            return
+        if line_y is not None:
+            self._stable_count = 0
+            return
+        self._stable_count += 1
+        if self._stable_count >= int(RETURN_LINE_MISSING_FINISH_FRAMES):
+            self._create_event(current_sync_seq, event_id, 0)
+
     def _observation_matches_target(self, x, y, value):
         """! @brief 判断当前观测是否满足找到目标条件
 
@@ -1066,6 +1191,12 @@ class AssistantVisionState:
             and arg == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
         ):
             return EVENT_ALIGNED
+        if (
+            state == STATE_RETURN_FOLLOW
+            and target == TARGET_NONE
+            and arg == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
+        ):
+            return EVENT_RETURN_GARAGE_FINISHED
         return None
 
     def _create_event(self, reliable_seq, event, value):
@@ -1302,6 +1433,21 @@ def process_object_frame(uart, state, img, image_width, image_height):
     state.accept_object_observation(observation)
 
 
+def process_return_line_frame(uart, state, img, image_width, image_height):
+    """! @brief 处理辅车回库黄线巡线速度与完成事件"""
+
+    line_y = build_return_line_y_from_image(
+        img,
+        image_width,
+        image_height,
+        RETURN_LINE_FOLLOW_ROI_TOP_Y_PX,
+        RETURN_LINE_TARGET_Y_PX,
+    )
+    vx, vy = build_return_line_velocity_from_y(line_y)
+    write_line(uart, format_vision_frame(vx, vy))
+    state.accept_return_line_observation(line_y)
+
+
 def process_frame(uart, state, img, image_width, image_height):
     """! @brief 按当前模式处理单帧视觉输出
 
@@ -1320,8 +1466,19 @@ def process_frame(uart, state, img, image_width, image_height):
 
     if state.mode == MODE_APPROACH_OBJECT or state.mode == MODE_ORBIT_OBJECT:
         process_object_frame(uart, state, img, image_width, image_height)
+    elif state.mode == MODE_RETURN_LINE:
+        process_return_line_frame(uart, state, img, image_width, image_height)
     else:
         process_follow_frame(uart, img, image_width, image_height)
+
+
+def apply_lens_correction(img):
+    """! @brief 执行当前帧镜头畸变校准"""
+
+    try:
+        img.lens_corr(strength=2.8, zoom=1.0)
+    except MemoryError:
+        pass
 
 
 def run():
@@ -1335,10 +1492,7 @@ def run():
     while True:
         rx_buffer = process_uart_input(uart, rx_buffer, state)
         img = sensor.snapshot()  # type: ignore
-        try:
-            img.lens_corr(strength=2.8, zoom=1.0)
-        except MemoryError:
-            pass
+        apply_lens_correction(img)
         process_frame(uart, state, img, image_width, image_height)
 
 

@@ -726,18 +726,17 @@ class ReturnGarageYellowImage:
         self._left = int(left) if left is not None else int(self._width / 2) - 5
         self._right = int(right) if right is not None else int(self._width / 2) + 5
 
-    def get_pixel(self, x, y):
-        if self._left <= int(x) <= self._right:
-            if self._top <= int(y) <= self._bottom:
-                return (255, 255, 0)
-        return (0, 0, 0)
-
     def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-        _ = thresholds
-        _ = pixels_threshold
-        _ = area_threshold
-        _ = merge
-        return []
+        self.thresholds = (thresholds, pixels_threshold, area_threshold, merge)
+        return [
+            ReturnGarageYellowBlob(
+                self._left,
+                self._top,
+                self._right - self._left,
+                self._bottom - self._top,
+                (self._right - self._left) * (self._bottom - self._top),
+            )
+        ]
 
 
 class ReturnGarageYellowBlob:
@@ -773,14 +772,14 @@ class ReturnGarageYellowBlobImage:
 
 
 def test_master_return_line_y_uses_center_columns_bounds_average() -> None:
-    """! @brief 回库黄线 Y 使用矫正后的屏幕中线附近上下界均值"""
+    """! @brief 回库黄线 Y 使用翻转后图像的屏幕中线附近上下界均值"""
 
     module = load_master()
-    img = ReturnGarageYellowImage(top=80, bottom=100)
+    img = ReturnGarageYellowImage(top=180, bottom=200)
 
     line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
-    assert line_y == pytest.approx(150.0)
+    assert line_y == pytest.approx(190.0)
 
 
 def test_master_return_line_y_reuses_tuned_yellow_blob_threshold() -> None:
@@ -789,7 +788,7 @@ def test_master_return_line_y_reuses_tuned_yellow_blob_threshold() -> None:
     module = load_master()
     blob = ReturnGarageYellowBlob(
         int(IMAGE_WIDTH / 2) - 20,
-        80,
+        180,
         40,
         20,
         800,
@@ -798,7 +797,7 @@ def test_master_return_line_y_reuses_tuned_yellow_blob_threshold() -> None:
 
     line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
-    assert line_y == pytest.approx(150.0)
+    assert line_y == pytest.approx(190.0)
     assert img.thresholds == [([module.FINISH_HOOK_YELLOW_THRESHOLD], 20, 20, True)]
 
 
@@ -910,6 +909,98 @@ def test_master_return_line_missing_yellow_does_not_report_finished_event() -> N
     assert hook.next_event_frame() is None
 
 
+def test_master_return_line_runtime_does_not_read_raw_pixels() -> None:
+    """! @brief 回库黄线正式路径不访问原始像素"""
+
+    module = load_master()
+    hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)
+    hook.handle_control_line(
+        master_sync_frame(
+            12,
+            7,
+            int(module.STATE_RETURN_GARAGE_LINE),
+            int(module.TARGET_EDGE_LINE),
+            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+        )
+    )
+    uart = FakeUART()
+
+    class RawPixelForbiddenImage:
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return []
+
+        def get_pixel(self, x, y):
+            raise AssertionError("正式路径不允许访问原始像素")
+
+    module.process_search_frame(
+        uart,
+        hook,
+        RawPixelForbiddenImage(),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    assert len(uart.writes) == 1
+
+
+def test_master_return_line_error_uses_flipped_y_160_to_220_range() -> None:
+    """! @brief 回库黄线只在翻转后 Y=160..220 区间计算误差"""
+
+    module = load_master()
+    line_y = module.build_return_line_y_from_image(
+        ReturnGarageYellowImage(top=80, bottom=100),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+        160,
+        220,
+    )
+
+    assert line_y is None
+
+
+def test_master_run_applies_lens_correction_before_processing() -> None:
+    """! @brief 主车入口先校准翻转后图像再进入业务处理"""
+
+    module = load_master()
+
+    class StopLoop(Exception):
+        pass
+
+    class SnapshotImage:
+        def __init__(self):
+            self.lens_corr_called = False
+
+        def lens_corr(self, strength, zoom):
+            _ = strength
+            _ = zoom
+            self.lens_corr_called = True
+
+    image = SnapshotImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    module.sensor = Sensor()
+    module.init_uart = lambda: FakeUART()
+    module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_uart_input = lambda uart, rx_buffer, hook: rx_buffer
+
+    def stop_after_frame(uart, hook, img, image_width, image_height):
+        _ = uart
+        _ = hook
+        _ = image_width
+        _ = image_height
+        assert img is image
+        assert image.lens_corr_called is True
+        raise StopLoop()
+
+    module.process_search_frame = stop_after_frame
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+
 def test_master_return_line_outside_follow_roi_reports_finished_after_five_frames() -> None:
     """! @brief 回库黄线平移配置中有效区域无黄线时连续五帧后回报完成事件"""
 
@@ -947,7 +1038,7 @@ def test_master_return_line_outside_follow_roi_reports_finished_after_five_frame
     )
 
 def test_master_return_line_inside_follow_roi_does_not_report_finished_event() -> None:
-    """! @brief 回库黄线平移配置中有效区域有黄线时不回报完成事件"""
+    """! @brief 回库黄线平移配置按翻转后坐标判断有效区域"""
 
     module = load_master()
     hook = module.MasterVisionHook(stable_frames=1, next_reliable_seq=30)

@@ -837,6 +837,227 @@ def test_assistant_process_uart_input_writes_local_ack() -> None:
     assert uart.writes == [module.format_ack_frame(12)]
 
 
+def test_assistant_return_line_sync_switches_to_yellow_line_mode() -> None:
+    """辅车回库同步切换到黄线巡线模式."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState()
+    uart = FakeUART(
+        assistant_sync_frame(
+            12,
+            module.STATE_RETURN_FOLLOW,
+            module.TARGET_NONE,
+            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+        )
+    )
+
+    assert module.process_uart_input(uart, b"", state) == b""
+    assert uart.writes == [module.format_ack_frame(12)]
+    assert state.mode == module.MODE_RETURN_LINE
+
+
+def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
+    """辅车回库黄线模式只根据本地黄线输出速度."""
+
+    module = load_assistant()
+    module.RETURN_LINE_DEADZONE_Y_PX = 2.0
+    module.RETURN_LINE_KP_Y = -0.5
+    module.RETURN_LINE_MAX_VY = 10.0
+    module.RETURN_LINE_MIN_SPEED = 0.0
+    state = module.AssistantVisionState()
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_RETURN_FOLLOW,
+            module.TARGET_NONE,
+            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+        )
+    )
+    uart = FakeUART()
+
+    class YellowBlob:
+        def rect(self):
+            return (150, 180, 20, 20)
+
+        def area(self):
+            return 400
+
+    class YellowImage:
+        def __init__(self):
+            self.thresholds = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            self.thresholds.append((thresholds, pixels_threshold, area_threshold, merge))
+            return [YellowBlob()]
+
+    img = YellowImage()
+    module.process_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    frame = module.decode_frame(uart.writes[0])
+    assert frame is not None
+    body = module.decode_velocity_body(frame["body"])
+    assert body["vx"] == pytest.approx(0.0)
+    assert body["vy"] == pytest.approx(10.0)
+    assert img.thresholds == [([module.RETURN_LINE_YELLOW_THRESHOLD], 20, 20, True)]
+
+
+def test_assistant_return_line_error_uses_flipped_y_160_to_220_range() -> None:
+    """辅车回库黄线只在翻转后 Y=160..220 区间计算误差."""
+
+    module = load_assistant()
+    module.RETURN_LINE_TARGET_Y_PX = 220.0
+    state = module.AssistantVisionState()
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_RETURN_FOLLOW,
+            module.TARGET_NONE,
+            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+        )
+    )
+    uart = FakeUART()
+
+    class OutsideBlob:
+        def rect(self):
+            return (150, 80, 20, 20)
+
+        def area(self):
+            return 400
+
+    class OutsideImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [OutsideBlob()]
+
+    module.process_frame(uart, state, OutsideImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    frame = module.decode_frame(uart.writes[0])
+    assert frame is not None
+    body = module.decode_velocity_body(frame["body"])
+    assert body["vx"] == pytest.approx(0.0)
+    assert body["vy"] == pytest.approx(0.0)
+
+
+def test_assistant_return_line_missing_yellow_reports_finished_after_five_frames() -> None:
+    """辅车回库黄线模式连续丢线后回报完成事件."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState()
+    state.handle_control_line(
+        assistant_sync_frame(
+            30,
+            module.STATE_RETURN_FOLLOW,
+            module.TARGET_NONE,
+            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+        )
+    )
+    uart = FakeUART()
+
+    class EmptyImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return []
+
+    img = EmptyImage()
+    for _ in range(5):
+        module.process_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    module.process_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    event_frames = [
+        module.decode_frame(frame)
+        for frame in uart.writes
+        if module.decode_frame(frame) is not None
+        and module.decode_frame(frame)["topic"] == module.TOPIC_ASSISTANT_VISION_EVENT_REPORT
+    ]
+    assert len(event_frames) == 1
+    event = module.decode_assistant_vision_event_report_body(event_frames[0]["body"])
+    assert event == {
+        "event": module.EVENT_RETURN_GARAGE_FINISHED,
+        "value": 0,
+    }
+
+
+def test_assistant_return_line_runtime_does_not_read_raw_pixels() -> None:
+    """辅车回库黄线正式路径不访问原始像素."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState()
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_RETURN_FOLLOW,
+            module.TARGET_NONE,
+            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+        )
+    )
+    uart = FakeUART()
+
+    class RawPixelForbiddenImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return []
+
+        def get_pixel(self, x, y):
+            raise AssertionError("正式路径不允许访问原始像素")
+
+    module.process_frame(uart, state, RawPixelForbiddenImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert len(uart.writes) == 1
+
+
+def test_assistant_run_applies_lens_correction_before_processing() -> None:
+    """辅车入口先校准翻转后图像再进入业务处理."""
+
+    module = load_assistant()
+
+    class StopLoop(Exception):
+        pass
+
+    class SnapshotImage:
+        def __init__(self):
+            self.lens_corr_called = False
+
+        def lens_corr(self, strength, zoom):
+            _ = strength
+            _ = zoom
+            self.lens_corr_called = True
+
+    image = SnapshotImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    module.sensor = Sensor()
+    module.init_uart = lambda: FakeUART()
+    module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_uart_input = lambda uart, rx_buffer, state: rx_buffer
+
+    def stop_after_frame(uart, state, img, image_width, image_height):
+        _ = uart
+        _ = state
+        _ = image_width
+        _ = image_height
+        assert img is image
+        assert image.lens_corr_called is True
+        raise StopLoop()
+
+    module.process_frame = stop_after_frame
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+
 def test_assistant_process_uart_input_skips_crc_invalid_false_sync_frame() -> None:
     """串口输入错位假同步包不能吞掉后续真实同步包."""
 

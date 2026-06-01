@@ -677,12 +677,6 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     img.draw_cross(pixel_x, pixel_y)
 
 
-def normalize_return_line_y(image_y, image_height):
-    """! @brief 将画面 Y 转换到回库黄线判定使用的矫正坐标"""
-
-    return float(image_height) - float(image_y)
-
-
 def _clamp(value, limit):
     """! @brief 按对称上下限约束数值
 
@@ -820,25 +814,13 @@ def build_orbit_correction_velocity_from_observation(observation, image_height):
     )
 
 
-def _pixel_is_yellow(pixel):
-    """! @brief 判断测试或运行图像像素是否属于回库黄线"""
-
-    if pixel is None:
-        return False
-    try:
-        red = int(pixel[0])
-        green = int(pixel[1])
-        blue = int(pixel[2])
-    except Exception:
-        return False
-    return red >= 180 and green >= 160 and blue <= 120
-
-
 def _clamp_return_line_scan_range(image_height, min_y, max_y):
-    """! @brief 归一化回库黄线扫描范围"""
+    """! @brief 归一化翻转后图像的回库黄线扫描范围"""
 
     start_y = 0 if min_y is None else int(min_y)
     end_y = int(image_height) - 1 if max_y is None else int(max_y)
+    if start_y > end_y:
+        start_y, end_y = end_y, start_y
     if start_y < 0:
         start_y = 0
     if end_y >= int(image_height):
@@ -890,54 +872,16 @@ def _build_return_line_y_from_blobs(img, image_width, image_height, min_y=None, 
                 if bottom is None or clipped_bottom > int(bottom):
                     bottom = clipped_bottom
         if top is not None and bottom is not None:
-            image_y = (float(top) + float(bottom)) / 2.0
-            centers.append(normalize_return_line_y(image_y, image_height))
-    if not centers:
-        return None
-    return sum(centers) / float(len(centers))
-
-
-def _build_return_line_y_from_pixels(img, image_width, image_height, min_y=None, max_y=None):
-    """! @brief 按屏幕中线左右采样列计算回库黄线中心 Y"""
-
-    get_pixel = getattr(img, "get_pixel", None)
-    if get_pixel is None:
-        return None
-    scan_range = _clamp_return_line_scan_range(image_height, min_y, max_y)
-    if scan_range is None:
-        return None
-    scan_top, scan_bottom = scan_range
-    center_x = int(int(image_width) / 2)
-    half_width = int(RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX)
-    centers = []
-    for x in range(center_x - half_width, center_x + half_width + 1):
-        if x < 0 or x >= int(image_width):
-            continue
-        top = None
-        bottom = None
-        for y in range(scan_top, scan_bottom + 1):
-            if not _pixel_is_yellow(get_pixel(x, y)):
-                continue
-            if top is None:
-                top = y
-            bottom = y
-        if top is not None and bottom is not None:
-            image_y = (float(top) + float(bottom)) / 2.0
-            centers.append(normalize_return_line_y(image_y, image_height))
+            centers.append((float(top) + float(bottom)) / 2.0)
     if not centers:
         return None
     return sum(centers) / float(len(centers))
 
 
 def build_return_line_y_from_image(img, image_width, image_height, min_y=None, max_y=None):
-    """! @brief 按屏幕中线左右采样列计算回库黄线中心 Y"""
+    """! @brief 按屏幕中线左右色块范围计算回库黄线中心 Y"""
 
-    line_y = _build_return_line_y_from_blobs(
-        img, image_width, image_height, min_y, max_y
-    )
-    if line_y is not None:
-        return line_y
-    return _build_return_line_y_from_pixels(
+    return _build_return_line_y_from_blobs(
         img, image_width, image_height, min_y, max_y
     )
 
@@ -1613,7 +1557,7 @@ def process_search_frame(uart, hook, img, image_width, image_height):
 
 
 def apply_lens_correction(img):
-    """! @brief 尝试执行画面畸变矫正, 失败时保持原图继续运行"""
+    """! @brief 执行当前帧镜头畸变校准"""
 
     lens_corr = getattr(img, "lens_corr", None)
     if lens_corr is None:
