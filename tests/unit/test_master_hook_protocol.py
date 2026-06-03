@@ -57,10 +57,41 @@ class ReadWriteUART:
         return len(data)
 
 
+class BlobBackedYoloTf:
+    """! @brief 测试中把既有假色块转换为 YOLO 检测框"""
+
+    def load(self, path):
+        _ = path
+        return "blob-backed-yolo"
+
+    def detect(self, net, img):
+        _ = net
+        find_blobs = getattr(img, "find_blobs", None)
+        if find_blobs is None:
+            return []
+        image_height = img.height() if getattr(img, "height", None) is not None else IMAGE_HEIGHT
+        detections = []
+        for blob in find_blobs([], pixels_threshold=200, area_threshold=200, merge=True):
+            left, top, width, height = blob.rect()
+            detections.append(
+                (
+                    float(left) / float(IMAGE_WIDTH),
+                    float(top) / float(image_height),
+                    float(left + width) / float(IMAGE_WIDTH),
+                    float(top + height) / float(image_height),
+                    1,
+                    0.95,
+                )
+            )
+        return detections
+
+
 def load_master():
     """! @brief 加载主车视觉入口模块"""
 
-    return load_role_main_module("master", "master_hook_protocol_test_module")
+    module = load_role_main_module("master", "master_hook_protocol_test_module")
+    module.tf = BlobBackedYoloTf()
+    return module
 
 
 IMAGE_WIDTH = 320
@@ -691,7 +722,7 @@ def test_master_search_target_can_be_reconfigured(monkeypatch) -> None:
         IMAGE_HEIGHT,
     )
 
-    assert best_blob is first_blob
+    assert best_blob.rect() == first_blob.rect()
     assert observation == (7, 0.0, 0.0, 400.0)
 
 
@@ -1021,11 +1052,12 @@ def test_master_run_applies_lens_correction_before_processing() -> None:
     module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
     module.process_uart_input = lambda uart, rx_buffer, hook: rx_buffer
 
-    def stop_after_frame(uart, hook, img, image_width, image_height):
+    def stop_after_frame(uart, hook, img, image_width, image_height, yolo_net=None):
         _ = uart
         _ = hook
         _ = image_width
         _ = image_height
+        _ = yolo_net
         assert img is image
         assert image.lens_corr_called is True
         raise StopLoop()
@@ -1114,8 +1146,8 @@ def test_master_return_line_below_target_y_does_not_report_finished_event() -> N
     assert master_event_frames(module, uart.writes) == []
 
 
-def test_master_blob_candidates_report_area_as_value() -> None:
-    """! @brief 候选物体强度使用 blob 面积"""
+def test_master_blob_candidates_report_box_area_as_value() -> None:
+    """! @brief 候选物体强度使用模型框面积"""
 
     module = load_master()
 
@@ -1141,41 +1173,54 @@ def test_master_blob_candidates_report_area_as_value() -> None:
 
     candidates = module.build_blob_candidates(FakeImage())
 
-    assert candidates[0][3] == 1234
+    assert candidates[0][3] == 1200
 
 
-def test_master_blob_candidates_use_runtime_task_config() -> None:
-    """! @brief 主车候选提取直接使用当前配置的任务表"""
+def test_master_object_candidates_use_yolo_detection() -> None:
+    """! @brief 主车物体候选由 YOLO 检测结果生成"""
 
     module = load_master()
-    module.TASKS = (("runtime_target", (9, 8, 7, 6, 5, 4)),)
 
-    class FakeBlob:
-        def rect(self):
-            return (10, 20, 30, 40)
+    class FakeTf:
+        def __init__(self):
+            self.loaded_paths = []
 
-        def cx(self):
-            return 25
+        def load(self, path):
+            self.loaded_paths.append(path)
+            return "fake-net"
 
-        def area(self):
-            return 1234
+        def detect(self, net, img):
+            assert net == "fake-net"
+            assert img == "detect-image"
+            return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
 
     class FakeImage:
         def __init__(self):
-            self.calls = []
+            self.copy_calls = []
+
+        def width(self):
+            return IMAGE_WIDTH
 
         def height(self):
-            return 100
+            return IMAGE_HEIGHT
+
+        def copy(self, scale, copy_to_fb):
+            self.copy_calls.append((scale, copy_to_fb))
+            return "detect-image"
 
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            self.calls.append((thresholds, pixels_threshold, area_threshold, merge))
-            return [FakeBlob()]
+            raise AssertionError("物体识别不应继续调用色块检测")
 
+    module.tf = FakeTf()
     img = FakeImage()
     candidates = module.build_blob_candidates(img)
 
-    assert img.calls == [([(9, 8, 7, 6, 5, 4)], 200, 200, True)]
-    assert candidates[0][0] == "runtime_target"
+    assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
+    assert img.copy_calls == [(module.YOLO_IMAGE_COPY_SCALE, 1)]
+    assert candidates[0][0] == "red"
+    assert candidates[0][1] == pytest.approx(160.0)
+    assert candidates[0][2] == pytest.approx(210.0)
+    assert candidates[0][3] == pytest.approx(3200.0)
 
 
 def test_master_hook_waits_for_stable_target_before_event() -> None:
@@ -1335,7 +1380,7 @@ def test_master_target_found_sends_stable_zero_before_event() -> None:
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
     assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
-    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 300)
+    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 400)
 
 
 def test_master_pending_event_suppresses_velocity_between_retries() -> None:
@@ -1361,8 +1406,8 @@ def test_master_pending_event_suppresses_velocity_between_retries() -> None:
 
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
-    assert_master_event(module, uart.writes[1], 30, 7, module.EVENT_TARGET_FOUND, 300)
-    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 300)
+    assert_master_event(module, uart.writes[1], 30, 7, module.EVENT_TARGET_FOUND, 400)
+    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 400)
 
 
 def test_master_transport_finish_hook_does_not_arrive_on_yellow_contact_only() -> None:
@@ -1791,7 +1836,7 @@ def test_master_target_point_generates_p_search_velocity() -> None:
     )
 
     assert best_blob is not None
-    assert observation == pytest.approx((7.0, err_x, err_y, 300.0))
+    assert observation == pytest.approx((7.0, err_x, err_y, 800.0))
     assert velocity == pytest.approx(
         (
             expected_axis_velocity(
@@ -2185,8 +2230,8 @@ def test_master_hook_event_uses_configured_target_y_not_blob_center_y() -> None:
     )
     hook.accept_observation(observation)
 
-    assert observation == (7, 0.0, 0.0, 4800.0)
-    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 4800)
+    assert observation == (7, 0.0, 0.0, 160.0)
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 160)
 
 
 def test_master_candidate_selection_uses_configured_target_point() -> None:
@@ -2241,5 +2286,5 @@ def test_master_candidate_selection_uses_configured_target_point() -> None:
         hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT
     )
 
-    assert isinstance(best_blob, HigherBottomBlob)
-    assert observation == (7, 0.0, 0.0, 1000.0)
+    assert best_blob.rect() == HigherBottomBlob().rect()
+    assert observation == (7, 0.0, 0.0, 1600.0)

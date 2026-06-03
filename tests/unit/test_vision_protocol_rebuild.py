@@ -251,70 +251,78 @@ def test_follow_color_tasks_use_runtime_config() -> None:
     assert candidates[0][0] == "runtime_follow"
 
 
-def test_object_color_tasks_use_runtime_config() -> None:
-    """找物体候选提取直接使用当前配置的任务表."""
+def test_object_candidates_use_yolo_detection() -> None:
+    """找物体候选提取使用 YOLO 检测结果."""
     module = load_main_module("vision_main_test_module_unit")
-    module.OBJECT_TASKS = (("runtime_object", (6, 5, 4, 3, 2, 1)),)
 
-    class FakeBlob:
-        def rect(self):
-            return (10, 20, 30, 40)
+    class FakeTf:
+        def __init__(self):
+            self.loaded_paths = []
 
-        def cx(self):
-            return 25
+        def load(self, path):
+            self.loaded_paths.append(path)
+            return "fake-net"
 
-        def cy(self):
-            return 40
-
-        def area(self):
-            return 1234
+        def detect(self, net, img):
+            assert net == "fake-net"
+            assert img == "detect-image"
+            return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
 
     class FakeImage:
         def __init__(self):
-            self.calls = []
+            self.copy_calls = []
+
+        def width(self):
+            return 320
 
         def height(self):
-            return 100
+            return 240
+
+        def copy(self, scale, copy_to_fb):
+            self.copy_calls.append((scale, copy_to_fb))
+            return "detect-image"
 
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            self.calls.append((thresholds, pixels_threshold, area_threshold, merge))
-            return [FakeBlob()]
+            raise AssertionError("找物体候选不应继续调用色块检测")
 
+    module.tf = FakeTf()
     img = FakeImage()
     candidates = module.build_object_blob_candidates(img)
 
-    assert img.calls == [([(6, 5, 4, 3, 2, 1)], 200, 200, True)]
-    assert candidates[0][0] == "runtime_object"
+    assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
+    assert img.copy_calls == [(module.YOLO_IMAGE_COPY_SCALE, 1)]
+    assert candidates[0][0] == "red"
+    assert candidates[0][1] == pytest.approx(160.0)
+    assert candidates[0][3] == pytest.approx(210.0)
 
 
-def test_build_object_blob_candidates_reports_area_as_value() -> None:
-    """找物体候选目标必须携带面积值用于稳定判定."""
+def test_build_object_blob_candidates_reports_box_area_as_value() -> None:
+    """找物体候选目标携带模型框面积用于稳定判定."""
     module = load_main_module("vision_main_test_module_unit")
 
-    class FakeBlob:
-        def rect(self):
-            return (10, 20, 30, 40)
+    class FakeTf:
+        def load(self, path):
+            _ = path
+            return "fake-net"
 
-        def cx(self):
-            return 25
-
-        def cy(self):
-            return 40
-
-        def area(self):
-            return 1234
+        def detect(self, net, img):
+            _ = net
+            _ = img
+            return [(0.1, 0.2, 0.4, 0.6, 2, 0.95)]
 
     class FakeImage:
+        def width(self):
+            return 320
+
         def height(self):
             return 100
 
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            return [FakeBlob()]
-
+    module.tf = FakeTf()
     candidates = module.build_object_blob_candidates(FakeImage())
 
-    assert candidates[0][3] == 80
-    assert candidates[0][4] == 1234
+    assert candidates[0][0] == "blue"
+    assert candidates[0][3] == pytest.approx(80.0)
+    assert candidates[0][4] == pytest.approx(3840.0)
 
 
 def test_draw_selected_marker_draws_corners_without_bounding_box() -> None:

@@ -35,10 +35,41 @@ class BadReadUART:
         return b"\xff"
 
 
+class BlobBackedYoloTf:
+    """测试中把既有假色块转换为 YOLO 检测框."""
+
+    def load(self, path):
+        _ = path
+        return "blob-backed-yolo"
+
+    def detect(self, net, img):
+        _ = net
+        find_blobs = getattr(img, "find_blobs", None)
+        if find_blobs is None:
+            return []
+        image_height = img.height() if getattr(img, "height", None) is not None else IMAGE_HEIGHT
+        detections = []
+        for blob in find_blobs([], pixels_threshold=200, area_threshold=200, merge=True):
+            left, top, width, height = blob.rect()
+            detections.append(
+                (
+                    float(left) / float(IMAGE_WIDTH),
+                    float(top) / float(image_height),
+                    float(left + width) / float(IMAGE_WIDTH),
+                    float(top + height) / float(image_height),
+                    1,
+                    0.95,
+                )
+            )
+        return detections
+
+
 def load_assistant():
     """加载辅车视觉入口模块."""
 
-    return load_main_module("assistant_object_approach_test_module")
+    module = load_main_module("assistant_object_approach_test_module")
+    module.tf = BlobBackedYoloTf()
+    return module
 
 
 IMAGE_WIDTH = 320
@@ -674,7 +705,7 @@ def test_assistant_target_found_sends_stable_zero_before_event() -> None:
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
     assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
-    assert_assistant_event(module, uart.writes[2], 12, module.EVENT_TARGET_FOUND, 300)
+    assert_assistant_event(module, uart.writes[2], 12, module.EVENT_TARGET_FOUND, 400)
 
 
 def test_assistant_pending_event_suppresses_velocity_between_retries() -> None:
@@ -704,8 +735,8 @@ def test_assistant_pending_event_suppresses_velocity_between_retries() -> None:
 
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
-    assert_assistant_event(module, uart.writes[1], 12, module.EVENT_TARGET_FOUND, 300)
-    assert_assistant_event(module, uart.writes[2], 12, module.EVENT_TARGET_FOUND, 300)
+    assert_assistant_event(module, uart.writes[1], 12, module.EVENT_TARGET_FOUND, 400)
+    assert_assistant_event(module, uart.writes[2], 12, module.EVENT_TARGET_FOUND, 400)
 
 
 def test_assistant_hook_repeats_event_until_matching_ack() -> None:
@@ -822,6 +853,53 @@ def test_assistant_transport_mode_keeps_object_velocity_output() -> None:
     assert frame is not None
     assert frame["mode"] == module.MODE_UDP
     assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+
+
+def test_assistant_object_candidates_use_yolo_detection() -> None:
+    """辅车物体候选由 YOLO 检测结果生成."""
+
+    module = load_assistant()
+
+    class FakeTf:
+        def __init__(self):
+            self.loaded_paths = []
+
+        def load(self, path):
+            self.loaded_paths.append(path)
+            return "fake-net"
+
+        def detect(self, net, img):
+            assert net == "fake-net"
+            assert img == "detect-image"
+            return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
+
+    class FakeImage:
+        def __init__(self):
+            self.copy_calls = []
+
+        def width(self):
+            return IMAGE_WIDTH
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def copy(self, scale, copy_to_fb):
+            self.copy_calls.append((scale, copy_to_fb))
+            return "detect-image"
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            raise AssertionError("物体识别不应继续调用色块检测")
+
+    module.tf = FakeTf()
+    img = FakeImage()
+    candidates = module.build_object_blob_candidates(img)
+
+    assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
+    assert img.copy_calls == [(module.YOLO_IMAGE_COPY_SCALE, 1)]
+    assert candidates[0][0] == "red"
+    assert candidates[0][1] == pytest.approx(160.0)
+    assert candidates[0][3] == pytest.approx(210.0)
+    assert candidates[0][4] == pytest.approx(3200.0)
 
 
 def test_assistant_process_uart_input_writes_local_ack() -> None:
@@ -1195,11 +1273,12 @@ def test_assistant_run_applies_lens_correction_before_processing() -> None:
     module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
     module.process_uart_input = lambda uart, rx_buffer, state: rx_buffer
 
-    def stop_after_frame(uart, state, img, image_width, image_height):
+    def stop_after_frame(uart, state, img, image_width, image_height, yolo_net=None):
         _ = uart
         _ = state
         _ = image_width
         _ = image_height
+        _ = yolo_net
         assert img is image
         assert image.lens_corr_called is True
         raise StopLoop()

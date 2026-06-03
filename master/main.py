@@ -16,6 +16,11 @@ except ImportError:
     sensor = None
 
 try:
+    import tf
+except ImportError:
+    tf = None
+
+try:
     from machine import UART
 except ImportError:
     UART = None
@@ -38,13 +43,21 @@ FRAME_BODY_SIZE = 8
 FRAME_HEAD = 0xA5
 # 固定帧总长度。
 FRAME_SIZE = 13
+# YOLO 模型文件路径, 对应部署到 OpenART SD 卡根目录的模型文件。
+YOLO_MODEL_PATH = "/sd/yolo.tflite"
+# YOLO 检测前对图像做缩放复制, 与模型验证脚本保持一致。
+YOLO_IMAGE_COPY_SCALE = 0.75
+# 物体识别最低置信度。
+YOLO_MIN_SCORE = 0.90
+# YOLO 标签编号映射。
+YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
 # 本地视觉速度 topic。
 TOPIC_LOCAL_VISION_VELOCITY = 0x01
 # 主车视觉同步 topic。
 TOPIC_MASTER_VISION_HOOK_SYNC = 0x10
 # 主车视觉事件回报 topic。
 TOPIC_MASTER_VISION_EVENT_REPORT = 0x12
-# 红色候选目标的最小面积，小于该值不会触发找到事件。
+# 模型候选目标的最小面积，小于该值不会触发找到事件。
 OBJECT_MIN_AREA = 50.0
 # 主车搜索目标丢失时输出的配置横向速度。
 MASTER_MISSING_SEARCH_VX = 0.0
@@ -138,8 +151,6 @@ SEQ_RING_SIZE = 256
 # 判断环形序号新旧关系使用的半环长度。
 SEQ_HALF_RING = 128
 
-# 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
-TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
 # 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
 FINISH_HOOK_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
 # 回库黄线采样半宽, 单位像素。
@@ -531,28 +542,126 @@ def blob_area(blob):
     return float((right - left) * (bottom - top))
 
 
-def build_blob_candidates(img):
-    """! @brief 提取物体候选目标, 面积作为目标强度
+class YoloDetectionBlob:
+    """! @brief 让模型检测框复用现有候选与收尾判定接口"""
+
+    def __init__(self, left, top, right, bottom, label, score):
+        self._left = float(left)
+        self._top = float(top)
+        self._right = float(right)
+        self._bottom = float(bottom)
+        self.label = int(label)
+        self.score = float(score)
+
+    def rect(self):
+        left = int(round(self._left))
+        top = int(round(self._top))
+        right = int(round(self._right))
+        bottom = int(round(self._bottom))
+        return left, top, right - left, bottom - top
+
+    def cx(self):
+        return (self._left + self._right) / 2.0
+
+    def cy(self):
+        return (self._top + self._bottom) / 2.0
+
+    def area(self):
+        return max(0.0, self._right - self._left) * max(0.0, self._bottom - self._top)
+
+    def min_corners(self):
+        return (
+            (self._left, self._top),
+            (self._right, self._top),
+            (self._right, self._bottom),
+            (self._left, self._bottom),
+        )
+
+
+def load_yolo_model():
+    """! @brief 加载 YOLO 模型"""
+
+    if tf is None:
+        return None
+    return tf.load(YOLO_MODEL_PATH)
+
+
+def _copy_image_for_yolo(img):
+    """! @brief 生成 YOLO 推理使用的图像副本"""
+
+    copy_fn = getattr(img, "copy", None)
+    if copy_fn is None:
+        return img
+    return copy_fn(YOLO_IMAGE_COPY_SCALE, 1)
+
+
+def _image_width(img):
+    """! @brief 读取图像宽度"""
+
+    width_fn = getattr(img, "width", None)
+    if width_fn is not None:
+        return float(width_fn())
+    return 320.0
+
+
+def _image_height(img):
+    """! @brief 读取图像高度"""
+
+    height_fn = getattr(img, "height", None)
+    if height_fn is not None:
+        return float(height_fn())
+    return 240.0
+
+
+def _label_name(label):
+    """! @brief 返回 YOLO 标签名"""
+
+    label = int(label)
+    if 0 <= label < len(YOLO_LABELS):
+        return YOLO_LABELS[label]
+    return "unknown"
+
+
+def _build_yolo_candidates(img, yolo_net=None):
+    """! @brief 从 YOLO 检测结果生成物体候选"""
+
+    net = yolo_net
+    if net is None:
+        net = load_yolo_model()
+    if net is None:
+        return []
+    detect_img = _copy_image_for_yolo(img)
+    image_width = _image_width(img)
+    image_height = _image_height(img)
+    candidates = []
+    for detected in tf.detect(net, detect_img):
+        x1, y1, x2, y2, label, score = detected
+        if float(score) <= float(YOLO_MIN_SCORE):
+            continue
+        left = float(x1) * image_width
+        top = float(y1) * image_height
+        right = float(x2) * image_width
+        bottom = float(y2) * image_height
+        if right <= left or bottom <= top:
+            continue
+        blob = YoloDetectionBlob(left, top, right, bottom, label, score)
+        _, _, _, protocol_bottom = normalize_bbox_for_protocol(
+            left, top, right, bottom, image_height
+        )
+        candidates.append(
+            (_label_name(label), blob.cx(), protocol_bottom, blob.area(), blob)
+        )
+    return candidates
+
+
+def build_blob_candidates(img, yolo_net=None):
+    """! @brief 使用 YOLO 提取物体候选目标, 面积作为目标强度
 
     @param img 当前图像对象
     @return 候选目标列表, 元素格式为 task_name, cx, bottom, area, blob
     """
 
-    candidates = []
-    for task_name, threshold in TASKS:
-        blobs = img.find_blobs(
-            [threshold], pixels_threshold=200, area_threshold=200, merge=True
-        )
-        if not blobs:
-            continue
-        img_height = img.height()
-        for blob in blobs:
-            left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-            _, _, _, bottom = normalize_bbox_for_protocol(
-                left, top, right, bottom, img_height
-            )
-            candidates.append((task_name, blob.cx(), bottom, blob_area(blob), blob))
-    return candidates
+    return _build_yolo_candidates(img, yolo_net)
 
 
 def choose_best_candidate(candidates, target_x, target_y):
@@ -1513,7 +1622,7 @@ def process_uart_input(uart, rx_buffer, hook):
     return rx_buffer
 
 
-def build_observation_from_image(hook, img, image_width, image_height):
+def build_observation_from_image(hook, img, image_width, image_height, yolo_net=None):
     """! @brief 从图像生成一帧物体观测
 
     @param hook 主车视觉 hook 状态对象
@@ -1523,7 +1632,7 @@ def build_observation_from_image(hook, img, image_width, image_height):
     @return observation, best_blob 元组
     """
 
-    candidates = build_blob_candidates(img)
+    candidates = build_blob_candidates(img, yolo_net)
     if not candidates:
         return hook.build_observation(0, 0, 0, 0, image_width, image_height), None
     target_x, target_y = build_search_target_point(
@@ -1662,7 +1771,7 @@ def run_master_return_line_debug():
         draw_master_return_line_debug(img, image_width, image_height, line_y, vx, vy)
 
 
-def process_search_frame(uart, hook, img, image_width, image_height):
+def process_search_frame(uart, hook, img, image_width, image_height, yolo_net=None):
     """! @brief 处理单帧主车搜索速度流和 hook 事件
 
     @param uart 主车视觉串口
@@ -1685,7 +1794,7 @@ def process_search_frame(uart, hook, img, image_width, image_height):
         return
 
     observation, best_blob = build_observation_from_image(
-        hook, img, image_width, image_height
+        hook, img, image_width, image_height, yolo_net
     )
     _, x, y, _ = observation
     if best_blob is not None:
@@ -1732,6 +1841,7 @@ def run():
 
     uart = init_uart()
     image_width, image_height = init_sensor()
+    yolo_net = load_yolo_model()
     hook = MasterVisionHook()
     rx_buffer = b""
 
@@ -1739,7 +1849,7 @@ def run():
         rx_buffer = process_uart_input(uart, rx_buffer, hook)
         img = sensor.snapshot()  # type: ignore
         apply_lens_correction(img)
-        process_search_frame(uart, hook, img, image_width, image_height)
+        process_search_frame(uart, hook, img, image_width, image_height, yolo_net)
 
 
 if __name__ == "__main__":
