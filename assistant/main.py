@@ -6,6 +6,11 @@
 import time
 
 try:
+    import image as omv_image
+except ImportError:
+    omv_image = None
+
+try:
     import sensor
 except ImportError:
     sensor = None
@@ -50,10 +55,16 @@ MODE_FOLLOW = "follow"
 MODE_APPROACH_OBJECT = "approach_object"
 # 接收到同步后切换的绕行修正模式。
 MODE_ORBIT_OBJECT = "orbit_object"
+# 接收到同步后切换的回库黄线巡线模式。
+MODE_RETURN_LINE = "return_line"
 # 辅车找物体状态编号。
 STATE_APPROACH_OBJECT = 2
 # 辅车绕行状态编号。
 STATE_ORBIT = 3
+# 辅车回库黄线状态编号。
+STATE_RETURN_FOLLOW = 6
+# 无目标编号。
+TARGET_NONE = 0
 # 物体目标编号。
 TARGET_OBJECT = 1
 # 找物体同步参数编号。
@@ -62,15 +73,21 @@ OBJECT_APPROACH_CONFIG_ID = 1
 ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID = 2
 # 绕行修正同步参数编号。
 ASSISTANT_ORBIT_OBJECT_CONFIG_ID = 3
+# 回库黄线同步参数编号。
+ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID = 5
 # TARGET_FOUND 事件编号。
 EVENT_TARGET_FOUND = 6
 # ALIGNED 事件编号。
 EVENT_ALIGNED = 7
+# RETURN_GARAGE_FINISHED 事件编号。
+EVENT_RETURN_GARAGE_FINISHED = 12
 
-# 跟随模式使用的绿色色标阈值。
-FOLLOW_TASKS = (("green", (37, 8, -57, -8, -36, 6)),)
+# 跟随模式使用的色标阈值。
+FOLLOW_TASKS = (("marker", (35, 100, 50, 127, -128, 127)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
 OBJECT_TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
+# 回库黄线使用的黄色阈值，与主车回库黄线保持一致。
+RETURN_LINE_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
 
 # 跟随控制使用的横向死区，单位为像素。
 FOLLOW_X_DEADZONE_PX = 5.0
@@ -137,6 +154,24 @@ OBJECT_X_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_X_PX
 OBJECT_Y_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_Y_PX
 # 连续满足 hook 条件多少帧后确认找到目标。
 OBJECT_STABLE_FRAMES = 3
+# 回库黄线采样半宽，单位像素。
+RETURN_LINE_SAMPLE_HALF_WIDTH_PX = 5
+# 回库黄线目标 Y 坐标。
+RETURN_LINE_TARGET_Y_PX = 220.0
+# 回库黄线 Y 死区，单位像素。
+RETURN_LINE_DEADZONE_Y_PX = 4.0
+# 回库黄线纵向速度 P 环增益。
+RETURN_LINE_KP_Y = -0.08
+# 回库黄线纵向速度限幅。
+RETURN_LINE_MAX_VY = 5.0
+# 回库黄线纵向最小有效速度。
+RETURN_LINE_MIN_SPEED = 0.0
+# 回库黄线参与中心计算的最大厚度，单位像素。
+RETURN_LINE_MAX_THICKNESS_PX = 30
+# 回库黄线候选点左右水平联通黄线的最小合计长度，单位像素。
+RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
+# 回库黄线连续丢线停车帧数。
+RETURN_LINE_MISSING_FINISH_FRAMES = 5
 
 _I16_MIN = -32768
 _I16_MAX = 32767
@@ -688,6 +723,137 @@ def build_object_blob_candidates(img):
     return candidates
 
 
+def _pixel_to_lab(pixel):
+    if pixel is None:
+        return None
+    if omv_image is not None:
+        try:
+            return omv_image.rgb_to_lab(pixel)
+        except Exception:
+            pass
+    return pixel
+
+
+def _pixel_matches_threshold(pixel, threshold):
+    lab = _pixel_to_lab(pixel)
+    if lab is None:
+        return False
+    try:
+        if len(lab) < 3:
+            return False
+    except TypeError:
+        return False
+    return (
+        float(threshold[0]) <= float(lab[0]) <= float(threshold[1])
+        and float(threshold[2]) <= float(lab[1]) <= float(threshold[3])
+        and float(threshold[4]) <= float(lab[2]) <= float(threshold[5])
+    )
+
+
+def _return_line_pixel_matches(img, x, y, image_width, image_height):
+    max_x = int(image_width) - 1
+    max_y = int(image_height) - 1
+    return _pixel_matches_threshold(
+        img.get_pixel(max_x - int(x), max_y - int(y)),
+        RETURN_LINE_YELLOW_THRESHOLD,
+    )
+
+
+def _return_line_has_horizontal_connected_at(
+    img, x, y, image_width, image_height, required_connected
+):
+    if not _return_line_pixel_matches(img, x, y, image_width, image_height):
+        return False
+    connected = 0
+    left = int(x) - 1
+    while left >= 0 and _return_line_pixel_matches(img, left, y, image_width, image_height):
+        connected += 1
+        if connected >= int(required_connected):
+            return True
+        left -= 1
+    right = int(x) + 1
+    max_x = int(image_width) - 1
+    while right <= max_x and _return_line_pixel_matches(img, right, y, image_width, image_height):
+        connected += 1
+        if connected >= int(required_connected):
+            return True
+        right += 1
+    return False
+
+
+def _return_line_sample_columns(center_x, half_width):
+    yield int(center_x)
+    for offset in range(1, int(half_width) + 1):
+        yield int(center_x) - offset
+        yield int(center_x) + offset
+
+
+def _return_line_y_on_column(img, x, image_width, image_height):
+    top = None
+    bottom = None
+    for y in range(0, int(image_height)):
+        # 显示坐标按翻转后坐标标注, 但 get_pixel 读取表现为原始坐标。
+        if not _return_line_pixel_matches(img, x, y, image_width, image_height):
+            continue
+        if top is None:
+            top = int(y)
+        bottom = int(y)
+    if top is None or bottom is None:
+        return None
+    max_thickness = int(RETURN_LINE_MAX_THICKNESS_PX)
+    if max_thickness > 0 and int(bottom) - int(top) > max_thickness:
+        top = int(bottom) - max_thickness
+    return (float(top) + float(bottom)) / 2.0
+
+
+def _build_return_line_y_from_pixels(img, image_width, image_height, previous_line_y=None):
+    get_pixel = getattr(img, "get_pixel", None)
+    if get_pixel is None:
+        return None
+    center_x = int(float(image_width) / 2.0)
+    half_width = int(RETURN_LINE_SAMPLE_HALF_WIDTH_PX)
+    saw_candidate = False
+    for x in _return_line_sample_columns(center_x, half_width):
+        if x < 0 or x >= int(image_width):
+            continue
+        line_y = _return_line_y_on_column(img, x, image_width, image_height)
+        if line_y is None:
+            continue
+        saw_candidate = True
+        has_horizontal_connected = _return_line_has_horizontal_connected_at(
+            img,
+            x,
+            int(round(line_y)),
+            image_width,
+            image_height,
+            RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX,
+        )
+        if has_horizontal_connected:
+            return line_y
+    if saw_candidate:
+        return previous_line_y
+    return None
+
+
+def build_return_line_y_from_image(img, image_width, image_height, previous_line_y=None):
+    return _build_return_line_y_from_pixels(
+        img, image_width, image_height, previous_line_y
+    )
+
+
+def build_return_line_velocity_from_y(line_y):
+    if line_y is None:
+        return 0.0, 0.0
+    err_y = float(line_y) - float(RETURN_LINE_TARGET_Y_PX)
+    if abs(err_y) <= float(RETURN_LINE_DEADZONE_Y_PX):
+        return 0.0, 0.0
+    return 0.0, _apply_min_speed(
+        err_y * float(RETURN_LINE_KP_Y),
+        RETURN_LINE_MIN_SPEED,
+        RETURN_LINE_MAX_VY,
+    )
+
+
 def choose_best_candidate(candidates, cx_screen, img_height):
     """! @brief 选择当前帧最值得上报的目标
 
@@ -904,6 +1070,7 @@ class AssistantVisionState:
         self._completed_event_sync_seq = None
         self._now_ms = now_ms or default_now_ms
         self._event_resend_interval_ms = int(event_resend_interval_ms)
+        self._last_return_line_y = None
 
     def handle_control_line(self, line):
         """! @brief 处理 RT1021 发来的同步或确认短帧
@@ -938,6 +1105,7 @@ class AssistantVisionState:
             self._last_sync_seq = reliable_seq
             self.mode = self._mode_from_sync(self.current_sync)
             self._stable_count = 0
+            self._last_return_line_y = None
         return format_ack_frame(reliable_seq)
 
     def _should_apply_sync(self, reliable_seq):
@@ -975,6 +1143,12 @@ class AssistantVisionState:
             and int(sync["arg"]) == ASSISTANT_ORBIT_OBJECT_CONFIG_ID
         ):
             return MODE_ORBIT_OBJECT
+        if (
+            int(sync["state"]) == STATE_RETURN_FOLLOW
+            and int(sync["target"]) == TARGET_NONE
+            and int(sync["arg"]) == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
+        ):
+            return MODE_RETURN_LINE
         return MODE_FOLLOW
 
     def current_object_config_id(self):
@@ -983,6 +1157,17 @@ class AssistantVisionState:
         if self.current_sync is None:
             return OBJECT_APPROACH_CONFIG_ID
         return int(self.current_sync["arg"])
+
+    def last_return_line_y(self):
+        """! @brief 返回上一帧有效回库黄线 Y"""
+
+        return self._last_return_line_y
+
+    def remember_return_line_y(self, line_y):
+        """! @brief 保存当前有效回库黄线 Y"""
+
+        if line_y is not None:
+            self._last_return_line_y = float(line_y)
 
     def _handle_ack_packet(self, packet):
         """! @brief 处理可靠事件确认包
@@ -1028,6 +1213,32 @@ class AssistantVisionState:
         if self._stable_count >= self.required_stable_frames:
             self._create_event(current_sync_seq, event_id, value)
 
+    def accept_return_line_observation(self, line_y):
+        """! @brief 回库黄线阶段保持跟线并清理完成事件累计"""
+
+        _ = line_y
+        self._stable_count = 0
+        return
+
+        if self.mode != MODE_RETURN_LINE or self.current_sync is None:
+            self._stable_count = 0
+            return
+        current_sync_seq = int(self.current_sync["reliable_seq"])
+        if self._pending_event is not None:
+            return
+        if self._completed_event_sync_seq == current_sync_seq:
+            return
+        event_id = self._current_event_id()
+        if event_id is None:
+            self._stable_count = 0
+            return
+        if line_y is not None:
+            self._stable_count = 0
+            return
+        self._stable_count += 1
+        if self._stable_count >= int(RETURN_LINE_MISSING_FINISH_FRAMES):
+            self._create_event(current_sync_seq, event_id, 0)
+
     def _observation_matches_target(self, x, y, value):
         """! @brief 判断当前观测是否满足找到目标条件
 
@@ -1066,6 +1277,12 @@ class AssistantVisionState:
             and arg == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
         ):
             return EVENT_ALIGNED
+        if (
+            state == STATE_RETURN_FOLLOW
+            and target == TARGET_NONE
+            and arg == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
+        ):
+            return EVENT_RETURN_GARAGE_FINISHED
         return None
 
     def _create_event(self, reliable_seq, event, value):
@@ -1302,6 +1519,109 @@ def process_object_frame(uart, state, img, image_width, image_height):
     state.accept_object_observation(observation)
 
 
+def process_return_line_frame(uart, state, img, image_width, image_height):
+    """! @brief 处理辅车回库黄线巡线速度与完成事件"""
+
+    line_y = build_return_line_y_from_image(
+        img,
+        image_width,
+        image_height,
+        state.last_return_line_y(),
+    )
+    state.remember_return_line_y(line_y)
+    vx, vy = build_return_line_velocity_from_y(line_y)
+    write_line(uart, format_vision_frame(vx, vy))
+    state.accept_return_line_observation(line_y)
+
+
+def _draw_debug_line(img, x0, y0, x1, y1):
+    draw_line = getattr(img, "draw_line", None)
+    if draw_line is None:
+        return
+    try:
+        draw_line(int(x0), int(y0), int(x1), int(y1), color=(255, 255, 0))
+    except TypeError:
+        draw_line(int(x0), int(y0), int(x1), int(y1))
+
+
+def _draw_debug_cross(img, x, y):
+    draw_cross = getattr(img, "draw_cross", None)
+    if draw_cross is None:
+        return
+    try:
+        draw_cross(int(x), int(y), color=(255, 0, 0))
+    except TypeError:
+        draw_cross(int(x), int(y))
+
+
+def _draw_debug_text(img, x, y, text):
+    draw_string = getattr(img, "draw_string", None)
+    if draw_string is None:
+        return
+    try:
+        draw_string(int(x), int(y), str(text), color=(255, 255, 255))
+    except TypeError:
+        draw_string(int(x), int(y), str(text))
+
+
+def draw_assistant_return_line_debug(img, image_width, image_height, line_y, vx, vy):
+    """! @brief 绘制辅车回库黄线判定调试信息"""
+
+    center_x = int(float(image_width) / 2.0)
+    half_width = int(RETURN_LINE_SAMPLE_HALF_WIDTH_PX)
+    max_thickness = int(RETURN_LINE_MAX_THICKNESS_PX)
+    target_y = int(RETURN_LINE_TARGET_Y_PX)
+    bottom_y = int(image_height) - 1
+
+    def flip_x(x):
+        return int(image_width) - 1 - int(x)
+
+    def flip_y(y):
+        return int(image_height) - 1 - int(y)
+
+    def draw_line(x0, y0, x1, y1):
+        _draw_debug_line(img, flip_x(x0), flip_y(y0), flip_x(x1), flip_y(y1))
+
+    draw_line(center_x - half_width, 0, center_x - half_width, bottom_y)
+    draw_line(center_x + half_width, 0, center_x + half_width, bottom_y)
+    draw_line(0, target_y, int(image_width) - 1, target_y)
+    if line_y is not None:
+        draw_line(0, int(line_y), int(image_width) - 1, int(line_y))
+        _draw_debug_cross(img, flip_x(center_x), flip_y(int(line_y)))
+        line_text = "line_y=%.1f" % float(line_y)
+    else:
+        line_text = "line_y=none"
+
+    _draw_debug_text(img, 2, 2, "assistant return line debug")
+    _draw_debug_text(img, 2, 14, "max h=%d x=%d..%d" % (
+        max_thickness,
+        center_x - half_width,
+        center_x + half_width,
+    ))
+    _draw_debug_text(img, 2, 26, "%s found=%d" % (line_text, 1 if line_y is not None else 0))
+    _draw_debug_text(img, 2, 38, "vx=%.1f vy=%.1f" % (float(vx), float(vy)))
+
+
+def run_assistant_return_line_debug():
+    """! @brief 只显示辅车回库黄线判定调试画面"""
+
+    image_width, image_height = init_sensor()
+    last_line_y = None
+    while True:
+        img = sensor.snapshot()  # type: ignore
+        apply_lens_correction(img)
+        line_y = build_return_line_y_from_image(
+            img,
+            image_width,
+            image_height,
+            last_line_y,
+        )
+        if line_y is not None:
+            last_line_y = line_y
+        vx, vy = build_return_line_velocity_from_y(line_y)
+        draw_assistant_return_line_debug(img, image_width, image_height, line_y, vx, vy)
+
+
 def process_frame(uart, state, img, image_width, image_height):
     """! @brief 按当前模式处理单帧视觉输出
 
@@ -1320,8 +1640,19 @@ def process_frame(uart, state, img, image_width, image_height):
 
     if state.mode == MODE_APPROACH_OBJECT or state.mode == MODE_ORBIT_OBJECT:
         process_object_frame(uart, state, img, image_width, image_height)
+    elif state.mode == MODE_RETURN_LINE:
+        process_return_line_frame(uart, state, img, image_width, image_height)
     else:
         process_follow_frame(uart, img, image_width, image_height)
+
+
+def apply_lens_correction(img):
+    """! @brief 执行当前帧镜头畸变校准"""
+
+    try:
+        img.lens_corr(strength=2.8, zoom=1.0)
+    except MemoryError:
+        pass
 
 
 def run():
@@ -1335,10 +1666,7 @@ def run():
     while True:
         rx_buffer = process_uart_input(uart, rx_buffer, state)
         img = sensor.snapshot()  # type: ignore
-        try:
-            img.lens_corr(strength=2.8, zoom=1.0)
-        except MemoryError:
-            pass
+        apply_lens_correction(img)
         process_frame(uart, state, img, image_width, image_height)
 
 

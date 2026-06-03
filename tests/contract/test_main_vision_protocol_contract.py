@@ -276,3 +276,22 @@ def test_master_missing_target_velocity_frame_uses_configured_search_speed() -> 
     assert frame["mode"] == MODE_UDP
     assert frame["topic"] == TOPIC_LOCAL_VISION_VELOCITY
     assert decode_velocity_body(frame["body"]) == decode_velocity_body(expected["body"])
+
+
+def test_master_return_garage_events_use_reliable_event_topic() -> None:
+    """! @brief 主车回库完成事件仍使用主车可靠事件短帧"""
+    module = load_role_main_module("master", "vision_master_return_contract_module")
+
+    finished_frame = decode_frame(
+        module.format_event_frame(32, 7, module.EVENT_RETURN_GARAGE_FINISHED, 0)
+    )
+
+    assert int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID) == 5
+    assert finished_frame is not None
+    assert finished_frame["mode"] == MODE_TCP
+    assert finished_frame["topic"] == TOPIC_MASTER_VISION_EVENT_REPORT
+    assert decode_master_vision_event_report_body(finished_frame["body"]) == {
+        "context_id": 7,
+        "event": module.EVENT_RETURN_GARAGE_FINISHED,
+        "value": 0,
+    }
