@@ -287,6 +287,94 @@ def test_object_color_tasks_use_runtime_config() -> None:
     assert candidates[0][0] == "runtime_object"
 
 
+def test_object_color_candidates_require_all_configured_thresholds() -> None:
+    """找物体候选需要同一目标命中全部 LAB 阈值."""
+    module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_TASKS = (
+        (
+            "red",
+            (
+                (0, 100, 18, 127, -23, 127),
+                (10, 90, 25, 127, -10, 120),
+            ),
+        ),
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 160, 20)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 40
+
+        def area(self):
+            return 3200
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge))
+            return [FakeBlob()]
+
+    img = FakeImage()
+    candidates = module.build_object_blob_candidates(img)
+
+    assert img.calls == [
+        ([(0, 100, 18, 127, -23, 127)], 200, 200, True),
+        ([(10, 90, 25, 127, -10, 120)], 200, 200, True),
+    ]
+    assert candidates[0][0] == "red"
+    assert candidates[0][1] == pytest.approx(160.0)
+    assert candidates[0][3] == pytest.approx(210.0)
+    assert candidates[0][4] == pytest.approx(3200.0)
+
+
+def test_object_color_candidates_reject_missing_secondary_threshold() -> None:
+    """找物体候选缺少任一 LAB 阈值命中时不输出目标."""
+    module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_TASKS = (
+        (
+            "red",
+            (
+                (0, 100, 18, 127, -23, 127),
+                (10, 90, 25, 127, -10, 120),
+            ),
+        ),
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 160, 20)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 40
+
+        def area(self):
+            return 3200
+
+    class FakeImage:
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            if thresholds == [(0, 100, 18, 127, -23, 127)]:
+                return [FakeBlob()]
+            return []
+
+    assert module.build_object_blob_candidates(FakeImage()) == []
+
+
 def test_build_object_blob_candidates_reports_area_as_value() -> None:
     """找物体候选目标必须携带面积值用于稳定判定."""
     module = load_main_module("vision_main_test_module_unit")

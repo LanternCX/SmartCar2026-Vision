@@ -85,7 +85,15 @@ EVENT_RETURN_GARAGE_FINISHED = 12
 # 跟随模式使用的色标阈值。
 FOLLOW_TASKS = (("marker", (35, 100, 50, 127, -128, 127)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
-OBJECT_TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
+OBJECT_TASKS = (
+    (
+        "red",
+        (
+            (0, 100, 18, 127, -23, 127),
+            (0, 100, 18, 127, -23, 127),
+        ),
+    ),
+)
 # 回库黄线使用的黄色阈值，与主车回库黄线保持一致。
 RETURN_LINE_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
 
@@ -674,6 +682,44 @@ def blob_area(blob):
     return float((right - left) * (bottom - top))
 
 
+def task_thresholds(thresholds):
+    """! @brief 统一读取单 LAB 与多 LAB 任务配置"""
+
+    if len(thresholds) == 6 and not isinstance(thresholds[0], (tuple, list)):
+        return (thresholds,)
+    return thresholds
+
+
+def blob_bbox_overlaps(left, top, right, bottom, other_blob):
+    """! @brief 判断两个候选框是否存在有效重叠"""
+
+    other_left, other_top, other_right, other_bottom = blob_rect_to_bbox(
+        other_blob.rect()
+    )
+    return (
+        min(float(right), float(other_right)) > max(float(left), float(other_left))
+        and min(float(bottom), float(other_bottom)) > max(float(top), float(other_top))
+    )
+
+
+def blob_matches_all_thresholds(img, blob, thresholds):
+    """! @brief 判断候选色块是否被同一目标的全部 LAB 阈值命中"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    for threshold in thresholds[1:]:
+        blobs = img.find_blobs(
+            [threshold], pixels_threshold=200, area_threshold=200, merge=True
+        )
+        matched = False
+        for other_blob in blobs:
+            if blob_bbox_overlaps(left, top, right, bottom, other_blob):
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
 def build_blob_candidates(img):
     """! @brief 提取跟随模式颜色候选目标的重心、底边与尺度量信息
 
@@ -708,11 +754,16 @@ def build_object_blob_candidates(img):
 
     candidates = []
     img_height = img.height()
-    for task_name, threshold in OBJECT_TASKS:
+    for task_name, configured_thresholds in OBJECT_TASKS:
+        thresholds = task_thresholds(configured_thresholds)
+        if len(thresholds) <= 0:
+            continue
         blobs = img.find_blobs(
-            [threshold], pixels_threshold=200, area_threshold=200, merge=True
+            [thresholds[0]], pixels_threshold=200, area_threshold=200, merge=True
         )
         for blob in blobs:
+            if not blob_matches_all_thresholds(img, blob, thresholds):
+                continue
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
             _, _, _, bottom = normalize_bbox_for_protocol(
                 left, top, right, bottom, img_height
