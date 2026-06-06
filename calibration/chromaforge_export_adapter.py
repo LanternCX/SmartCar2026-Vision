@@ -63,11 +63,14 @@ def _task_entries(document, objects):
         if not thresholds:
             continue
         blob_params = _object_blob_params(document, item)
-        if bool(item.get("require_all_clusters", True)):
-            entries.append((name, tuple(thresholds),) + blob_params)
-            continue
-        for threshold in thresholds:
-            entries.append((name, threshold) + blob_params)
+        entries.append(
+            (
+                name,
+                tuple(thresholds),
+            )
+            + blob_params
+            + (bool(item.get("require_all_clusters", True)),)
+        )
     return entries
 
 
@@ -76,24 +79,26 @@ def _format_threshold(threshold):
 
 
 def _format_task(task):
-    name, thresholds, merge_margin, pixels_threshold, area_threshold = task
+    name, thresholds, merge_margin, pixels_threshold, area_threshold, require_all_clusters = task
     if thresholds and isinstance(thresholds[0], tuple):
         inner = ", ".join(_format_threshold(threshold) for threshold in thresholds)
         if len(thresholds) == 1:
             inner += ","
-        return "    ('%s', (%s), %d, %d, %d)," % (
+        return "    ('%s', (%s), %d, %d, %d, %s)," % (
             name,
             inner,
             merge_margin,
             pixels_threshold,
             area_threshold,
+            "True" if require_all_clusters else "False",
         )
-    return "    ('%s', %s, %d, %d, %d)," % (
+    return "    ('%s', %s, %d, %d, %d, %s)," % (
         name,
         _format_threshold(thresholds),
         merge_margin,
         pixels_threshold,
         area_threshold,
+        "True" if require_all_clusters else "False",
     )
 
 

@@ -40,7 +40,7 @@ def test_chromaforge_export_builds_openart_threshold_config() -> None:
     assert "6, 12, 40" in config
 
 
-def test_chromaforge_export_splits_optional_clusters_as_alternative_tasks() -> None:
+def test_chromaforge_export_preserves_optional_cluster_mode_in_single_task() -> None:
     document = {
         "format": "chromaforge-v1",
         "target": "openmv-find-blobs",
@@ -60,9 +60,8 @@ def test_chromaforge_export_splits_optional_clusters_as_alternative_tasks() -> N
 
     config = build_openart_config(json.dumps(document), task_constant_name="FOLLOW_TASKS")
 
-    assert config.count("'marker'") == 2
-    assert "('marker', (1, 2, 3, 4, 5, 6), 3, 8, 30)" in config
-    assert "('marker', (7, 8, 9, 10, 11, 12), 3, 8, 30)" in config
+    assert config.count("'marker'") == 1
+    assert "('marker', ((1, 2, 3, 4, 5, 6), (7, 8, 9, 10, 11, 12)), 3, 8, 30, False)" in config
 
 
 def test_chromaforge_export_uses_legacy_global_recognition_settings_as_fallback() -> None:
@@ -85,7 +84,7 @@ def test_chromaforge_export_uses_legacy_global_recognition_settings_as_fallback(
 
     config = build_openart_config(json.dumps(document), task_constant_name="TASKS")
 
-    assert "('red', ((42, 91, -24, 6, 28, 85),), 9, 14, 28)" in config
+    assert "('red', ((42, 91, -24, 6, 28, 85),), 9, 14, 28, True)" in config
 
 
 def test_chromaforge_export_builds_deployable_role_source() -> None:
@@ -125,7 +124,7 @@ def test_chromaforge_export_builds_deployable_role_source() -> None:
     assert "OBJECT_BLOB_MERGE_MARGIN = 0" in result
     assert "OBJECT_BLOB_PIXELS_THRESHOLD = 200" in result
     assert "OBJECT_BLOB_AREA_THRESHOLD = 200" in result
-    assert "('red', ((1, 2, 3, 4, 5, 6),), 4, 11, 33)" in result
+    assert "('red', ((1, 2, 3, 4, 5, 6),), 4, 11, 33, True)" in result
     assert "'old'" not in result
     assert "def keep():" in result
 
@@ -165,7 +164,7 @@ def test_chromaforge_export_preserves_other_task_tables() -> None:
 
     assert "FOLLOW_TASKS = (('old_follow', (0, 0, 0, 0, 0, 0)),)" in result
     assert "'old_object'" not in result
-    assert "('marker', (1, 2, 3, 4, 5, 6), 4, 11, 33)" in result
+    assert "('marker', ((1, 2, 3, 4, 5, 6),), 4, 11, 33, False)" in result
 
 
 def test_chromaforge_export_loads_default_rules_from_tool_directory() -> None:

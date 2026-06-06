@@ -92,13 +92,11 @@ OBJECT_BLOB_AREA_THRESHOLD = 200
 FOLLOW_TASKS = (("marker", (35, 100, 50, 127, -128, 127)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
 OBJECT_TASKS = (
-    (
-        "red",
-        (
-            (0, 100, 18, 127, -23, 127),
-            (0, 100, 18, 127, -23, 127),
-        ),
-    ),
+    ('blue', ((30, 42, -2, 20, -52, -36), (38, 52, -3, 10, -50, -38), (18, 31, -6, 8, -36, -21), (46, 61, -7, 10, -52, -44), (43, 59, 2, 23, -62, -51), (25, 35, -2, 17, -47, -32)), 5, 10, 1, True),
+    ('red', ((13, 32, 21, 46, -15, 29), (20, 36, 28, 52, 9, 47)), 3, 6, 1, True),
+    ('tennis', ((72, 100, -39, -17, 17, 79), (53, 79, -40, -26, 34, 73)), 3, 6, 1, True),
+    ('white', ((45, 62, -6, 9, -18, 6), (27, 44, -7, 9, -21, -1), (56, 74, -5, 9, -19, 4), (39, 54, -5, 12, -27, 0)), 5, 10, 1, True),
+    ('brown', ((8, 26, -2, 11, -14, 25), (17, 35, -4, 13, -6, 31)), 3, 6, 1, True),
 )
 # 回库黄线使用的黄色阈值，与主车回库黄线保持一致。
 RETURN_LINE_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
@@ -699,15 +697,78 @@ def task_thresholds(thresholds):
 def object_task_parts(task):
     """! @brief 兼容读取旧版与新版找物体任务配置"""
 
+    if len(task) >= 6:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            bool(task[5]),
+        )
     if len(task) >= 5:
-        return task[0], task_thresholds(task[1]), int(task[2]), int(task[3]), int(task[4])
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            True,
+        )
     return (
         task[0],
         task_thresholds(task[1]),
         OBJECT_BLOB_MERGE_MARGIN,
         OBJECT_BLOB_PIXELS_THRESHOLD,
         OBJECT_BLOB_AREA_THRESHOLD,
+        True,
     )
+
+
+def _find_blobs_with_task_config(
+    img, thresholds, pixels_threshold, area_threshold, merge_margin
+):
+    """! @brief 按当前任务配置调用板端找色块接口"""
+
+    try:
+        return img.find_blobs(
+            list(thresholds),
+            pixels_threshold=pixels_threshold,
+            area_threshold=1,
+            merge=True,
+            margin=max(0, int(merge_margin)),
+        )
+    except TypeError:
+        return img.find_blobs(
+            list(thresholds),
+            pixels_threshold=pixels_threshold,
+            area_threshold=1,
+            merge=True,
+        )
+
+
+def _blob_code(blob):
+    """! @brief 读取合并色块的颜色码"""
+
+    code_fn = getattr(blob, "code", None)
+    if code_fn is not None:
+        return int(code_fn())
+    try:
+        return int(blob[8])
+    except Exception:
+        return None
+
+
+def _blob_matches_required_thresholds(blob, threshold_count, require_all_thresholds):
+    """! @brief 判断色块是否满足当前任务的颜色簇命中要求"""
+
+    if int(threshold_count) <= 1 or not bool(require_all_thresholds):
+        return True
+    code = _blob_code(blob)
+    if code is None:
+        return True
+    expected_code = (1 << int(threshold_count)) - 1
+    return (code & expected_code) == expected_code
 
 
 def blob_bbox_overlaps(left, top, right, bottom, other_blob):
@@ -781,19 +842,31 @@ def build_object_blob_candidates(img):
     candidates = []
     img_height = img.height()
     for task in OBJECT_TASKS:
-        task_name, thresholds, merge_margin, pixels_threshold, area_threshold = object_task_parts(task)
+        (
+            task_name,
+            thresholds,
+            merge_margin,
+            pixels_threshold,
+            area_threshold,
+            require_all_thresholds,
+        ) = object_task_parts(task)
         if len(thresholds) <= 0:
             continue
-        blobs = img.find_blobs(
-            [thresholds[0]],
-            pixels_threshold=pixels_threshold,
-            area_threshold=area_threshold,
-            merge=bool(merge_margin >= 0),
+        blobs = _find_blobs_with_task_config(
+            img,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge_margin,
         )
         for blob in blobs:
-            if not blob_matches_all_thresholds(
-                img, blob, thresholds, pixels_threshold, area_threshold, bool(merge_margin >= 0)
+            if not _blob_matches_required_thresholds(
+                blob,
+                len(thresholds),
+                require_all_thresholds,
             ):
+                continue
+            if blob_area(blob) < float(area_threshold):
                 continue
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
             _, _, _, bottom = normalize_bbox_for_protocol(
@@ -952,7 +1025,7 @@ def choose_best_candidate(candidates, cx_screen, img_height):
 
 
 def draw_selected_marker(img, blob, pixel_x, pixel_y):
-    """! @brief 在调试画面上绘制当前选中目标的四角与中心
+    """! @brief 在调试画面上绘制当前选中目标的矩形框
 
     @param img 当前图像对象
     @param blob 当前选中的色块对象
@@ -960,9 +1033,18 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     @param pixel_y 当前目标中心 y
     """
 
-    for corner_x, corner_y in get_marker_corners(blob):
-        img.draw_cross(corner_x, corner_y)
-    img.draw_cross(pixel_x, pixel_y)
+    _ = pixel_x
+    _ = pixel_y
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    width = int(right) - int(left)
+    height = int(bottom) - int(top)
+    draw_rectangle = getattr(img, "draw_rectangle", None)
+    if draw_rectangle is None:
+        return
+    try:
+        draw_rectangle(int(left), int(top), int(width), int(height))
+    except TypeError:
+        draw_rectangle((int(left), int(top), int(width), int(height)))
 
 
 def build_object_observation(
