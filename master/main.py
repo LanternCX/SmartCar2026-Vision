@@ -553,6 +553,20 @@ def task_thresholds(thresholds):
     return thresholds
 
 
+def object_task_parts(task):
+    """! @brief 兼容读取旧版与新版找物体任务配置"""
+
+    if len(task) >= 5:
+        return task[0], task_thresholds(task[1]), int(task[2]), int(task[3]), int(task[4])
+    return (
+        task[0],
+        task_thresholds(task[1]),
+        OBJECT_BLOB_MERGE_MARGIN,
+        OBJECT_BLOB_PIXELS_THRESHOLD,
+        OBJECT_BLOB_AREA_THRESHOLD,
+    )
+
+
 def blob_bbox_overlaps(left, top, right, bottom, other_blob):
     """! @brief 判断两个候选框是否存在有效重叠"""
 
@@ -565,16 +579,16 @@ def blob_bbox_overlaps(left, top, right, bottom, other_blob):
     )
 
 
-def blob_matches_all_thresholds(img, blob, thresholds):
+def blob_matches_all_thresholds(img, blob, thresholds, pixels_threshold, area_threshold, merge):
     """! @brief 判断候选色块是否被同一目标的全部 LAB 阈值命中"""
 
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     for threshold in thresholds[1:]:
         blobs = img.find_blobs(
             [threshold],
-            pixels_threshold=OBJECT_BLOB_PIXELS_THRESHOLD,
-            area_threshold=OBJECT_BLOB_AREA_THRESHOLD,
-            merge=True,
+            pixels_threshold=pixels_threshold,
+            area_threshold=area_threshold,
+            merge=merge,
         )
         matched = False
         for other_blob in blobs:
@@ -594,21 +608,23 @@ def build_blob_candidates(img):
     """
 
     candidates = []
-    for task_name, configured_thresholds in TASKS:
-        thresholds = task_thresholds(configured_thresholds)
+    for task in TASKS:
+        task_name, thresholds, merge_margin, pixels_threshold, area_threshold = object_task_parts(task)
         if len(thresholds) <= 0:
             continue
         blobs = img.find_blobs(
             [thresholds[0]],
-            pixels_threshold=OBJECT_BLOB_PIXELS_THRESHOLD,
-            area_threshold=OBJECT_BLOB_AREA_THRESHOLD,
-            merge=True,
+            pixels_threshold=pixels_threshold,
+            area_threshold=area_threshold,
+            merge=bool(merge_margin >= 0),
         )
         if not blobs:
             continue
         img_height = img.height()
         for blob in blobs:
-            if not blob_matches_all_thresholds(img, blob, thresholds):
+            if not blob_matches_all_thresholds(
+                img, blob, thresholds, pixels_threshold, area_threshold, bool(merge_margin >= 0)
+            ):
                 continue
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
             _, _, _, bottom = normalize_bbox_for_protocol(

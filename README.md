@@ -90,40 +90,28 @@
 
 ## 角色部署
 
-根目录构建脚本会读取 `tools/chromaforge-rules.json`, 校验后生成主车和辅车两个角色入口。
-
-```bash
-bash build.sh
-```
-
-默认输出目录为 `build/`。需要指定输出目录时使用 `BUILD_DIR`:
-
-```bash
-BUILD_DIR=/path/to/build bash build.sh
-```
-
-每个角色目录也提供独立部署脚本, 脚本会把本目录的 `main.py` 复制为设备根目录的 `main.py`。
+每个角色目录各自维护独立构建脚本。脚本会读取角色目录外部 `calibration/` 下的共享标定文件，生成本角色入口，并上传到板端目录。
 
 ```bash
 ./assistant/build.sh
 ./master/build.sh
 ```
 
-默认设备挂载目录为 `/Volumes/NO NAME`。需要指定目标目录时使用 `TARGET_DIR`:
+默认输出目录为 `build/<role>/`，默认板端目录为 `/Volumes/NO NAME`。需要指定输出目录或板端目录时使用 `OUTPUT_DIR` 与 `TARGET_DIR`:
 
 ```bash
-TARGET_DIR=/path/to/device ./assistant/build.sh
-TARGET_DIR=/path/to/device ./master/build.sh
+OUTPUT_DIR=/path/to/output TARGET_DIR=/path/to/device ./assistant/build.sh
+OUTPUT_DIR=/path/to/output TARGET_DIR=/path/to/device ./master/build.sh
 ```
 
 ## ChromaForge 色彩标定接入
 
-`tools/chromaforge_export_adapter.py` 负责把同目录的 `chromaforge-rules.json` 转为 OpenART 入口可用的识别配置。规则文件每次运行都会校验。
+`calibration/chromaforge_export_adapter.py` 负责把同目录的 `chromaforge-rules.json` 转为 OpenART 入口可用的识别配置。规则文件每次运行都会校验。新格式下, 每个物体会携带自己的识别参数, 老格式顶层参数仍可作为回退值读取。
 
 手动生成单个入口:
 
 ```bash
-uv run python tools/chromaforge_export_adapter.py \
+uv run python calibration/chromaforge_export_adapter.py \
   --source master/main.py \
   --output /tmp/master-main.py \
   --task-constant-name TASKS

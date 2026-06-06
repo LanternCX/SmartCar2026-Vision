@@ -35,7 +35,25 @@ def _threshold_tuple(threshold):
     return tuple(int(value) for value in threshold)
 
 
-def _task_entries(objects):
+def _object_blob_params(document, item):
+    return (
+        int(item.get("recognition_merge_gap", document.get("recognition_merge_gap", 0))),
+        int(
+            item.get(
+                "min_recognition_block_area",
+                document.get("min_recognition_block_area", 1),
+            )
+        ),
+        int(
+            item.get(
+                "min_recognition_target_area",
+                document.get("min_recognition_target_area", 1),
+            )
+        ),
+    )
+
+
+def _task_entries(document, objects):
     entries = []
     for item in objects:
         name = str(item.get("name", "")).strip()
@@ -44,11 +62,12 @@ def _task_entries(objects):
         thresholds = [_threshold_tuple(threshold) for threshold in item.get("thresholds", [])]
         if not thresholds:
             continue
+        blob_params = _object_blob_params(document, item)
         if bool(item.get("require_all_clusters", True)):
-            entries.append((name, tuple(thresholds)))
+            entries.append((name, tuple(thresholds),) + blob_params)
             continue
         for threshold in thresholds:
-            entries.append((name, threshold))
+            entries.append((name, threshold) + blob_params)
     return entries
 
 
@@ -57,13 +76,25 @@ def _format_threshold(threshold):
 
 
 def _format_task(task):
-    name, thresholds = task
+    name, thresholds, merge_margin, pixels_threshold, area_threshold = task
     if thresholds and isinstance(thresholds[0], tuple):
         inner = ", ".join(_format_threshold(threshold) for threshold in thresholds)
         if len(thresholds) == 1:
             inner += ","
-        return "    ('%s', (%s))," % (name, inner)
-    return "    ('%s', %s)," % (name, _format_threshold(thresholds))
+        return "    ('%s', (%s), %d, %d, %d)," % (
+            name,
+            inner,
+            merge_margin,
+            pixels_threshold,
+            area_threshold,
+        )
+    return "    ('%s', %s, %d, %d, %d)," % (
+        name,
+        _format_threshold(thresholds),
+        merge_margin,
+        pixels_threshold,
+        area_threshold,
+    )
 
 
 def build_openart_config(export_json, task_constant_name="TASKS"):
@@ -71,14 +102,9 @@ def build_openart_config(export_json, task_constant_name="TASKS"):
 
     document = json.loads(export_json)
     _require_document(document)
-    entries = _task_entries(document["objects"])
+    entries = _task_entries(document, document["objects"])
     lines = [
         "# 由 ChromaForge 导出的 OpenART 色块识别参数。",
-        "OBJECT_BLOB_MERGE_MARGIN = %d" % int(document.get("recognition_merge_gap", 0)),
-        "OBJECT_BLOB_PIXELS_THRESHOLD = %d"
-        % int(document.get("min_recognition_block_area", 1)),
-        "OBJECT_BLOB_AREA_THRESHOLD = %d"
-        % int(document.get("min_recognition_target_area", 1)),
         "%s = (" % task_constant_name,
     ]
     lines.extend(_format_task(entry) for entry in entries)
@@ -118,21 +144,10 @@ def build_role_source(source_text, export_json, task_constant_name="TASKS"):
     document = json.loads(export_json)
     _require_document(document)
     lines = source_text.splitlines()
-    values = {
-        "OBJECT_BLOB_MERGE_MARGIN": int(document.get("recognition_merge_gap", 0)),
-        "OBJECT_BLOB_PIXELS_THRESHOLD": int(
-            document.get("min_recognition_block_area", 1)
-        ),
-        "OBJECT_BLOB_AREA_THRESHOLD": int(
-            document.get("min_recognition_target_area", 1)
-        ),
-    }
-    for name, value in values.items():
-        lines[_find_assignment_line(lines, name)] = "%s = %d" % (name, value)
-
     start, end = _find_task_block(lines, task_constant_name)
     task_lines = ["%s = (" % task_constant_name]
-    task_lines.extend(_format_task(entry) for entry in _task_entries(document["objects"]))
+    entries = _task_entries(document, document["objects"])
+    task_lines.extend(_format_task(entry) for entry in entries)
     task_lines.append(")")
     return "\n".join(lines[:start] + task_lines + lines[end:]) + "\n"
 

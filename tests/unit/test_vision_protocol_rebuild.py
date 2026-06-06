@@ -301,6 +301,9 @@ def test_object_color_candidates_require_all_configured_thresholds() -> None:
                 (0, 100, 18, 127, -23, 127),
                 (10, 90, 25, 127, -10, 120),
             ),
+            6,
+            12,
+            40,
         ),
     )
 
@@ -332,8 +335,8 @@ def test_object_color_candidates_require_all_configured_thresholds() -> None:
     candidates = module.build_object_blob_candidates(img)
 
     assert img.calls == [
-        ([(0, 100, 18, 127, -23, 127)], 200, 200, True),
-        ([(10, 90, 25, 127, -10, 120)], 200, 200, True),
+        ([(0, 100, 18, 127, -23, 127)], 12, 40, True),
+        ([(10, 90, 25, 127, -10, 120)], 12, 40, True),
     ]
     assert candidates[0][0] == "red"
     assert candidates[0][1] == pytest.approx(160.0)
@@ -351,6 +354,9 @@ def test_object_color_candidates_reject_missing_secondary_threshold() -> None:
                 (0, 100, 18, 127, -23, 127),
                 (10, 90, 25, 127, -10, 120),
             ),
+            6,
+            12,
+            40,
         ),
     )
 
@@ -377,6 +383,44 @@ def test_object_color_candidates_reject_missing_secondary_threshold() -> None:
             return []
 
     assert module.build_object_blob_candidates(FakeImage()) == []
+
+
+def test_object_color_candidates_support_legacy_task_without_per_object_params() -> None:
+    """旧任务配置缺少单物体参数时继续使用全局默认值."""
+    module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_BLOB_MERGE_MARGIN = 0
+    module.OBJECT_BLOB_PIXELS_THRESHOLD = 21
+    module.OBJECT_BLOB_AREA_THRESHOLD = 34
+    module.OBJECT_TASKS = (("red", ((0, 100, 18, 127, -23, 127),)),)
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 160, 20)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 40
+
+        def area(self):
+            return 3200
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge))
+            return [FakeBlob()]
+
+    img = FakeImage()
+    module.build_object_blob_candidates(img)
+
+    assert img.calls == [([(0, 100, 18, 127, -23, 127)], 21, 34, True)]
 
 
 def test_build_object_blob_candidates_reports_area_as_value() -> None:
