@@ -138,6 +138,12 @@ SEQ_RING_SIZE = 256
 # 判断环形序号新旧关系使用的半环长度。
 SEQ_HALF_RING = 128
 
+# ChromaForge 导出的色块合并间距。
+OBJECT_BLOB_MERGE_MARGIN = 0
+# ChromaForge 导出的最小识别色块面积。
+OBJECT_BLOB_PIXELS_THRESHOLD = 200
+# ChromaForge 导出的最小识别目标面积。
+OBJECT_BLOB_AREA_THRESHOLD = 200
 # 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
 TASKS = (
     (
@@ -565,7 +571,10 @@ def blob_matches_all_thresholds(img, blob, thresholds):
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     for threshold in thresholds[1:]:
         blobs = img.find_blobs(
-            [threshold], pixels_threshold=200, area_threshold=200, merge=True
+            [threshold],
+            pixels_threshold=OBJECT_BLOB_PIXELS_THRESHOLD,
+            area_threshold=OBJECT_BLOB_AREA_THRESHOLD,
+            merge=True,
         )
         matched = False
         for other_blob in blobs:
@@ -590,7 +599,10 @@ def build_blob_candidates(img):
         if len(thresholds) <= 0:
             continue
         blobs = img.find_blobs(
-            [thresholds[0]], pixels_threshold=200, area_threshold=200, merge=True
+            [thresholds[0]],
+            pixels_threshold=OBJECT_BLOB_PIXELS_THRESHOLD,
+            area_threshold=OBJECT_BLOB_AREA_THRESHOLD,
+            merge=True,
         )
         if not blobs:
             continue

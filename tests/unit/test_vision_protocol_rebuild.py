@@ -216,6 +216,8 @@ def test_follow_color_tasks_use_runtime_config() -> None:
     """跟随模式候选提取直接使用当前配置的任务表."""
     module = load_main_module("vision_main_test_module_unit")
     module.FOLLOW_TASKS = (("runtime_follow", (1, 2, 3, 4, 5, 6)),)
+    module.OBJECT_BLOB_PIXELS_THRESHOLD = 12
+    module.OBJECT_BLOB_AREA_THRESHOLD = 40
 
     class FakeBlob:
         def rect(self):
@@ -247,7 +249,7 @@ def test_follow_color_tasks_use_runtime_config() -> None:
     img = FakeImage()
     candidates = module.build_blob_candidates(img)
 
-    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 200, 200, True)]
+    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 12, 40, True)]
     assert candidates[0][0] == "runtime_follow"
 
 
@@ -255,6 +257,8 @@ def test_object_color_tasks_use_runtime_config() -> None:
     """找物体候选提取直接使用当前配置的任务表."""
     module = load_main_module("vision_main_test_module_unit")
     module.OBJECT_TASKS = (("runtime_object", (6, 5, 4, 3, 2, 1)),)
+    module.OBJECT_BLOB_PIXELS_THRESHOLD = 12
+    module.OBJECT_BLOB_AREA_THRESHOLD = 40
 
     class FakeBlob:
         def rect(self):
@@ -283,7 +287,7 @@ def test_object_color_tasks_use_runtime_config() -> None:
     img = FakeImage()
     candidates = module.build_object_blob_candidates(img)
 
-    assert img.calls == [([(6, 5, 4, 3, 2, 1)], 200, 200, True)]
+    assert img.calls == [([(6, 5, 4, 3, 2, 1)], 12, 40, True)]
     assert candidates[0][0] == "runtime_object"
 
 

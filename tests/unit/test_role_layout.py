@@ -64,3 +64,26 @@ def test_role_build_scripts_copy_local_main_to_device_entry(tmp_path) -> None:
         assert copied.read_text(encoding="utf-8") == role_main_path(role).read_text(
             encoding="utf-8"
         )
+
+
+def test_root_build_script_generates_both_role_entries(tmp_path) -> None:
+    """! @brief 根构建脚本生成主车和辅车两个角色入口"""
+
+    env = dict(os.environ)
+    env["BUILD_DIR"] = str(tmp_path)
+
+    subprocess.run(
+        ["bash", "build.sh"],
+        cwd=str(ROOT),
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    master_output = tmp_path / "master" / "main.py"
+    assistant_output = tmp_path / "assistant" / "main.py"
+    assert master_output.is_file()
+    assert assistant_output.is_file()
+    assert "TASKS = (" in master_output.read_text(encoding="utf-8")
+    assert "OBJECT_TASKS = (" in assistant_output.read_text(encoding="utf-8")

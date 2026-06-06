@@ -1149,6 +1149,8 @@ def test_master_blob_candidates_use_runtime_task_config() -> None:
 
     module = load_master()
     module.TASKS = (("runtime_target", (9, 8, 7, 6, 5, 4)),)
+    module.OBJECT_BLOB_PIXELS_THRESHOLD = 12
+    module.OBJECT_BLOB_AREA_THRESHOLD = 40
 
     class FakeBlob:
         def rect(self):
@@ -1174,7 +1176,7 @@ def test_master_blob_candidates_use_runtime_task_config() -> None:
     img = FakeImage()
     candidates = module.build_blob_candidates(img)
 
-    assert img.calls == [([(9, 8, 7, 6, 5, 4)], 200, 200, True)]
+    assert img.calls == [([(9, 8, 7, 6, 5, 4)], 12, 40, True)]
     assert candidates[0][0] == "runtime_target"
 
 

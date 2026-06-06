@@ -90,7 +90,19 @@
 
 ## 角色部署
 
-每个角色目录提供独立构建脚本, 脚本会把本目录的 `main.py` 复制为设备根目录的 `main.py`。
+根目录构建脚本会读取 `tools/chromaforge-rules.json`, 校验后生成主车和辅车两个角色入口。
+
+```bash
+bash build.sh
+```
+
+默认输出目录为 `build/`。需要指定输出目录时使用 `BUILD_DIR`:
+
+```bash
+BUILD_DIR=/path/to/build bash build.sh
+```
+
+每个角色目录也提供独立部署脚本, 脚本会把本目录的 `main.py` 复制为设备根目录的 `main.py`。
 
 ```bash
 ./assistant/build.sh
@@ -103,6 +115,21 @@
 TARGET_DIR=/path/to/device ./assistant/build.sh
 TARGET_DIR=/path/to/device ./master/build.sh
 ```
+
+## ChromaForge 色彩标定接入
+
+`tools/chromaforge_export_adapter.py` 负责把同目录的 `chromaforge-rules.json` 转为 OpenART 入口可用的识别配置。规则文件每次运行都会校验。
+
+手动生成单个入口:
+
+```bash
+uv run python tools/chromaforge_export_adapter.py \
+  --source master/main.py \
+  --output /tmp/master-main.py \
+  --task-constant-name TASKS
+```
+
+只需要配置片段时省略 `--source` 和 `--output`。
 
 ## 验证命令
 

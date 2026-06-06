@@ -82,6 +82,12 @@ EVENT_ALIGNED = 7
 # RETURN_GARAGE_FINISHED 事件编号。
 EVENT_RETURN_GARAGE_FINISHED = 12
 
+# ChromaForge 导出的色块合并间距。
+OBJECT_BLOB_MERGE_MARGIN = 0
+# ChromaForge 导出的最小识别色块面积。
+OBJECT_BLOB_PIXELS_THRESHOLD = 200
+# ChromaForge 导出的最小识别目标面积。
+OBJECT_BLOB_AREA_THRESHOLD = 200
 # 跟随模式使用的色标阈值。
 FOLLOW_TASKS = (("marker", (35, 100, 50, 127, -128, 127)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
@@ -169,7 +175,7 @@ RETURN_LINE_TARGET_Y_PX = 220.0
 # 回库黄线 Y 死区，单位像素。
 RETURN_LINE_DEADZONE_Y_PX = 4.0
 # 回库黄线纵向速度 P 环增益。
-RETURN_LINE_KP_Y = -0.08
+RETURN_LINE_KP_Y = -0.05
 # 回库黄线纵向速度限幅。
 RETURN_LINE_MAX_VY = 5.0
 # 回库黄线纵向最小有效速度。
@@ -708,7 +714,10 @@ def blob_matches_all_thresholds(img, blob, thresholds):
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     for threshold in thresholds[1:]:
         blobs = img.find_blobs(
-            [threshold], pixels_threshold=200, area_threshold=200, merge=True
+            [threshold],
+            pixels_threshold=OBJECT_BLOB_PIXELS_THRESHOLD,
+            area_threshold=OBJECT_BLOB_AREA_THRESHOLD,
+            merge=True,
         )
         matched = False
         for other_blob in blobs:
@@ -731,7 +740,10 @@ def build_blob_candidates(img):
     img_height = img.height()
     for task_name, threshold in FOLLOW_TASKS:
         blobs = img.find_blobs(
-            [threshold], pixels_threshold=200, area_threshold=200, merge=True
+            [threshold],
+            pixels_threshold=OBJECT_BLOB_PIXELS_THRESHOLD,
+            area_threshold=OBJECT_BLOB_AREA_THRESHOLD,
+            merge=True,
         )
         for blob in blobs:
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
@@ -759,7 +771,10 @@ def build_object_blob_candidates(img):
         if len(thresholds) <= 0:
             continue
         blobs = img.find_blobs(
-            [thresholds[0]], pixels_threshold=200, area_threshold=200, merge=True
+            [thresholds[0]],
+            pixels_threshold=OBJECT_BLOB_PIXELS_THRESHOLD,
+            area_threshold=OBJECT_BLOB_AREA_THRESHOLD,
+            merge=True,
         )
         for blob in blobs:
             if not blob_matches_all_thresholds(img, blob, thresholds):
