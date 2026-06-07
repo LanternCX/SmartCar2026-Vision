@@ -138,10 +138,22 @@ SEQ_RING_SIZE = 256
 # 判断环形序号新旧关系使用的半环长度。
 SEQ_HALF_RING = 128
 
+# ChromaForge 导出的色块合并间距。
+OBJECT_BLOB_MERGE_MARGIN = 0
+# ChromaForge 导出的最小识别色块面积。
+OBJECT_BLOB_PIXELS_THRESHOLD = 200
+# ChromaForge 导出的最小识别目标面积。
+OBJECT_BLOB_AREA_THRESHOLD = 200
 # 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
-TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
+TASKS = (
+    ('brown', ((15, 37, -11, 20, 8, 31),), 3, 10, 50, 80, False),
+    ('red', ((16, 39, 21, 60, 0, 49),), 3, 10, 15, 60, True),
+    ('green', ((29, 89, -54, -29, 2, 84),), 3, 10, 15, 60, True),
+    ('blue', ((32, 57, -11, 12, -50, -23),), 3, 10, 20, 60, True),
+    ('white', ((58, 70, -11, 9, -11, 9),), 3, 10, 30, 80, True),
+)
 # 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
-FINISH_HOOK_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
+FINISH_HOOK_YELLOW_THRESHOLD = (46, 75, -32, -1, 19, 70)
 # 回库黄线采样半宽, 单位像素。
 RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX = 5
 # 回库黄线目标 Y 坐标。
@@ -160,6 +172,8 @@ RETURN_GARAGE_LINE_MIN_SPEED = 0.0
 RETURN_GARAGE_LINE_MAX_THICKNESS_PX = 30
 # 回库黄线候选点左右水平联通黄线的最小合计长度, 单位像素。
 RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
+# 主车物体识别调试绘制总开关。
+MASTER_OBJECT_DEBUG_DRAW_ENABLED = False
 
 _I16_MIN = -32768
 _I16_MAX = 32767
@@ -531,6 +545,155 @@ def blob_area(blob):
     return float((right - left) * (bottom - top))
 
 
+def blob_max_side_length(blob):
+    """! @brief 读取候选物体外接框的最大边长"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    return max(float(right - left), float(bottom - top))
+
+
+def task_thresholds(thresholds):
+    """! @brief 统一读取单 LAB 与多 LAB 任务配置"""
+
+    if len(thresholds) == 6 and not isinstance(thresholds[0], (tuple, list)):
+        return (thresholds,)
+    return thresholds
+
+
+def object_task_parts(task):
+    """! @brief 兼容读取旧版与新版找物体任务配置"""
+
+    if len(task) >= 7:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            max(0, int(task[5])),
+            bool(task[6]),
+        )
+    if len(task) >= 6:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            0,
+            bool(task[5]),
+        )
+    if len(task) >= 5:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            0,
+            True,
+        )
+    return (
+        task[0],
+        task_thresholds(task[1]),
+        OBJECT_BLOB_MERGE_MARGIN,
+        OBJECT_BLOB_PIXELS_THRESHOLD,
+        OBJECT_BLOB_AREA_THRESHOLD,
+        0,
+        True,
+    )
+
+
+def object_task_id(task_name):
+    """! @brief 根据任务名称返回物体编号"""
+
+    index = 1
+    for task in TASKS:
+        if task[0] == task_name:
+            return index
+        index += 1
+    return 0
+
+
+def _find_blobs_with_task_config(
+    img, thresholds, pixels_threshold, area_threshold, merge_margin
+):
+    """! @brief 按当前任务配置调用板端找色块接口"""
+
+    try:
+        return img.find_blobs(
+            list(thresholds),
+            pixels_threshold=pixels_threshold,
+            area_threshold=1,
+            merge=True,
+            margin=max(0, int(merge_margin)),
+        )
+    except TypeError:
+        return img.find_blobs(
+            list(thresholds),
+            pixels_threshold=pixels_threshold,
+            area_threshold=1,
+            merge=True,
+        )
+
+
+def _blob_code(blob):
+    """! @brief 读取合并色块的颜色码"""
+
+    code_fn = getattr(blob, "code", None)
+    if code_fn is not None:
+        return int(code_fn())
+    try:
+        return int(blob[8])
+    except Exception:
+        return None
+
+
+def _blob_matches_required_thresholds(blob, threshold_count, require_all_thresholds):
+    """! @brief 判断色块是否满足当前任务的颜色簇命中要求"""
+
+    if int(threshold_count) <= 1 or not bool(require_all_thresholds):
+        return True
+    code = _blob_code(blob)
+    if code is None:
+        return True
+    expected_code = (1 << int(threshold_count)) - 1
+    return (code & expected_code) == expected_code
+
+
+def blob_bbox_overlaps(left, top, right, bottom, other_blob):
+    """! @brief 判断两个候选框是否存在有效重叠"""
+
+    other_left, other_top, other_right, other_bottom = blob_rect_to_bbox(
+        other_blob.rect()
+    )
+    return (
+        min(float(right), float(other_right)) > max(float(left), float(other_left))
+        and min(float(bottom), float(other_bottom)) > max(float(top), float(other_top))
+    )
+
+
+def blob_matches_all_thresholds(img, blob, thresholds, pixels_threshold, area_threshold, merge):
+    """! @brief 判断候选色块是否被同一目标的全部 LAB 阈值命中"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    for threshold in thresholds[1:]:
+        blobs = img.find_blobs(
+            [threshold],
+            pixels_threshold=pixels_threshold,
+            area_threshold=area_threshold,
+            merge=merge,
+        )
+        matched = False
+        for other_blob in blobs:
+            if blob_bbox_overlaps(left, top, right, bottom, other_blob):
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
 def build_blob_candidates(img):
     """! @brief 提取物体候选目标, 面积作为目标强度
 
@@ -539,14 +702,41 @@ def build_blob_candidates(img):
     """
 
     candidates = []
-    for task_name, threshold in TASKS:
-        blobs = img.find_blobs(
-            [threshold], pixels_threshold=200, area_threshold=200, merge=True
+    for task in TASKS:
+        (
+            task_name,
+            thresholds,
+            merge_margin,
+            pixels_threshold,
+            area_threshold,
+            max_side_length,
+            require_all_thresholds,
+        ) = object_task_parts(task)
+        if len(thresholds) <= 0:
+            continue
+        blobs = _find_blobs_with_task_config(
+            img,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge_margin,
         )
         if not blobs:
             continue
         img_height = img.height()
         for blob in blobs:
+            if not _blob_matches_required_thresholds(
+                blob,
+                len(thresholds),
+                require_all_thresholds,
+            ):
+                continue
+            if blob_area(blob) < float(area_threshold):
+                continue
+            if int(max_side_length) > 0 and blob_max_side_length(blob) > float(
+                max_side_length
+            ):
+                continue
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
             _, _, _, bottom = normalize_bbox_for_protocol(
                 left, top, right, bottom, img_height
@@ -670,8 +860,15 @@ def get_marker_corners(blob):
     return ((left, top), (right, top), (right, bottom), (left, bottom))
 
 
+def get_blob_rect(blob):
+    """! @brief 返回候选色块的标准矩形框"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    return (left, top, right - left, bottom - top)
+
+
 def draw_selected_marker(img, blob, pixel_x, pixel_y):
-    """! @brief 在调试画面上绘制选中物体角点与中心
+    """! @brief 在调试画面上绘制选中物体矩形框
 
     @param img 当前图像对象
     @param blob 被选中的候选色块对象
@@ -679,9 +876,23 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     @param pixel_y 目标标记 y 坐标
     """
 
-    for corner_x, corner_y in get_marker_corners(blob):
-        img.draw_cross(corner_x, corner_y)
-    img.draw_cross(pixel_x, pixel_y)
+    _ = pixel_x
+    _ = pixel_y
+    _draw_debug_rectangle(img, get_blob_rect(blob))
+
+
+def draw_blob_candidates_debug(img, candidates):
+    """! @brief 在调试画面上绘制当前识别到的全部物体
+
+    @param img 当前图像对象
+    @param candidates 当前帧候选目标列表
+    """
+
+    for task_name, pixel_x, _, _, blob in candidates:
+        color = _debug_color_for_task_name(task_name)
+        _ = pixel_x
+        _draw_debug_rectangle_with_color(img, get_blob_rect(blob), color)
+        _draw_debug_text_with_color(img, pixel_x + 4, blob.cy() - 6, task_name, color)
 
 
 def _clamp(value, limit):
@@ -1335,6 +1546,14 @@ class MasterVisionHook:
             return int(float(hook_value or 0.0))
         if self.is_return_line_context():
             return int(float(value))
+        if (
+            self.context is not None
+            and int(self.context["state"]) == STATE_SEARCH_OBJECT
+            and int(self.context["target"]) == TARGET_OBJECT
+            and int(self.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
+            and hook_value is not None
+        ):
+            return int(hook_value)
         return int(float(value))
 
     def _resolve_event_type(self):
@@ -1523,27 +1742,54 @@ def build_observation_from_image(hook, img, image_width, image_height):
     @return observation, best_blob 元组
     """
 
+    observation, best_blob, _, _ = build_observation_and_candidates_from_image(
+        hook,
+        img,
+        image_width,
+        image_height,
+    )
+    return observation, best_blob
+
+
+def build_observation_and_candidates_from_image(hook, img, image_width, image_height):
+    """! @brief 从图像生成一帧物体观测并返回全部候选色块"""
+
     candidates = build_blob_candidates(img)
     if not candidates:
-        return hook.build_observation(0, 0, 0, 0, image_width, image_height), None
+        return (
+            hook.build_observation(0, 0, 0, 0, image_width, image_height),
+            None,
+            None,
+            candidates,
+        )
     target_x, target_y = build_search_target_point(
         image_width,
         image_height,
         hook.current_target_config_id(),
     )
-    _, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
+    task_name, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
         candidates, target_x, target_y
     )
     return (
         hook.build_observation(1, pixel_x, bottom_y, area, image_width, image_height),
         best_blob,
+        task_name,
+        candidates,
     )
 
 
-def build_hook_event_value(hook, img, best_blob, image_width, image_height):
+def build_hook_event_value(hook, img, best_blob, image_width, image_height, task_name=None):
     """! @brief 根据当前 hook 生成事件附加判定值"""
 
     if not hook.is_finish_hook_context():
+        if (
+            hook.context is not None
+            and int(hook.context["state"]) == STATE_SEARCH_OBJECT
+            and int(hook.context["target"]) == TARGET_OBJECT
+            and int(hook.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
+            and task_name is not None
+        ):
+            return object_task_id(task_name)
         return None
     return build_finish_hook_yellow_ratio_percent(
         img,
@@ -1594,6 +1840,31 @@ def _draw_debug_cross(img, x, y):
         draw_cross(int(x), int(y))
 
 
+def _draw_debug_rectangle(img, rect):
+    draw_rectangle = getattr(img, "draw_rectangle", None)
+    if draw_rectangle is None:
+        return
+    x, y, w, h = rect
+    try:
+        draw_rectangle(int(x), int(y), int(w), int(h))
+    except TypeError:
+        draw_rectangle((int(x), int(y), int(w), int(h)))
+
+
+def _draw_debug_rectangle_with_color(img, rect, color):
+    draw_rectangle = getattr(img, "draw_rectangle", None)
+    if draw_rectangle is None:
+        return
+    x, y, w, h = rect
+    try:
+        draw_rectangle(int(x), int(y), int(w), int(h), color=color)
+    except TypeError:
+        try:
+            draw_rectangle((int(x), int(y), int(w), int(h)), color=color)
+        except TypeError:
+            draw_rectangle((int(x), int(y), int(w), int(h)))
+
+
 def _draw_debug_text(img, x, y, text):
     draw_string = getattr(img, "draw_string", None)
     if draw_string is None:
@@ -1602,6 +1873,35 @@ def _draw_debug_text(img, x, y, text):
         draw_string(int(x), int(y), str(text), color=(255, 255, 255))
     except TypeError:
         draw_string(int(x), int(y), str(text))
+
+
+def _draw_debug_text_with_color(img, x, y, text, color):
+    draw_string = getattr(img, "draw_string", None)
+    if draw_string is None:
+        return
+    try:
+        draw_string(int(x), int(y), str(text), color=color)
+    except TypeError:
+        draw_string(int(x), int(y), str(text))
+
+
+def _debug_color_for_task_name(task_name):
+    for task in TASKS:
+        task_name_in_config, thresholds, _, _, _, _, _ = object_task_parts(task)
+        if task_name_in_config != task_name:
+            continue
+        first_threshold = task_thresholds(thresholds)[0]
+        lab_center = (
+            int((int(first_threshold[0]) + int(first_threshold[1])) / 2),
+            int((int(first_threshold[2]) + int(first_threshold[3])) / 2),
+            int((int(first_threshold[4]) + int(first_threshold[5])) / 2),
+        )
+        if omv_image is not None:
+            try:
+                return tuple(int(value) for value in omv_image.lab_to_rgb(lab_center))
+            except Exception:
+                break
+    return (255, 255, 255)
 
 
 def draw_master_return_line_debug(img, image_width, image_height, line_y, vx, vy):
@@ -1678,17 +1978,44 @@ def process_search_frame(uart, hook, img, image_width, image_height):
             write_reliable_line(uart, event_frame)
         if not hook.is_return_line_context():
             return
+    candidates = None
+    if MASTER_OBJECT_DEBUG_DRAW_ENABLED and not hook.is_return_line_context():
+        candidates = build_blob_candidates(img)
+        draw_blob_candidates_debug(img, candidates)
     if not hook.has_context():
         return
     if hook.is_return_line_context():
         _process_return_line_frame(uart, hook, img, image_width, image_height)
         return
 
-    observation, best_blob = build_observation_from_image(
-        hook, img, image_width, image_height
-    )
+    if candidates is None:
+        observation, best_blob, selected_task_name, candidates = (
+            build_observation_and_candidates_from_image(
+                hook,
+                img,
+                image_width,
+                image_height,
+            )
+        )
+    else:
+        selected_task_name = None
+        target_x, target_y = build_search_target_point(
+            image_width,
+            image_height,
+            hook.current_target_config_id(),
+        )
+        if not candidates:
+            observation = hook.build_observation(0, 0, 0, 0, image_width, image_height)
+            best_blob = None
+        else:
+            selected_task_name, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
+                candidates, target_x, target_y
+            )
+            observation = hook.build_observation(
+                1, pixel_x, bottom_y, area, image_width, image_height
+            )
     _, x, y, _ = observation
-    if best_blob is not None:
+    if MASTER_OBJECT_DEBUG_DRAW_ENABLED and best_blob is not None:
         draw_selected_marker(
             img=img,
             blob=best_blob,
@@ -1711,6 +2038,7 @@ def process_search_frame(uart, hook, img, image_width, image_height):
             best_blob,
             image_width,
             image_height,
+            selected_task_name,
         ),
     )
 

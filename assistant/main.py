@@ -82,10 +82,22 @@ EVENT_ALIGNED = 7
 # RETURN_GARAGE_FINISHED 事件编号。
 EVENT_RETURN_GARAGE_FINISHED = 12
 
+# ChromaForge 导出的色块合并间距。
+OBJECT_BLOB_MERGE_MARGIN = 0
+# ChromaForge 导出的最小识别色块面积。
+OBJECT_BLOB_PIXELS_THRESHOLD = 200
+# ChromaForge 导出的最小识别目标面积。
+OBJECT_BLOB_AREA_THRESHOLD = 200
 # 跟随模式使用的色标阈值。
 FOLLOW_TASKS = (("marker", (35, 100, 50, 127, -128, 127)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
-OBJECT_TASKS = (("red", (0, 100, 18, 127, -23, 127)),)
+OBJECT_TASKS = (
+    ('brown', ((15, 37, -11, 20, 8, 31),), 3, 10, 50, 80, False),
+    ('red', ((16, 39, 21, 60, 0, 49),), 3, 10, 15, 60, True),
+    ('green', ((29, 89, -54, -29, 2, 84),), 3, 10, 15, 60, True),
+    ('blue', ((32, 57, -11, 12, -50, -23),), 3, 10, 20, 60, True),
+    ('white', ((58, 70, -11, 9, -11, 9),), 3, 10, 30, 80, True),
+)
 # 回库黄线使用的黄色阈值，与主车回库黄线保持一致。
 RETURN_LINE_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
 
@@ -161,7 +173,7 @@ RETURN_LINE_TARGET_Y_PX = 220.0
 # 回库黄线 Y 死区，单位像素。
 RETURN_LINE_DEADZONE_Y_PX = 4.0
 # 回库黄线纵向速度 P 环增益。
-RETURN_LINE_KP_Y = -0.08
+RETURN_LINE_KP_Y = -0.05
 # 回库黄线纵向速度限幅。
 RETURN_LINE_MAX_VY = 5.0
 # 回库黄线纵向最小有效速度。
@@ -303,6 +315,27 @@ def decode_assistant_vision_task_sync_body(body):
         "target": int(body[1]),
         "arg": _unpack_i16(body, 2),
     }
+
+
+def pack_task_arg(config_id, object_id):
+    """! @brief 把配置号与物体编号打包进同步参数槽位"""
+
+    packed = (int(config_id) & 0xFF) | ((int(object_id) & 0xFF) << 8)
+    if packed >= 0x8000:
+        packed -= 0x10000
+    return packed
+
+
+def unpack_task_arg_config(arg):
+    """! @brief 读取同步参数中的配置号"""
+
+    return int(arg) & 0xFF
+
+
+def unpack_task_arg_object_id(arg):
+    """! @brief 读取同步参数中的物体编号"""
+
+    return (int(arg) >> 8) & 0xFF
 
 
 def encode_assistant_vision_event_report_body(event, value):
@@ -674,6 +707,156 @@ def blob_area(blob):
     return float((right - left) * (bottom - top))
 
 
+def blob_max_side_length(blob):
+    """! @brief 读取候选物体外接框的最大边长"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    return max(float(right - left), float(bottom - top))
+
+
+def task_thresholds(thresholds):
+    """! @brief 统一读取单 LAB 与多 LAB 任务配置"""
+
+    if len(thresholds) == 6 and not isinstance(thresholds[0], (tuple, list)):
+        return (thresholds,)
+    return thresholds
+
+
+def object_task_parts(task):
+    """! @brief 兼容读取旧版与新版找物体任务配置"""
+
+    if len(task) >= 7:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            max(0, int(task[5])),
+            bool(task[6]),
+        )
+    if len(task) >= 6:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            0,
+            bool(task[5]),
+        )
+    if len(task) >= 5:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            0,
+            True,
+        )
+    return (
+        task[0],
+        task_thresholds(task[1]),
+        OBJECT_BLOB_MERGE_MARGIN,
+        OBJECT_BLOB_PIXELS_THRESHOLD,
+        OBJECT_BLOB_AREA_THRESHOLD,
+        0,
+        True,
+    )
+
+
+def object_task_name_from_id(object_id):
+    """! @brief 根据物体编号返回配置中的任务名称"""
+
+    object_id = int(object_id)
+    if object_id <= 0:
+        return None
+    index = object_id - 1
+    if index >= len(OBJECT_TASKS):
+        return None
+    return OBJECT_TASKS[index][0]
+
+
+def _find_blobs_with_task_config(
+    img, thresholds, pixels_threshold, area_threshold, merge_margin
+):
+    """! @brief 按当前任务配置调用板端找色块接口"""
+
+    try:
+        return img.find_blobs(
+            list(thresholds),
+            pixels_threshold=pixels_threshold,
+            area_threshold=1,
+            merge=True,
+            margin=max(0, int(merge_margin)),
+        )
+    except TypeError:
+        return img.find_blobs(
+            list(thresholds),
+            pixels_threshold=pixels_threshold,
+            area_threshold=1,
+            merge=True,
+        )
+
+
+def _blob_code(blob):
+    """! @brief 读取合并色块的颜色码"""
+
+    code_fn = getattr(blob, "code", None)
+    if code_fn is not None:
+        return int(code_fn())
+    try:
+        return int(blob[8])
+    except Exception:
+        return None
+
+
+def _blob_matches_required_thresholds(blob, threshold_count, require_all_thresholds):
+    """! @brief 判断色块是否满足当前任务的颜色簇命中要求"""
+
+    if int(threshold_count) <= 1 or not bool(require_all_thresholds):
+        return True
+    code = _blob_code(blob)
+    if code is None:
+        return True
+    expected_code = (1 << int(threshold_count)) - 1
+    return (code & expected_code) == expected_code
+
+
+def blob_bbox_overlaps(left, top, right, bottom, other_blob):
+    """! @brief 判断两个候选框是否存在有效重叠"""
+
+    other_left, other_top, other_right, other_bottom = blob_rect_to_bbox(
+        other_blob.rect()
+    )
+    return (
+        min(float(right), float(other_right)) > max(float(left), float(other_left))
+        and min(float(bottom), float(other_bottom)) > max(float(top), float(other_top))
+    )
+
+
+def blob_matches_all_thresholds(img, blob, thresholds, pixels_threshold, area_threshold, merge):
+    """! @brief 判断候选色块是否被同一目标的全部 LAB 阈值命中"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    for threshold in thresholds[1:]:
+        blobs = img.find_blobs(
+            [threshold],
+            pixels_threshold=pixels_threshold,
+            area_threshold=area_threshold,
+            merge=merge,
+        )
+        matched = False
+        for other_blob in blobs:
+            if blob_bbox_overlaps(left, top, right, bottom, other_blob):
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
 def build_blob_candidates(img):
     """! @brief 提取跟随模式颜色候选目标的重心、底边与尺度量信息
 
@@ -685,7 +868,10 @@ def build_blob_candidates(img):
     img_height = img.height()
     for task_name, threshold in FOLLOW_TASKS:
         blobs = img.find_blobs(
-            [threshold], pixels_threshold=200, area_threshold=200, merge=True
+            [threshold],
+            pixels_threshold=OBJECT_BLOB_PIXELS_THRESHOLD,
+            area_threshold=OBJECT_BLOB_AREA_THRESHOLD,
+            merge=True,
         )
         for blob in blobs:
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
@@ -708,11 +894,38 @@ def build_object_blob_candidates(img):
 
     candidates = []
     img_height = img.height()
-    for task_name, threshold in OBJECT_TASKS:
-        blobs = img.find_blobs(
-            [threshold], pixels_threshold=200, area_threshold=200, merge=True
+    for task in OBJECT_TASKS:
+        (
+            task_name,
+            thresholds,
+            merge_margin,
+            pixels_threshold,
+            area_threshold,
+            max_side_length,
+            require_all_thresholds,
+        ) = object_task_parts(task)
+        if len(thresholds) <= 0:
+            continue
+        blobs = _find_blobs_with_task_config(
+            img,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge_margin,
         )
         for blob in blobs:
+            if not _blob_matches_required_thresholds(
+                blob,
+                len(thresholds),
+                require_all_thresholds,
+            ):
+                continue
+            if blob_area(blob) < float(area_threshold):
+                continue
+            if int(max_side_length) > 0 and blob_max_side_length(blob) > float(
+                max_side_length
+            ):
+                continue
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
             _, _, _, bottom = normalize_bbox_for_protocol(
                 left, top, right, bottom, img_height
@@ -870,7 +1083,7 @@ def choose_best_candidate(candidates, cx_screen, img_height):
 
 
 def draw_selected_marker(img, blob, pixel_x, pixel_y):
-    """! @brief 在调试画面上绘制当前选中目标的四角与中心
+    """! @brief 在调试画面上绘制当前选中目标的矩形框
 
     @param img 当前图像对象
     @param blob 当前选中的色块对象
@@ -878,9 +1091,18 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     @param pixel_y 当前目标中心 y
     """
 
-    for corner_x, corner_y in get_marker_corners(blob):
-        img.draw_cross(corner_x, corner_y)
-    img.draw_cross(pixel_x, pixel_y)
+    _ = pixel_x
+    _ = pixel_y
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    width = int(right) - int(left)
+    height = int(bottom) - int(top)
+    draw_rectangle = getattr(img, "draw_rectangle", None)
+    if draw_rectangle is None:
+        return
+    try:
+        draw_rectangle(int(left), int(top), int(width), int(height))
+    except TypeError:
+        draw_rectangle((int(left), int(top), int(width), int(height)))
 
 
 def build_object_observation(
@@ -1132,21 +1354,22 @@ class AssistantVisionState:
             int(sync["state"]) == STATE_APPROACH_OBJECT
             and int(sync["target"]) == TARGET_OBJECT
             and (
-                int(sync["arg"]) == OBJECT_APPROACH_CONFIG_ID
-                or int(sync["arg"]) == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+                unpack_task_arg_config(sync["arg"]) == OBJECT_APPROACH_CONFIG_ID
+                or unpack_task_arg_config(sync["arg"])
+                == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
             )
         ):
             return MODE_APPROACH_OBJECT
         if (
             int(sync["state"]) == STATE_ORBIT
             and int(sync["target"]) == TARGET_OBJECT
-            and int(sync["arg"]) == ASSISTANT_ORBIT_OBJECT_CONFIG_ID
+            and unpack_task_arg_config(sync["arg"]) == ASSISTANT_ORBIT_OBJECT_CONFIG_ID
         ):
             return MODE_ORBIT_OBJECT
         if (
             int(sync["state"]) == STATE_RETURN_FOLLOW
             and int(sync["target"]) == TARGET_NONE
-            and int(sync["arg"]) == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
+            and unpack_task_arg_config(sync["arg"]) == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
         ):
             return MODE_RETURN_LINE
         return MODE_FOLLOW
@@ -1156,7 +1379,14 @@ class AssistantVisionState:
 
         if self.current_sync is None:
             return OBJECT_APPROACH_CONFIG_ID
-        return int(self.current_sync["arg"])
+        return unpack_task_arg_config(self.current_sync["arg"])
+
+    def current_object_id(self):
+        """! @brief 返回当前指定的物体编号"""
+
+        if self.current_sync is None:
+            return 0
+        return unpack_task_arg_object_id(self.current_sync["arg"])
 
     def last_return_line_y(self):
         """! @brief 返回上一帧有效回库黄线 Y"""
@@ -1264,23 +1494,23 @@ class AssistantVisionState:
             return None
         state = int(self.current_sync["state"])
         target = int(self.current_sync["target"])
-        arg = int(self.current_sync["arg"])
+        config_id = unpack_task_arg_config(self.current_sync["arg"])
         if (
             state == STATE_APPROACH_OBJECT
             and target == TARGET_OBJECT
-            and arg == OBJECT_APPROACH_CONFIG_ID
+            and config_id == OBJECT_APPROACH_CONFIG_ID
         ):
             return EVENT_TARGET_FOUND
         if (
             state == STATE_APPROACH_OBJECT
             and target == TARGET_OBJECT
-            and arg == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+            and config_id == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
         ):
             return EVENT_ALIGNED
         if (
             state == STATE_RETURN_FOLLOW
             and target == TARGET_NONE
-            and arg == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
+            and config_id == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
         ):
             return EVENT_RETURN_GARAGE_FINISHED
         return None
@@ -1486,6 +1716,13 @@ def process_object_frame(uart, state, img, image_width, image_height):
     """
 
     candidates = build_object_blob_candidates(img)
+    object_id = state.current_object_id()
+    if object_id > 0:
+        selected_task_name = object_task_name_from_id(object_id)
+        if selected_task_name is not None:
+            candidates = [
+                candidate for candidate in candidates if candidate[0] == selected_task_name
+            ]
     if not candidates:
         observation = build_object_observation(0, 0, 0, 0, image_width, image_height)
     else:

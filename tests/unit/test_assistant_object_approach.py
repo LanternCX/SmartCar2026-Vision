@@ -45,6 +45,13 @@ IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
 
 
+def pack_task_arg(config_id, object_id):
+    packed = (int(config_id) & 0xFF) | ((int(object_id) & 0xFF) << 8)
+    if packed >= 0x8000:
+        packed -= 0x10000
+    return packed
+
+
 def assistant_target_point(module, config_id=None):
     """返回当前指定配置的找物体目标点."""
 
@@ -238,11 +245,79 @@ def test_assistant_sync_packet_switches_to_object_mode_and_replies_ack() -> None
     assert_assistant_ack(
         module,
         state.handle_control_line(
-            assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+            assistant_sync_frame(
+                12,
+                module.STATE_APPROACH_OBJECT,
+                module.TARGET_OBJECT,
+                pack_task_arg(1, 2),
+            )
         ),
         12,
     )
     assert state.mode == module.MODE_APPROACH_OBJECT
+    assert state.current_object_config_id() == 1
+
+
+def test_assistant_sync_packet_exposes_selected_object_id() -> None:
+    module = load_assistant()
+    state = module.AssistantVisionState()
+
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(1, 2),
+        )
+    )
+
+    assert state.current_object_id() == 2
+
+
+def test_assistant_packed_approach_sync_still_emits_target_found_event() -> None:
+    module = load_assistant()
+    state = module.AssistantVisionState(stable_frames=1)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.OBJECT_APPROACH_CONFIG_ID, 2),
+        )
+    )
+
+    state.accept_object_observation(centered_object_observation(module, 180))
+
+    assert_assistant_event(
+        module,
+        state.next_event_frame(),
+        12,
+        module.EVENT_TARGET_FOUND,
+        180,
+    )
+
+
+def test_assistant_packed_transport_sync_still_emits_aligned_event() -> None:
+    module = load_assistant()
+    state = module.AssistantVisionState(stable_frames=1)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 2),
+        )
+    )
+
+    state.accept_object_observation(centered_transport_observation(module, 180))
+
+    assert_assistant_event(
+        module,
+        state.next_event_frame(),
+        12,
+        module.EVENT_ALIGNED,
+        180,
+    )
 
 
 def test_assistant_sync_packet_switches_to_orbit_correction_mode() -> None:
@@ -258,13 +333,92 @@ def test_assistant_sync_packet_switches_to_orbit_correction_mode() -> None:
                 12,
                 module.STATE_ORBIT,
                 module.TARGET_OBJECT,
-                module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+                pack_task_arg(module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID, 2),
             )
         ),
         12,
     )
     assert state.mode == module.MODE_ORBIT_OBJECT
-    assert state.current_object_config_id() == module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID
+
+
+def test_process_object_frame_filters_candidates_by_selected_object_id() -> None:
+    module = load_assistant()
+    module.OBJECT_TASKS = (
+        ("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),
+        ("brown", ((7, 8, 9, 10, 11, 12),), 0, 1, 1, True),
+    )
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.OBJECT_APPROACH_CONFIG_ID, 2),
+        )
+    )
+
+    target_x, target_y = assistant_target_point(module, module.OBJECT_APPROACH_CONFIG_ID)
+
+    class RedBlob:
+        def rect(self):
+            return (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10
+
+        def area(self):
+            return 300
+
+    class BrownBlob:
+        def rect(self):
+            return (target_x + 30, IMAGE_HEIGHT - target_y - 20, 20, 20)
+
+        def cx(self):
+            return target_x + 40
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y - 10
+
+        def area(self):
+            return 300
+
+    class MixedImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            if thresholds == [(1, 2, 3, 4, 5, 6)]:
+                return [RedBlob()]
+            if thresholds == [(7, 8, 9, 10, 11, 12)]:
+                return [BrownBlob()]
+            return []
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+    uart = FakeUART()
+    module.process_object_frame(uart, state, MixedImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert_velocity_frame(
+        module,
+        uart.writes[0],
+        expected_axis_velocity(
+            40.0,
+            module.OBJECT_APPROACH_KP_X,
+            module.OBJECT_APPROACH_MIN_SPEED,
+            module.OBJECT_APPROACH_MAX_VX,
+        ),
+        expected_object_y_velocity(module, 20.0),
+    )
+    assert state.current_object_config_id() == module.OBJECT_APPROACH_CONFIG_ID
+    assert state.current_object_id() == 2
 
 
 def test_assistant_orbit_correction_uses_independent_velocity_params_without_event() -> None:
