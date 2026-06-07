@@ -42,15 +42,13 @@ def test_role_main_files_avoid_board_unstable_int_byte_helpers() -> None:
 
 
 def test_role_build_scripts_generate_and_upload_role_entry(tmp_path) -> None:
-    """! @brief 每个角色构建脚本读取共享标定文件并上传本角色入口"""
+    """! @brief 每个角色构建脚本读取共享标定文件并把源码入口上传到设备"""
 
     for role in ("assistant", "master"):
-        output_dir = tmp_path / role
         target_dir = tmp_path / (role + "-device")
         target_dir.mkdir()
         script_path = ROOT / role / "build.sh"
         env = dict(os.environ)
-        env["OUTPUT_DIR"] = str(output_dir)
         env["TARGET_DIR"] = str(target_dir)
 
         subprocess.run(
@@ -62,7 +60,7 @@ def test_role_build_scripts_generate_and_upload_role_entry(tmp_path) -> None:
             text=True,
         )
 
-        built = output_dir / "main.py"
+        built = role_main_path(role)
         uploaded = target_dir / "main.py"
         assert built.is_file()
         assert uploaded.is_file()

@@ -10,7 +10,7 @@
 常用命令：
 
 ```bash
-python3 -m pytest tests/unit -q
-python3 -m pytest tests/contract -q
-python3 -m pytest tests/unit tests/contract -q
+PYTHONPATH=. uv run pytest tests/unit -q
+PYTHONPATH=. uv run pytest tests/contract -q
+PYTHONPATH=. uv run pytest tests/unit tests/contract -q
 ```

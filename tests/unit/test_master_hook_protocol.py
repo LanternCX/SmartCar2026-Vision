@@ -742,7 +742,7 @@ class ReturnGarageYellowImage:
             self._left <= logical_x <= self._right
             and self._top <= logical_y <= self._bottom
         ):
-            return (50, 0, 50)
+            return (50, -10, 50)
         return (0, 0, 0)
 
 
@@ -1498,7 +1498,7 @@ def test_master_target_found_sends_stable_zero_before_event() -> None:
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
     assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
-    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 300)
+    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 1)
 
 
 def test_master_search_frame_uses_task_id_as_target_found_event_value() -> None:
@@ -1572,8 +1572,8 @@ def test_master_pending_event_suppresses_velocity_between_retries() -> None:
 
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
-    assert_master_event(module, uart.writes[1], 30, 7, module.EVENT_TARGET_FOUND, 300)
-    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 300)
+    assert_master_event(module, uart.writes[1], 30, 7, module.EVENT_TARGET_FOUND, 1)
+    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 1)
 
 
 def test_master_transport_finish_hook_does_not_arrive_on_yellow_contact_only() -> None:

@@ -90,18 +90,18 @@
 
 ## 角色部署
 
-每个角色目录各自维护独立构建脚本。脚本会读取角色目录外部 `calibration/` 下的共享标定文件，生成本角色入口，并上传到板端目录。
+每个角色目录各自维护独立构建脚本。脚本会读取角色目录外部 `calibration/` 下的共享标定文件，更新本角色源码入口，并上传到板端目录。
 
 ```bash
 ./assistant/build.sh
 ./master/build.sh
 ```
 
-默认输出目录为 `build/<role>/`，默认板端目录为 `/Volumes/NO NAME`。需要指定输出目录或板端目录时使用 `OUTPUT_DIR` 与 `TARGET_DIR`:
+默认板端目录为 `/Volumes/NO NAME`。需要指定板端目录时使用 `TARGET_DIR`:
 
 ```bash
-OUTPUT_DIR=/path/to/output TARGET_DIR=/path/to/device ./assistant/build.sh
-OUTPUT_DIR=/path/to/output TARGET_DIR=/path/to/device ./master/build.sh
+TARGET_DIR=/path/to/device ./assistant/build.sh
+TARGET_DIR=/path/to/device ./master/build.sh
 ```
 
 ## ChromaForge 色彩标定接入

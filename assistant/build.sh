@@ -5,8 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE="$SCRIPT_DIR/main.py"
 RULES_PATH="$ROOT_DIR/calibration/chromaforge-rules.json"
-OUTPUT_DIR="${OUTPUT_DIR:-${BUILD_DIR:-$ROOT_DIR/build/assistant}}"
-OUTPUT_PATH="$OUTPUT_DIR/main.py"
 TARGET_DIR="${TARGET_DIR:-/Volumes/NO NAME}"
 TARGET_PATH="$TARGET_DIR/main.py"
 
@@ -25,17 +23,15 @@ if [ ! -d "$TARGET_DIR" ]; then
   exit 1
 fi
 
-mkdir -p "$OUTPUT_DIR"
-
 cd "$ROOT_DIR"
 
 uv run python -m calibration.chromaforge_export_adapter \
   "$RULES_PATH" \
   --source "$SOURCE" \
-  --output "$OUTPUT_PATH" \
+  --output "$SOURCE" \
   --task-constant-name OBJECT_TASKS
 
-cp "$OUTPUT_PATH" "$TARGET_PATH"
+cp "$SOURCE" "$TARGET_PATH"
 
-echo "已构建辅车入口: $OUTPUT_PATH"
+echo "已更新辅车入口: $SOURCE"
 echo "已上传辅车入口: $TARGET_PATH"

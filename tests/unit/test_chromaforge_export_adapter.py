@@ -201,7 +201,6 @@ def test_chromaforge_export_cli_uses_default_rules_file() -> None:
 
 
 def test_role_build_script_generates_master_output_from_shared_rules(tmp_path) -> None:
-    output_dir = tmp_path / "master-build"
     target_dir = tmp_path / "master-device"
     target_dir.mkdir()
 
@@ -211,14 +210,15 @@ def test_role_build_script_generates_master_output_from_shared_rules(tmp_path) -
         cwd=DEFAULT_RULES_PATH.parent.parent,
         env={
             "PATH": os.environ["PATH"],
-            "OUTPUT_DIR": str(output_dir),
             "TARGET_DIR": str(target_dir),
         },
         capture_output=True,
         text=True,
     )
 
-    result = (output_dir / "main.py").read_text(encoding="utf-8")
+    result = (DEFAULT_RULES_PATH.parent.parent / "master" / "main.py").read_text(
+        encoding="utf-8"
+    )
     uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
 
     assert "('red'" in result
@@ -227,7 +227,6 @@ def test_role_build_script_generates_master_output_from_shared_rules(tmp_path) -
 
 
 def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path) -> None:
-    output_dir = tmp_path / "assistant-build"
     target_dir = tmp_path / "assistant-device"
     target_dir.mkdir()
 
@@ -237,14 +236,15 @@ def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path
         cwd=DEFAULT_RULES_PATH.parent.parent,
         env={
             "PATH": os.environ["PATH"],
-            "OUTPUT_DIR": str(output_dir),
             "TARGET_DIR": str(target_dir),
         },
         capture_output=True,
         text=True,
     )
 
-    result = (output_dir / "main.py").read_text(encoding="utf-8")
+    result = (DEFAULT_RULES_PATH.parent.parent / "assistant" / "main.py").read_text(
+        encoding="utf-8"
+    )
     uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
 
     assert "OBJECT_TASKS = (" in result
