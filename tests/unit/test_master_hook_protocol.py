@@ -1501,6 +1501,54 @@ def test_master_target_found_sends_stable_zero_before_event() -> None:
     assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 300)
 
 
+def test_master_search_frame_uses_task_id_as_target_found_event_value() -> None:
+    module = load_master()
+    module.TASKS = (
+        ("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),
+        ("brown", ((7, 8, 9, 10, 11, 12),), 0, 1, 1, True),
+    )
+    hook = module.MasterVisionHook(stable_frames=2, next_reliable_seq=30)
+    hook.handle_control_line(search_hook_control_line(module))
+
+    class BrownBlob:
+        def rect(self):
+            return (150, 30, 20, 30)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 45
+
+        def area(self):
+            return 300
+
+    class BrownOnlyImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            if thresholds == [(7, 8, 9, 10, 11, 12)]:
+                return [BrownBlob()]
+            return []
+
+        def draw_rectangle(self, x, y, w, h, color=None):
+            _ = (x, y, w, h, color)
+
+    uart = FakeUART()
+    img = BrownOnlyImage()
+
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 2)
+
+
 def test_master_pending_event_suppresses_velocity_between_retries() -> None:
     """! @brief 可靠事件等待确认期间不再继续输出速度流"""
 

@@ -600,6 +600,17 @@ def object_task_parts(task):
     )
 
 
+def object_task_id(task_name):
+    """! @brief 根据任务名称返回物体编号"""
+
+    index = 1
+    for task in TASKS:
+        if task[0] == task_name:
+            return index
+        index += 1
+    return 0
+
+
 def _find_blobs_with_task_config(
     img, thresholds, pixels_threshold, area_threshold, merge_margin
 ):
@@ -1531,6 +1542,14 @@ class MasterVisionHook:
             return int(float(hook_value or 0.0))
         if self.is_return_line_context():
             return int(float(value))
+        if (
+            self.context is not None
+            and int(self.context["state"]) == STATE_SEARCH_OBJECT
+            and int(self.context["target"]) == TARGET_OBJECT
+            and int(self.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
+            and hook_value is not None
+        ):
+            return int(hook_value)
         return int(float(value))
 
     def _resolve_event_type(self):
@@ -1719,7 +1738,7 @@ def build_observation_from_image(hook, img, image_width, image_height):
     @return observation, best_blob 元组
     """
 
-    observation, best_blob, _ = build_observation_and_candidates_from_image(
+    observation, best_blob, _, _ = build_observation_and_candidates_from_image(
         hook,
         img,
         image_width,
@@ -1736,6 +1755,7 @@ def build_observation_and_candidates_from_image(hook, img, image_width, image_he
         return (
             hook.build_observation(0, 0, 0, 0, image_width, image_height),
             None,
+            None,
             candidates,
         )
     target_x, target_y = build_search_target_point(
@@ -1743,20 +1763,29 @@ def build_observation_and_candidates_from_image(hook, img, image_width, image_he
         image_height,
         hook.current_target_config_id(),
     )
-    _, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
+    task_name, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
         candidates, target_x, target_y
     )
     return (
         hook.build_observation(1, pixel_x, bottom_y, area, image_width, image_height),
         best_blob,
+        task_name,
         candidates,
     )
 
 
-def build_hook_event_value(hook, img, best_blob, image_width, image_height):
+def build_hook_event_value(hook, img, best_blob, image_width, image_height, task_name=None):
     """! @brief 根据当前 hook 生成事件附加判定值"""
 
     if not hook.is_finish_hook_context():
+        if (
+            hook.context is not None
+            and int(hook.context["state"]) == STATE_SEARCH_OBJECT
+            and int(hook.context["target"]) == TARGET_OBJECT
+            and int(hook.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
+            and task_name is not None
+        ):
+            return object_task_id(task_name)
         return None
     return build_finish_hook_yellow_ratio_percent(
         img,
@@ -1956,13 +1985,16 @@ def process_search_frame(uart, hook, img, image_width, image_height):
         return
 
     if candidates is None:
-        observation, best_blob, candidates = build_observation_and_candidates_from_image(
-            hook,
-            img,
-            image_width,
-            image_height,
+        observation, best_blob, selected_task_name, candidates = (
+            build_observation_and_candidates_from_image(
+                hook,
+                img,
+                image_width,
+                image_height,
+            )
         )
     else:
+        selected_task_name = None
         target_x, target_y = build_search_target_point(
             image_width,
             image_height,
@@ -1972,7 +2004,7 @@ def process_search_frame(uart, hook, img, image_width, image_height):
             observation = hook.build_observation(0, 0, 0, 0, image_width, image_height)
             best_blob = None
         else:
-            _, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
+            selected_task_name, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
                 candidates, target_x, target_y
             )
             observation = hook.build_observation(
@@ -2002,6 +2034,7 @@ def process_search_frame(uart, hook, img, image_width, image_height):
             best_blob,
             image_width,
             image_height,
+            selected_task_name,
         ),
     )
 

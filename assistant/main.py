@@ -313,6 +313,27 @@ def decode_assistant_vision_task_sync_body(body):
     }
 
 
+def pack_task_arg(config_id, object_id):
+    """! @brief 把配置号与物体编号打包进同步参数槽位"""
+
+    packed = (int(config_id) & 0xFF) | ((int(object_id) & 0xFF) << 8)
+    if packed >= 0x8000:
+        packed -= 0x10000
+    return packed
+
+
+def unpack_task_arg_config(arg):
+    """! @brief 读取同步参数中的配置号"""
+
+    return int(arg) & 0xFF
+
+
+def unpack_task_arg_object_id(arg):
+    """! @brief 读取同步参数中的物体编号"""
+
+    return (int(arg) >> 8) & 0xFF
+
+
 def encode_assistant_vision_event_report_body(event, value):
     """! @brief 编码辅车视觉事件回报 body"""
 
@@ -739,6 +760,18 @@ def object_task_parts(task):
         0,
         True,
     )
+
+
+def object_task_name_from_id(object_id):
+    """! @brief 根据物体编号返回配置中的任务名称"""
+
+    object_id = int(object_id)
+    if object_id <= 0:
+        return None
+    index = object_id - 1
+    if index >= len(OBJECT_TASKS):
+        return None
+    return OBJECT_TASKS[index][0]
 
 
 def _find_blobs_with_task_config(
@@ -1317,21 +1350,22 @@ class AssistantVisionState:
             int(sync["state"]) == STATE_APPROACH_OBJECT
             and int(sync["target"]) == TARGET_OBJECT
             and (
-                int(sync["arg"]) == OBJECT_APPROACH_CONFIG_ID
-                or int(sync["arg"]) == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+                unpack_task_arg_config(sync["arg"]) == OBJECT_APPROACH_CONFIG_ID
+                or unpack_task_arg_config(sync["arg"])
+                == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
             )
         ):
             return MODE_APPROACH_OBJECT
         if (
             int(sync["state"]) == STATE_ORBIT
             and int(sync["target"]) == TARGET_OBJECT
-            and int(sync["arg"]) == ASSISTANT_ORBIT_OBJECT_CONFIG_ID
+            and unpack_task_arg_config(sync["arg"]) == ASSISTANT_ORBIT_OBJECT_CONFIG_ID
         ):
             return MODE_ORBIT_OBJECT
         if (
             int(sync["state"]) == STATE_RETURN_FOLLOW
             and int(sync["target"]) == TARGET_NONE
-            and int(sync["arg"]) == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
+            and unpack_task_arg_config(sync["arg"]) == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
         ):
             return MODE_RETURN_LINE
         return MODE_FOLLOW
@@ -1341,7 +1375,14 @@ class AssistantVisionState:
 
         if self.current_sync is None:
             return OBJECT_APPROACH_CONFIG_ID
-        return int(self.current_sync["arg"])
+        return unpack_task_arg_config(self.current_sync["arg"])
+
+    def current_object_id(self):
+        """! @brief 返回当前指定的物体编号"""
+
+        if self.current_sync is None:
+            return 0
+        return unpack_task_arg_object_id(self.current_sync["arg"])
 
     def last_return_line_y(self):
         """! @brief 返回上一帧有效回库黄线 Y"""
@@ -1449,23 +1490,23 @@ class AssistantVisionState:
             return None
         state = int(self.current_sync["state"])
         target = int(self.current_sync["target"])
-        arg = int(self.current_sync["arg"])
+        config_id = unpack_task_arg_config(self.current_sync["arg"])
         if (
             state == STATE_APPROACH_OBJECT
             and target == TARGET_OBJECT
-            and arg == OBJECT_APPROACH_CONFIG_ID
+            and config_id == OBJECT_APPROACH_CONFIG_ID
         ):
             return EVENT_TARGET_FOUND
         if (
             state == STATE_APPROACH_OBJECT
             and target == TARGET_OBJECT
-            and arg == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+            and config_id == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
         ):
             return EVENT_ALIGNED
         if (
             state == STATE_RETURN_FOLLOW
             and target == TARGET_NONE
-            and arg == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
+            and config_id == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
         ):
             return EVENT_RETURN_GARAGE_FINISHED
         return None
@@ -1671,6 +1712,13 @@ def process_object_frame(uart, state, img, image_width, image_height):
     """
 
     candidates = build_object_blob_candidates(img)
+    object_id = state.current_object_id()
+    if object_id > 0:
+        selected_task_name = object_task_name_from_id(object_id)
+        if selected_task_name is not None:
+            candidates = [
+                candidate for candidate in candidates if candidate[0] == selected_task_name
+            ]
     if not candidates:
         observation = build_object_observation(0, 0, 0, 0, image_width, image_height)
     else:
