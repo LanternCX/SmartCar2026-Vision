@@ -106,7 +106,7 @@ OUTPUT_DIR=/path/to/output TARGET_DIR=/path/to/device ./master/build.sh
 
 ## ChromaForge 色彩标定接入
 
-`calibration/chromaforge_export_adapter.py` 负责把同目录的 `chromaforge-rules.json` 转为 OpenART 入口可用的识别配置。规则文件每次运行都会校验。新格式下, 每个物体会携带自己的识别参数, 老格式顶层参数仍可作为回退值读取。
+`calibration/chromaforge_export_adapter.py` 负责把同目录的 `chromaforge-rules.json` 转为 OpenART 入口可用的识别配置。规则文件每次运行都会校验。新格式下, 每个物体会携带自己的识别参数, 包括合并间距、面积下限、最大边长和颜色簇命中要求; 老格式顶层参数仍可作为回退值读取。
 
 手动生成单个入口:
 

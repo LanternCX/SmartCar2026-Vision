@@ -92,11 +92,7 @@ OBJECT_BLOB_AREA_THRESHOLD = 200
 FOLLOW_TASKS = (("marker", (35, 100, 50, 127, -128, 127)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
 OBJECT_TASKS = (
-    ('blue', ((30, 42, -2, 20, -52, -36), (38, 52, -3, 10, -50, -38), (18, 31, -6, 8, -36, -21), (46, 61, -7, 10, -52, -44), (43, 59, 2, 23, -62, -51), (25, 35, -2, 17, -47, -32)), 5, 10, 1, True),
-    ('red', ((13, 32, 21, 46, -15, 29), (20, 36, 28, 52, 9, 47)), 3, 6, 1, True),
-    ('tennis', ((72, 100, -39, -17, 17, 79), (53, 79, -40, -26, 34, 73)), 3, 6, 1, True),
-    ('white', ((45, 62, -6, 9, -18, 6), (27, 44, -7, 9, -21, -1), (56, 74, -5, 9, -19, 4), (39, 54, -5, 12, -27, 0)), 5, 10, 1, True),
-    ('brown', ((8, 26, -2, 11, -14, 25), (17, 35, -4, 13, -6, 31)), 3, 6, 1, True),
+
 )
 # 回库黄线使用的黄色阈值，与主车回库黄线保持一致。
 RETURN_LINE_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
@@ -686,6 +682,13 @@ def blob_area(blob):
     return float((right - left) * (bottom - top))
 
 
+def blob_max_side_length(blob):
+    """! @brief 读取候选物体外接框的最大边长"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    return max(float(right - left), float(bottom - top))
+
+
 def task_thresholds(thresholds):
     """! @brief 统一读取单 LAB 与多 LAB 任务配置"""
 
@@ -697,6 +700,16 @@ def task_thresholds(thresholds):
 def object_task_parts(task):
     """! @brief 兼容读取旧版与新版找物体任务配置"""
 
+    if len(task) >= 7:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            max(0, int(task[5])),
+            bool(task[6]),
+        )
     if len(task) >= 6:
         return (
             task[0],
@@ -704,6 +717,7 @@ def object_task_parts(task):
             int(task[2]),
             int(task[3]),
             int(task[4]),
+            0,
             bool(task[5]),
         )
     if len(task) >= 5:
@@ -713,6 +727,7 @@ def object_task_parts(task):
             int(task[2]),
             int(task[3]),
             int(task[4]),
+            0,
             True,
         )
     return (
@@ -721,6 +736,7 @@ def object_task_parts(task):
         OBJECT_BLOB_MERGE_MARGIN,
         OBJECT_BLOB_PIXELS_THRESHOLD,
         OBJECT_BLOB_AREA_THRESHOLD,
+        0,
         True,
     )
 
@@ -848,6 +864,7 @@ def build_object_blob_candidates(img):
             merge_margin,
             pixels_threshold,
             area_threshold,
+            max_side_length,
             require_all_thresholds,
         ) = object_task_parts(task)
         if len(thresholds) <= 0:
@@ -867,6 +884,10 @@ def build_object_blob_candidates(img):
             ):
                 continue
             if blob_area(blob) < float(area_threshold):
+                continue
+            if int(max_side_length) > 0 and blob_max_side_length(blob) > float(
+                max_side_length
+            ):
                 continue
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
             _, _, _, bottom = normalize_bbox_for_protocol(

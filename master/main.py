@@ -146,11 +146,10 @@ OBJECT_BLOB_PIXELS_THRESHOLD = 200
 OBJECT_BLOB_AREA_THRESHOLD = 200
 # 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
 TASKS = (
-    ('red', ((6, 42, 16, 65, -11, 47),), 3, 1, 1, True),
-    ('brown', ((0, 11, -4, 21, -7, 12), (16, 28, -4, 16, 2, 26), (24, 36, -4, 16, 8, 31)), 1, 10, 1, True),
+
 )
 # 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
-FINISH_HOOK_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
+FINISH_HOOK_YELLOW_THRESHOLD = (46, 75, -32, -1, 19, 70)
 # 回库黄线采样半宽, 单位像素。
 RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX = 5
 # 回库黄线目标 Y 坐标。
@@ -542,6 +541,13 @@ def blob_area(blob):
     return float((right - left) * (bottom - top))
 
 
+def blob_max_side_length(blob):
+    """! @brief 读取候选物体外接框的最大边长"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    return max(float(right - left), float(bottom - top))
+
+
 def task_thresholds(thresholds):
     """! @brief 统一读取单 LAB 与多 LAB 任务配置"""
 
@@ -553,6 +559,16 @@ def task_thresholds(thresholds):
 def object_task_parts(task):
     """! @brief 兼容读取旧版与新版找物体任务配置"""
 
+    if len(task) >= 7:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            max(0, int(task[5])),
+            bool(task[6]),
+        )
     if len(task) >= 6:
         return (
             task[0],
@@ -560,6 +576,7 @@ def object_task_parts(task):
             int(task[2]),
             int(task[3]),
             int(task[4]),
+            0,
             bool(task[5]),
         )
     if len(task) >= 5:
@@ -569,6 +586,7 @@ def object_task_parts(task):
             int(task[2]),
             int(task[3]),
             int(task[4]),
+            0,
             True,
         )
     return (
@@ -577,6 +595,7 @@ def object_task_parts(task):
         OBJECT_BLOB_MERGE_MARGIN,
         OBJECT_BLOB_PIXELS_THRESHOLD,
         OBJECT_BLOB_AREA_THRESHOLD,
+        0,
         True,
     )
 
@@ -675,6 +694,7 @@ def build_blob_candidates(img):
             merge_margin,
             pixels_threshold,
             area_threshold,
+            max_side_length,
             require_all_thresholds,
         ) = object_task_parts(task)
         if len(thresholds) <= 0:
@@ -697,6 +717,10 @@ def build_blob_candidates(img):
             ):
                 continue
             if blob_area(blob) < float(area_threshold):
+                continue
+            if int(max_side_length) > 0 and blob_max_side_length(blob) > float(
+                max_side_length
+            ):
                 continue
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
             _, _, _, bottom = normalize_bbox_for_protocol(
@@ -1830,7 +1854,7 @@ def _draw_debug_text_with_color(img, x, y, text, color):
 
 def _debug_color_for_task_name(task_name):
     for task in TASKS:
-        task_name_in_config, thresholds, _, _, _, _ = object_task_parts(task)
+        task_name_in_config, thresholds, _, _, _, _, _ = object_task_parts(task)
         if task_name_in_config != task_name:
             continue
         first_threshold = task_thresholds(thresholds)[0]

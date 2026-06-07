@@ -446,6 +446,93 @@ def test_object_color_candidates_apply_target_area_after_find_blobs() -> None:
     assert img.calls == [([(1, 2, 3, 4, 5, 6)], 6, 1, True, 2)]
 
 
+def test_object_color_candidates_apply_max_side_length_limit_for_assistant() -> None:
+    """辅车找物体候选超出最大边长时必须被过滤."""
+    module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_TASKS = (
+        (
+            "red",
+            ((1, 2, 3, 4, 5, 6),),
+            2,
+            6,
+            100,
+            12,
+            True,
+        ),
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 20, 13)
+
+        def cx(self):
+            return 90
+
+        def cy(self):
+            return 35
+
+        def area(self):
+            return 260
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge, margin))
+            return [FakeBlob()]
+
+    img = FakeImage()
+
+    assert module.build_object_blob_candidates(img) == []
+    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 6, 1, True, 2)]
+
+
+def test_blob_candidates_apply_max_side_length_limit_for_master() -> None:
+    """主车候选超出最大边长时必须被过滤."""
+    module = load_role_main_module("master", "vision_master_main_test_module_unit")
+    module.TASKS = (
+        (
+            "red",
+            ((1, 2, 3, 4, 5, 6),),
+            2,
+            6,
+            100,
+            12,
+            True,
+        ),
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 20, 13)
+
+        def cx(self):
+            return 90
+
+        def area(self):
+            return 260
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge, margin))
+            return [FakeBlob()]
+
+    img = FakeImage()
+
+    assert module.build_blob_candidates(img) == []
+    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 6, 1, True, 2)]
+
+
 def test_object_color_candidates_support_legacy_task_without_per_object_params() -> None:
     """旧任务配置缺少单物体参数时继续使用全局默认值."""
     module = load_main_module("vision_main_test_module_unit")

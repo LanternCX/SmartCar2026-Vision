@@ -50,6 +50,12 @@ def _object_blob_params(document, item):
                 document.get("min_recognition_target_area", 1),
             )
         ),
+        int(
+            item.get(
+                "max_recognition_side_length",
+                document.get("max_recognition_side_length", 0),
+            )
+        ),
     )
 
 
@@ -79,25 +85,35 @@ def _format_threshold(threshold):
 
 
 def _format_task(task):
-    name, thresholds, merge_margin, pixels_threshold, area_threshold, require_all_clusters = task
+    (
+        name,
+        thresholds,
+        merge_margin,
+        pixels_threshold,
+        area_threshold,
+        max_side_length,
+        require_all_clusters,
+    ) = task
     if thresholds and isinstance(thresholds[0], tuple):
         inner = ", ".join(_format_threshold(threshold) for threshold in thresholds)
         if len(thresholds) == 1:
             inner += ","
-        return "    ('%s', (%s), %d, %d, %d, %s)," % (
+        return "    ('%s', (%s), %d, %d, %d, %d, %s)," % (
             name,
             inner,
             merge_margin,
             pixels_threshold,
             area_threshold,
+            max_side_length,
             "True" if require_all_clusters else "False",
         )
-    return "    ('%s', %s, %d, %d, %d, %s)," % (
+    return "    ('%s', %s, %d, %d, %d, %d, %s)," % (
         name,
         _format_threshold(thresholds),
         merge_margin,
         pixels_threshold,
         area_threshold,
+        max_side_length,
         "True" if require_all_clusters else "False",
     )
 

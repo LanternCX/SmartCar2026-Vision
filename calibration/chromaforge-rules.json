@@ -4,77 +4,53 @@
   "objects": [
     {
       "id": "obj_1",
-      "name": "red",
-      "require_all_clusters": true,
+      "name": "brown",
+      "require_all_clusters": false,
       "recognition_merge_gap": 3,
-      "min_recognition_block_area": 7,
-      "min_recognition_target_area": 127,
+      "min_recognition_block_area": 10,
+      "min_recognition_target_area": 50,
+      "max_recognition_side_length": 80,
       "thresholds": [
         [
-          22,
-          41,
-          30,
-          61,
-          -15,
-          52
-        ],
-        [
-          9,
-          26,
-          18,
-          46,
-          -2,
-          32
+          15,
+          37,
+          -11,
+          20,
+          8,
+          31
         ]
       ],
       "clusters": [
         {
-          "id": "obj_1_cluster_2",
-          "name": "cluster-2",
+          "id": "obj_1_blank_1",
+          "name": "blank-1",
           "threshold_index": 0
-        },
-        {
-          "id": "obj_1_cluster_4",
-          "name": "cluster-4",
-          "threshold_index": 1
         }
       ]
     },
     {
       "id": "obj_2",
-      "name": "brown",
+      "name": "red",
       "require_all_clusters": true,
-      "recognition_merge_gap": 10,
-      "min_recognition_block_area": 7,
-      "min_recognition_target_area": 127,
+      "recognition_merge_gap": 3,
+      "min_recognition_block_area": 10,
+      "min_recognition_target_area": 15,
+      "max_recognition_side_length": 60,
       "thresholds": [
         [
-          23,
-          33,
-          -9,
           16,
-          5,
-          34
-        ],
-        [
-          15,
-          26,
-          -4,
-          15,
-          5,
-          32
+          39,
+          21,
+          60,
+          0,
+          49
         ]
       ],
       "clusters": [
         {
-          "id": "obj_2_cluster_12",
-          "name": "cluster-12",
+          "id": "obj_2_blank_1",
+          "name": "blank-1",
           "threshold_index": 0
-        },
-        {
-          "id": "obj_2_cluster_15",
-          "name": "cluster-15",
-          "threshold_index": 1
         }
       ]
     },
@@ -82,37 +58,25 @@
       "id": "obj_3",
       "name": "green",
       "require_all_clusters": true,
-      "recognition_merge_gap": 5,
-      "min_recognition_block_area": 7,
-      "min_recognition_target_area": 64,
+      "recognition_merge_gap": 3,
+      "min_recognition_block_area": 10,
+      "min_recognition_target_area": 15,
+      "max_recognition_side_length": 60,
       "thresholds": [
         [
-          61,
-          100,
-          -46,
-          -17,
-          12,
+          29,
+          89,
+          -54,
+          -29,
+          2,
           84
-        ],
-        [
-          41,
-          75,
-          -39,
-          -12,
-          4,
-          68
         ]
       ],
       "clusters": [
         {
-          "id": "obj_3_cluster_1",
-          "name": "cluster-1",
+          "id": "obj_3_blank_1",
+          "name": "blank-1",
           "threshold_index": 0
-        },
-        {
-          "id": "obj_3_cluster_3",
-          "name": "cluster-3",
-          "threshold_index": 1
         }
       ]
     },
@@ -122,61 +86,49 @@
       "require_all_clusters": true,
       "recognition_merge_gap": 3,
       "min_recognition_block_area": 10,
-      "min_recognition_target_area": 128,
+      "min_recognition_target_area": 20,
+      "max_recognition_side_length": 60,
       "thresholds": [
         [
-          28,
-          59,
-          -8,
-          9,
-          -46,
-          -33
-        ],
-        [
-          21,
-          30,
-          -4,
-          9,
-          -38,
-          -26
-        ],
-        [
           32,
-          42,
-          2,
+          57,
+          -11,
           12,
-          -46,
-          -39
-        ],
-        [
-          36,
-          51,
-          -6,
-          6,
-          -43,
-          -38
+          -50,
+          -23
         ]
       ],
       "clusters": [
         {
-          "id": "obj_4_cluster_1",
-          "name": "cluster-1",
+          "id": "obj_4_blank_1",
+          "name": "blank-1",
           "threshold_index": 0
-        },
+        }
+      ]
+    },
+    {
+      "id": "obj_5",
+      "name": "white",
+      "require_all_clusters": true,
+      "recognition_merge_gap": 3,
+      "min_recognition_block_area": 10,
+      "min_recognition_target_area": 30,
+      "max_recognition_side_length": 80,
+      "thresholds": [
+        [
+          58,
+          70,
+          -11,
+          9,
+          -11,
+          9
+        ]
+      ],
+      "clusters": [
         {
-          "id": "obj_4_cluster_7",
-          "name": "cluster-7",
-          "threshold_index": 1
-        },
-        {
-          "id": "obj_4_cluster_13",
-          "name": "cluster-13",
-          "threshold_index": 2
-        },
-        {
-          "id": "obj_4_cluster_14",
-          "name": "cluster-14",
-          "threshold_index": 3
+          "id": "obj_5_blank_1",
+          "name": "blank-1",
+          "threshold_index": 0
         }
       ]
     }
