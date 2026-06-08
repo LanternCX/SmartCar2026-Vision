@@ -92,14 +92,10 @@ OBJECT_BLOB_AREA_THRESHOLD = 200
 FOLLOW_TASKS = (("marker", (35, 100, 50, 127, -128, 127)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
 OBJECT_TASKS = (
-    ('brown', ((15, 37, -11, 20, 8, 31),), 3, 10, 50, 80, False),
-    ('red', ((16, 39, 21, 60, 0, 49),), 3, 10, 15, 60, True),
-    ('green', ((29, 89, -54, -29, 2, 84),), 3, 10, 15, 60, True),
-    ('blue', ((32, 57, -11, 12, -50, -23),), 3, 10, 20, 60, True),
-    ('white', ((58, 70, -11, 9, -11, 9),), 3, 10, 30, 80, True),
+    ('red', ((0, 36, 22, 38, 11, 67),), 3, 10, 70, 90, True),
 )
 # 回库黄线使用的黄色阈值，与主车回库黄线保持一致。
-RETURN_LINE_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
+RETURN_LINE_YELLOW_THRESHOLD = (43, 65, -31, -8, 27, 71)
 
 # 跟随控制使用的横向死区，单位为像素。
 FOLLOW_X_DEADZONE_PX = 5.0
@@ -1363,6 +1359,12 @@ class AssistantVisionState:
         if (
             int(sync["state"]) == STATE_ORBIT
             and int(sync["target"]) == TARGET_OBJECT
+            and unpack_task_arg_config(sync["arg"]) == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+        ):
+            return MODE_APPROACH_OBJECT
+        if (
+            int(sync["state"]) == STATE_ORBIT
+            and int(sync["target"]) == TARGET_OBJECT
             and unpack_task_arg_config(sync["arg"]) == ASSISTANT_ORBIT_OBJECT_CONFIG_ID
         ):
             return MODE_ORBIT_OBJECT
@@ -1503,6 +1505,12 @@ class AssistantVisionState:
             return EVENT_TARGET_FOUND
         if (
             state == STATE_APPROACH_OBJECT
+            and target == TARGET_OBJECT
+            and config_id == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+        ):
+            return EVENT_ALIGNED
+        if (
+            state == STATE_ORBIT
             and target == TARGET_OBJECT
             and config_id == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
         ):

@@ -917,6 +917,32 @@ def test_assistant_transport_mode_emits_aligned_for_transport_config() -> None:
     assert_assistant_event(module, state.next_event_frame(), 12, module.EVENT_ALIGNED, 180)
 
 
+def test_assistant_orbit_state_transport_config_aligns_to_transport_target() -> None:
+    """主车绕行后辅车跳过绕行时直接按搬运目标点对正."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState(stable_frames=1)
+
+    assert_assistant_ack(
+        module,
+        state.handle_control_line(
+            assistant_sync_frame(
+                12,
+                int(module.STATE_ORBIT),
+                int(module.TARGET_OBJECT),
+                pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 2),
+            )
+        ),
+        12,
+    )
+    observation = centered_transport_observation(module, 180)
+    state.accept_object_observation(observation)
+
+    assert state.mode == module.MODE_APPROACH_OBJECT
+    assert state.current_object_config_id() == module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+    assert_assistant_event(module, state.next_event_frame(), 12, module.EVENT_ALIGNED, 180)
+
+
 def test_assistant_transport_mode_keeps_object_velocity_output() -> None:
     """搬运入口配置继续输出物体视觉速度."""
 
