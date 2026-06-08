@@ -154,6 +154,8 @@ TASKS = (
 )
 # 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
 FINISH_HOOK_YELLOW_THRESHOLD = (46, 75, -32, -1, 19, 70)
+# 回库黄线使用的黄色阈值，格式为 OpenART LAB 阈值。
+RETURN_GARAGE_LINE_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
 # 回库黄线采样半宽, 单位像素。
 RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX = 5
 # 回库黄线目标 Y 坐标。
@@ -1068,7 +1070,7 @@ def _return_line_pixel_matches(img, x, y, image_width, image_height):
     max_y = int(image_height) - 1
     return _pixel_matches_threshold(
         img.get_pixel(max_x - int(x), max_y - int(y)),
-        FINISH_HOOK_YELLOW_THRESHOLD,
+        RETURN_GARAGE_LINE_YELLOW_THRESHOLD,
     )
 
 
