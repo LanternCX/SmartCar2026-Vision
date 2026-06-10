@@ -41,6 +41,19 @@ def load_assistant():
     return load_main_module("assistant_object_approach_test_module")
 
 
+def yellow_pixel_for(module):
+    """根据当前回库黄线阈值构造命中像素."""
+
+    return tuple(
+        int((float(min_value) + float(max_value)) / 2)
+        for min_value, max_value in (
+            module.RETURN_LINE_YELLOW_THRESHOLD[0:2],
+            module.RETURN_LINE_YELLOW_THRESHOLD[2:4],
+            module.RETURN_LINE_YELLOW_THRESHOLD[4:6],
+        )
+    )
+
+
 IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
 
@@ -1040,6 +1053,7 @@ def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
     """辅车回库黄线模式只根据本地黄线输出速度."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     module.RETURN_LINE_DEADZONE_Y_PX = 2.0
     module.RETURN_LINE_KP_Y = -0.5
     module.RETURN_LINE_MAX_VY = 10.0
@@ -1081,7 +1095,7 @@ def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 130 <= logical_x <= 190 and 180 <= logical_y <= 200:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     img = YellowImage()
@@ -1099,6 +1113,7 @@ def test_assistant_return_line_does_not_filter_y_before_160() -> None:
     """辅车回库黄线不再按固定 160px 顶边过滤黄线."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     module.RETURN_LINE_TARGET_Y_PX = 220.0
     module.RETURN_LINE_DEADZONE_Y_PX = 2.0
     module.RETURN_LINE_KP_Y = -0.5
@@ -1130,7 +1145,7 @@ def test_assistant_return_line_does_not_filter_y_before_160() -> None:
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 130 <= logical_x <= 190 and 80 <= logical_y <= 100:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     module.process_frame(uart, state, OutsideImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
@@ -1146,6 +1161,7 @@ def test_assistant_return_line_limits_wide_yellow_to_lower_30px() -> None:
     """辅车回库黄线过厚时保留下界并限制参与计算的厚度."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     module.RETURN_LINE_MAX_THICKNESS_PX = 30
 
     class WideYellowImage:
@@ -1153,7 +1169,7 @@ def test_assistant_return_line_limits_wide_yellow_to_lower_30px() -> None:
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 130 <= logical_x <= 190 and 80 <= logical_y <= 200:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     line_y = module.build_return_line_y_from_image(
@@ -1169,6 +1185,7 @@ def test_assistant_return_line_keeps_previous_when_horizontal_connected_is_too_s
     """辅车回库黄线候选点左右水平联通不足时沿用上一帧有效值."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     module.RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
 
     class NarrowYellowImage:
@@ -1176,7 +1193,7 @@ def test_assistant_return_line_keeps_previous_when_horizontal_connected_is_too_s
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 150 <= logical_x <= 170 and 180 <= logical_y <= 200:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     line_y = module.build_return_line_y_from_image(
@@ -1193,6 +1210,7 @@ def test_assistant_return_line_stops_horizontal_scan_after_required_connected_pi
     """辅车回库黄线水平联通满足阈值后不继续扫完整行."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     module.RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
 
     class LongYellowImage:
@@ -1203,7 +1221,7 @@ def test_assistant_return_line_stops_horizontal_scan_after_required_connected_pi
             self.pixel_reads.append((int(x), int(y)))
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 180 <= logical_y <= 200:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     img = LongYellowImage()
@@ -1263,6 +1281,7 @@ def test_assistant_return_line_below_target_y_does_not_report_finished_event() -
     """辅车回库黄线模式保留 Y 大于 160 的黄线判定."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     state = module.AssistantVisionState()
     state.handle_control_line(
         assistant_sync_frame(
@@ -1296,7 +1315,7 @@ def test_assistant_return_line_below_target_y_does_not_report_finished_event() -
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 130 <= logical_x <= 190 and 230 <= logical_y <= 250:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     for _ in range(6):
