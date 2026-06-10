@@ -12,12 +12,12 @@
       "max_recognition_side_length": 90,
       "thresholds": [
         [
-          0,
-          36,
-          22,
-          38,
+          3,
+          35,
+          19,
+          50,
           11,
-          67
+          41
         ]
       ],
       "clusters": [
