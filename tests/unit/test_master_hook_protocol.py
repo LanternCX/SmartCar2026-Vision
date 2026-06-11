@@ -712,6 +712,7 @@ class ReturnGarageYellowImage:
 
     def __init__(
         self,
+        module,
         top=80,
         bottom=100,
         width=IMAGE_WIDTH,
@@ -719,6 +720,12 @@ class ReturnGarageYellowImage:
         left=None,
         right=None,
     ):
+        threshold = module.RETURN_GARAGE_LINE_YELLOW_THRESHOLD
+        self._yellow_pixel = (
+            (float(threshold[0]) + float(threshold[1])) / 2.0,
+            (float(threshold[2]) + float(threshold[3])) / 2.0,
+            (float(threshold[4]) + float(threshold[5])) / 2.0,
+        )
         self._top = int(top)
         self._bottom = int(bottom)
         self._width = int(width)
@@ -742,7 +749,7 @@ class ReturnGarageYellowImage:
             self._left <= logical_x <= self._right
             and self._top <= logical_y <= self._bottom
         ):
-            return (50, -10, 50)
+            return self._yellow_pixel
         return (0, 0, 0)
 
 
@@ -782,7 +789,7 @@ def test_master_return_line_y_uses_center_columns_bounds_average() -> None:
     """! @brief 回库黄线 Y 使用翻转后图像的屏幕中线附近上下界均值"""
 
     module = load_master()
-    img = ReturnGarageYellowImage(top=180, bottom=200)
+    img = ReturnGarageYellowImage(module, top=180, bottom=200)
 
     line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
@@ -793,7 +800,7 @@ def test_master_return_line_y_uses_pixel_threshold_without_blob_detection() -> N
     """! @brief 回库黄线 Y 在采样区逐像素比对黄色阈值"""
 
     module = load_master()
-    img = ReturnGarageYellowImage(top=180, bottom=200)
+    img = ReturnGarageYellowImage(module, top=180, bottom=200)
 
     line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
@@ -956,7 +963,7 @@ def test_master_return_line_limits_wide_yellow_to_lower_30px() -> None:
     module.RETURN_GARAGE_LINE_MAX_THICKNESS_PX = 30
 
     line_y = module.build_return_line_y_from_image(
-        ReturnGarageYellowImage(top=80, bottom=200),
+        ReturnGarageYellowImage(module, top=80, bottom=200),
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
     )
@@ -971,7 +978,7 @@ def test_master_return_line_keeps_previous_when_horizontal_connected_is_too_shor
     module.RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
 
     line_y = module.build_return_line_y_from_image(
-        ReturnGarageYellowImage(top=180, bottom=200, left=150, right=170),
+        ReturnGarageYellowImage(module, top=180, bottom=200, left=150, right=170),
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
         188.0,
@@ -985,7 +992,7 @@ def test_master_return_line_stops_horizontal_scan_after_required_connected_pixel
 
     module = load_master()
     module.RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
-    img = ReturnGarageYellowImage(top=180, bottom=200, left=0, right=319)
+    img = ReturnGarageYellowImage(module, top=180, bottom=200, left=0, right=319)
 
     line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
@@ -1056,7 +1063,7 @@ def test_master_return_line_outside_follow_roi_keeps_following_without_finished_
         )
     )
     uart = FakeUART()
-    img = ReturnGarageYellowImage(top=80, bottom=100, left=130, right=190)
+    img = ReturnGarageYellowImage(module, top=80, bottom=100, left=130, right=190)
 
     module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
@@ -1083,7 +1090,7 @@ def test_master_return_line_inside_follow_roi_does_not_report_finished_event() -
         )
     )
     uart = FakeUART()
-    img = ReturnGarageYellowImage(top=180, bottom=200, left=130, right=190)
+    img = ReturnGarageYellowImage(module, top=180, bottom=200, left=130, right=190)
 
     for _ in range(6):
         module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
@@ -1106,7 +1113,7 @@ def test_master_return_line_below_target_y_does_not_report_finished_event() -> N
         )
     )
     uart = FakeUART()
-    img = ReturnGarageYellowImage(top=230, bottom=250, left=130, right=190)
+    img = ReturnGarageYellowImage(module, top=230, bottom=250, left=130, right=190)
 
     for _ in range(6):
         module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
