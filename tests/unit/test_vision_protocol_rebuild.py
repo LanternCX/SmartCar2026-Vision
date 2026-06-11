@@ -612,9 +612,13 @@ def test_draw_selected_marker_draws_bounding_box() -> None:
     class FakeImage:
         def __init__(self):
             self.rectangles = []
+            self.labels = []
 
         def draw_rectangle(self, x, y, w, h, color=None):
             self.rectangles.append((x, y, w, h, color))
+
+        def draw_string(self, x, y, text, color=None):
+            self.labels.append((x, y, text, color))
 
     img = FakeImage()
     blob = FakeBlob()
@@ -622,6 +626,7 @@ def test_draw_selected_marker_draws_bounding_box() -> None:
     module.draw_selected_marker(img=img, blob=blob, pixel_x=20, pixel_y=35)
 
     assert img.rectangles == [(4, 20, 32, 30, None)]
+    assert any(entry[2] == "SELECT" for entry in img.labels)
 
 
 

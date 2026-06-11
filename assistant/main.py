@@ -26,7 +26,7 @@ UART_ID = 2
 # 串口波特率，需要与车端 UART6 保持一致。
 UART_BAUDRATE = 115200
 # 摄像头固定曝光时间，单位为微秒。
-EXP_TIME_US = 300
+EXP_TIME_US = 500
 # 可靠事件默认重发间隔，单位为毫秒。
 RELIABLE_RESEND_INTERVAL_MS = 100
 # 可靠序号使用 0..255 环形空间。
@@ -61,6 +61,8 @@ MODE_RETURN_LINE = "return_line"
 STATE_APPROACH_OBJECT = 2
 # 辅车绕行状态编号。
 STATE_ORBIT = 3
+# 辅车推行状态编号。
+STATE_TRANSPORT_OBJECT = 4
 # 辅车回库黄线状态编号。
 STATE_RETURN_FOLLOW = 6
 # 无目标编号。
@@ -89,13 +91,13 @@ OBJECT_BLOB_PIXELS_THRESHOLD = 200
 # ChromaForge 导出的最小识别目标面积。
 OBJECT_BLOB_AREA_THRESHOLD = 200
 # 跟随模式使用的色标阈值。
-FOLLOW_TASKS = (("marker", (35, 100, 50, 127, -128, 127)),)
+FOLLOW_TASKS = (("marker", (37, 57, 64, 95, -64, 20)),)
 # 找物体模式使用的红色目标阈值，与主车保持一致。
 OBJECT_TASKS = (
-    ('red', ((3, 35, 19, 50, 11, 41),), 3, 10, 70, 90, True),
+    ('red', ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),
 )
 # 回库黄线使用的黄色阈值，与主车回库黄线保持一致。
-RETURN_LINE_YELLOW_THRESHOLD = (43, 65, -31, -8, 27, 71)
+RETURN_LINE_YELLOW_THRESHOLD = (58, 87, -32, -12, 64, 84)
 
 # 跟随控制使用的横向死区，单位为像素。
 FOLLOW_X_DEADZONE_PX = 5.0
@@ -1063,18 +1065,48 @@ def build_return_line_velocity_from_y(line_y):
     )
 
 
-def choose_best_candidate(candidates, cx_screen, img_height):
-    """! @brief 选择当前帧最值得上报的目标
+def choose_best_candidate(candidates, target_x, target_y):
+    """! @brief 选择最靠近当前目标点的候选目标
 
     @param candidates 候选目标列表
-    @param cx_screen 画面横向中心像素坐标
-    @param img_height 当前图像高度
-    @return 更接近中线且底边更靠近地板的候选目标
+    @param target_x 目标点 x 坐标
+    @param target_y 目标点 y 坐标
+    @return 被选中的候选目标
     """
 
     return min(
         candidates,
-        key=lambda item: (item[1] - cx_screen) ** 2 + (img_height - item[3]) ** 2,
+        key=lambda item: (float(item[1]) - float(target_x)) ** 2
+        + (float(item[3]) - float(target_y)) ** 2,
+    )
+
+
+def choose_largest_area_candidate(candidates):
+    """! @brief 选择面积最大的候选目标"""
+
+    return max(candidates, key=lambda item: float(item[4]))
+
+
+def filter_candidates_in_target_window(candidates, target_x, target_y, tolerance_x, tolerance_y):
+    """! @brief 保留底边命中当前目标窗口的候选目标"""
+
+    _ = (target_x, tolerance_x)
+    return [
+        candidate
+        for candidate in candidates
+        if abs(float(candidate[3]) - float(target_y)) <= float(tolerance_y)
+    ]
+
+
+def should_filter_candidates_by_target_window(state):
+    """! @brief 判断当前上下文是否只接受命中目标窗口的候选目标"""
+
+    if state.current_sync is None:
+        return False
+    config_id = state.current_object_config_id()
+    return (
+        int(state.current_sync["state"]) == int(STATE_TRANSPORT_OBJECT)
+        and int(config_id) == int(ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID)
     )
 
 
@@ -1099,6 +1131,7 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
         draw_rectangle(int(left), int(top), int(width), int(height))
     except TypeError:
         draw_rectangle((int(left), int(top), int(width), int(height)))
+    _draw_debug_text(img, int(pixel_x) + 4, int(pixel_y) - 10, "SELECT")
 
 
 def build_object_observation(
@@ -1354,6 +1387,12 @@ class AssistantVisionState:
                 or unpack_task_arg_config(sync["arg"])
                 == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
             )
+        ):
+            return MODE_APPROACH_OBJECT
+        if (
+            int(sync["state"]) == STATE_TRANSPORT_OBJECT
+            and int(sync["target"]) == TARGET_OBJECT
+            and unpack_task_arg_config(sync["arg"]) == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
         ):
             return MODE_APPROACH_OBJECT
         if (
@@ -1740,19 +1779,39 @@ def process_object_frame(uart, state, img, image_width, image_height):
             image_height,
             config_id,
         )
-        _, pixel_x, pixel_y, bottom_y, area, best_blob = choose_best_candidate(
-            candidates, target_x, target_y
-        )
-        observation = build_object_observation(
-            1,
-            pixel_x,
-            bottom_y,
-            area,
-            image_width,
-            image_height,
-            config_id,
-        )
-        draw_selected_marker(img=img, blob=best_blob, pixel_x=pixel_x, pixel_y=pixel_y)
+        use_target_window_filter = should_filter_candidates_by_target_window(state)
+        if use_target_window_filter:
+            candidates = filter_candidates_in_target_window(
+                candidates,
+                target_x,
+                target_y,
+                OBJECT_X_TOLERANCE_PX,
+                OBJECT_Y_TOLERANCE_PX,
+            )
+        if not candidates:
+            observation = build_object_observation(0, 0, 0, 0, image_width, image_height)
+        else:
+            if use_target_window_filter:
+                _, pixel_x, pixel_y, bottom_y, area, best_blob = (
+                    choose_largest_area_candidate(candidates)
+                )
+            else:
+                _, pixel_x, pixel_y, bottom_y, area, best_blob = choose_best_candidate(
+                    candidates,
+                    target_x,
+                    target_y,
+                )
+            observation = build_object_observation(
+                1,
+                pixel_x,
+                bottom_y,
+                area,
+                image_width,
+                image_height,
+                config_id,
+            )
+            _draw_debug_protocol_point(img, image_width, image_height, target_x, target_y)
+            draw_selected_marker(img=img, blob=best_blob, pixel_x=pixel_x, pixel_y=pixel_y)
     if state.mode == MODE_ORBIT_OBJECT:
         vx, vy = build_object_orbit_velocity_from_observation(observation, image_height)
     else:
@@ -1797,6 +1856,14 @@ def _draw_debug_cross(img, x, y):
         draw_cross(int(x), int(y), color=(255, 0, 0))
     except TypeError:
         draw_cross(int(x), int(y))
+
+
+def _draw_debug_protocol_point(img, image_width, image_height, x, y):
+    """! @brief 将协议坐标点映射到调试画面并绘制十字"""
+
+    draw_x = int(image_width) - 1 - int(x)
+    draw_y = int(image_height) - 1 - int(y)
+    _draw_debug_cross(img, draw_x, draw_y)
 
 
 def _draw_debug_text(img, x, y, text):

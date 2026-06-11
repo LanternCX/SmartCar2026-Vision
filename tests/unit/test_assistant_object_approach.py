@@ -387,13 +387,13 @@ def test_process_object_frame_filters_candidates_by_selected_object_id() -> None
 
     class BrownBlob:
         def rect(self):
-            return (target_x + 30, IMAGE_HEIGHT - target_y - 20, 20, 20)
+            return (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
 
         def cx(self):
-            return target_x + 40
+            return target_x
 
         def cy(self):
-            return IMAGE_HEIGHT - target_y - 10
+            return IMAGE_HEIGHT - target_y + 10
 
         def area(self):
             return 300
@@ -422,16 +422,225 @@ def test_process_object_frame_filters_candidates_by_selected_object_id() -> None
     assert_velocity_frame(
         module,
         uart.writes[0],
-        expected_axis_velocity(
-            40.0,
-            module.OBJECT_APPROACH_KP_X,
-            module.OBJECT_APPROACH_MIN_SPEED,
-            module.OBJECT_APPROACH_MAX_VX,
-        ),
-        expected_object_y_velocity(module, 20.0),
+        0.0,
+        0.0,
     )
     assert state.current_object_config_id() == module.OBJECT_APPROACH_CONFIG_ID
     assert state.current_object_id() == 2
+
+
+def test_process_object_frame_prefers_target_window_candidate_in_transport() -> None:
+    """辅车推行阶段优先选择当前目标窗口内的候选框."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_TRANSPORT_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def __init__(self, center_x, center_y, bottom_y, area):
+            self._center_x = center_x
+            self._center_y = center_y
+            self._bottom_y = bottom_y
+            self._area = area
+
+        def rect(self):
+            width = 20
+            height = 20
+            top = IMAGE_HEIGHT - self._bottom_y
+            return (self._center_x - width / 2, top, width, height)
+
+        def cx(self):
+            return self._center_x
+
+        def cy(self):
+            return self._center_y
+
+        def area(self):
+            return self._area
+
+    class FakeImage:
+        def __init__(self, blobs):
+            self._blobs = blobs
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return self._blobs
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+    uart = FakeUART()
+
+    module.process_object_frame(
+        uart,
+        state,
+        FakeImage(
+            [
+                FakeBlob(target_x - 30.0, 53, target_y - 35.0, 300),
+                FakeBlob(target_x, 90, target_y, 300),
+            ]
+        ),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    assert_velocity_frame(
+        module,
+        uart.writes[0],
+        0.0,
+        0.0,
+    )
+
+
+def test_process_object_frame_transport_alignment_keeps_original_candidate_selection() -> None:
+    """辅车搬运前对正阶段不使用目标窗口强过滤."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def rect(self):
+            bottom_y = target_y - float(module.OBJECT_Y_TOLERANCE_PX) - 20.0
+            return (target_x - 10.0, IMAGE_HEIGHT - bottom_y, 20, 20)
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            bottom_y = target_y - float(module.OBJECT_Y_TOLERANCE_PX) - 20.0
+            return IMAGE_HEIGHT - bottom_y + 10.0
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [FakeBlob()]
+
+        def draw_cross(self, x, y, color=None):
+            _ = (x, y, color)
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+        def draw_string(self, x, y, text, color=None):
+            _ = (x, y, text, color)
+
+    uart = FakeUART()
+
+    module.process_object_frame(uart, state, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    frame = module.decode_frame(uart.writes[0])
+    assert frame is not None
+    body = module.decode_velocity_body(frame["body"])
+    assert body["vy"] != pytest.approx(module.OBJECT_MISSING_SEARCH_VY)
+
+
+def test_process_object_frame_marks_selected_object_and_target_point() -> None:
+    """辅车找物体调试画面标出当前选中目标与当前目标点."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.OBJECT_APPROACH_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(module)
+
+    class FakeBlob:
+        def rect(self):
+            return (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def __init__(self):
+            self.crosses = []
+            self.labels = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [FakeBlob()]
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+        def draw_cross(self, x, y, color=None):
+            self.crosses.append((x, y, color))
+
+        def draw_string(self, x, y, text, color=None):
+            self.labels.append((x, y, text, color))
+
+    uart = FakeUART()
+    img = FakeImage()
+
+    module.process_object_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    expected_target_cross = (
+        IMAGE_WIDTH - 1 - int(target_x),
+        IMAGE_HEIGHT - 1 - int(target_y),
+    )
+    assert any(entry[:2] == expected_target_cross for entry in img.crosses)
+    assert any(entry[2] == "SELECT" for entry in img.labels)
 
 
 def test_assistant_orbit_correction_uses_independent_velocity_params_without_event() -> None:
@@ -1015,6 +1224,236 @@ def test_assistant_transport_mode_keeps_object_velocity_output() -> None:
     assert frame is not None
     assert frame["mode"] == module.MODE_UDP
     assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+
+
+def test_process_object_frame_accepts_x_outside_when_bottom_hits_target_window_in_transport() -> None:
+    """辅车推行阶段只要求候选框底边命中目标窗口."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_TRANSPORT_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def rect(self):
+            width = 20
+            height = 20
+            return (
+                target_x + float(module.OBJECT_X_TOLERANCE_PX) + 10.0,
+                IMAGE_HEIGHT - target_y,
+                width,
+                height,
+            )
+
+        def cx(self):
+            return target_x + float(module.OBJECT_X_TOLERANCE_PX) + 20.0
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10.0
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [FakeBlob()]
+
+        def draw_cross(self, x, y, color=None):
+            _ = (x, y, color)
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+        def draw_string(self, x, y, text, color=None):
+            _ = (x, y, text, color)
+
+    uart = FakeUART()
+
+    module.process_object_frame(uart, state, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert_velocity_frame(
+        module,
+        uart.writes[0],
+        expected_axis_velocity(
+            float(module.OBJECT_X_TOLERANCE_PX) + 20.0,
+            module.OBJECT_APPROACH_KP_X,
+            module.OBJECT_APPROACH_MIN_SPEED,
+            module.OBJECT_APPROACH_MAX_VX,
+        ),
+        0.0,
+    )
+
+
+def test_process_object_frame_prefers_largest_area_after_bottom_filter_in_transport() -> None:
+    """辅车推行阶段在底边命中的候选中选择面积最大者."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_TRANSPORT_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def __init__(self, center_x, area):
+            self._center_x = center_x
+            self._area = area
+
+        def rect(self):
+            width = 20
+            height = 20
+            return (self._center_x - 10.0, IMAGE_HEIGHT - target_y, width, height)
+
+        def cx(self):
+            return self._center_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10.0
+
+        def area(self):
+            return self._area
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [
+                FakeBlob(target_x, 300),
+                FakeBlob(target_x + float(module.OBJECT_X_TOLERANCE_PX) + 20.0, 800),
+            ]
+
+        def draw_cross(self, x, y, color=None):
+            _ = (x, y, color)
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+        def draw_string(self, x, y, text, color=None):
+            _ = (x, y, text, color)
+
+    uart = FakeUART()
+
+    module.process_object_frame(uart, state, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert_velocity_frame(
+        module,
+        uart.writes[0],
+        expected_axis_velocity(
+            float(module.OBJECT_X_TOLERANCE_PX) + 20.0,
+            module.OBJECT_APPROACH_KP_X,
+            module.OBJECT_APPROACH_MIN_SPEED,
+            module.OBJECT_APPROACH_MAX_VX,
+        ),
+        0.0,
+    )
+
+
+def test_process_object_frame_ignores_candidates_when_bottom_outside_target_window_in_transport() -> None:
+    """辅车推行阶段忽略底边未命中目标窗口的候选框."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_TRANSPORT_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def rect(self):
+            width = 20
+            height = 20
+            bottom_y = target_y + float(module.OBJECT_Y_TOLERANCE_PX) + 10.0
+            return (
+                target_x,
+                IMAGE_HEIGHT - bottom_y,
+                width,
+                height,
+            )
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            bottom_y = target_y + float(module.OBJECT_Y_TOLERANCE_PX) + 10.0
+            return IMAGE_HEIGHT - bottom_y + 10.0
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [FakeBlob()]
+
+        def draw_cross(self, x, y, color=None):
+            _ = (x, y, color)
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+        def draw_string(self, x, y, text, color=None):
+            _ = (x, y, text, color)
+
+    uart = FakeUART()
+
+    module.process_object_frame(uart, state, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert_velocity_frame(
+        module,
+        uart.writes[0],
+        module.OBJECT_MISSING_SEARCH_VX,
+        module.OBJECT_MISSING_SEARCH_VY,
+    )
 
 
 def test_assistant_process_uart_input_writes_local_ack() -> None:

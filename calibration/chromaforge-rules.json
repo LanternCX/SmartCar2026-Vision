@@ -7,17 +7,17 @@
       "name": "red",
       "require_all_clusters": true,
       "recognition_merge_gap": 3,
-      "min_recognition_block_area": 10,
+      "min_recognition_block_area": 30,
       "min_recognition_target_area": 70,
       "max_recognition_side_length": 90,
       "thresholds": [
         [
-          3,
-          35,
-          19,
-          50,
-          11,
-          41
+          16,
+          51,
+          21,
+          84,
+          -11,
+          52
         ]
       ],
       "clusters": [
@@ -38,12 +38,12 @@
       "max_recognition_side_length": 0,
       "thresholds": [
         [
-          43,
-          65,
-          -31,
-          -8,
-          27,
-          71
+          58,
+          87,
+          -32,
+          -12,
+          64,
+          84
         ]
       ],
       "clusters": [
