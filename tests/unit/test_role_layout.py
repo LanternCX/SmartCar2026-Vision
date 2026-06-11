@@ -44,31 +44,39 @@ def test_role_main_files_avoid_board_unstable_int_byte_helpers() -> None:
 def test_role_build_scripts_generate_and_upload_role_entry(tmp_path) -> None:
     """! @brief 每个角色构建脚本读取共享标定文件并把源码入口上传到设备"""
 
+    master_source = role_main_path("master")
+    assistant_source = role_main_path("assistant")
+    original_master = master_source.read_text(encoding="utf-8")
+    original_assistant = assistant_source.read_text(encoding="utf-8")
     for role in ("assistant", "master"):
-        target_dir = tmp_path / (role + "-device")
-        target_dir.mkdir()
-        script_path = ROOT / role / "build.sh"
-        env = dict(os.environ)
-        env["TARGET_DIR"] = str(target_dir)
+        try:
+            target_dir = tmp_path / (role + "-device")
+            target_dir.mkdir()
+            script_path = ROOT / role / "build.sh"
+            env = dict(os.environ)
+            env["TARGET_DIR"] = str(target_dir)
 
-        subprocess.run(
-            ["bash", str(script_path)],
-            cwd=str(ROOT),
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+            subprocess.run(
+                ["bash", str(script_path)],
+                cwd=str(ROOT),
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
-        built = role_main_path(role)
-        uploaded = target_dir / "main.py"
-        assert built.is_file()
-        assert uploaded.is_file()
-        built_text = built.read_text(encoding="utf-8")
-        uploaded_text = uploaded.read_text(encoding="utf-8")
-        assert built_text == uploaded_text
-        assert "threshold_index" not in built_text
-        if role == "master":
-            assert "TASKS = (" in built_text
-        else:
-            assert "OBJECT_TASKS = (" in built_text
+            built = role_main_path(role)
+            uploaded = target_dir / "main.py"
+            assert built.is_file()
+            assert uploaded.is_file()
+            built_text = built.read_text(encoding="utf-8")
+            uploaded_text = uploaded.read_text(encoding="utf-8")
+            assert built_text == uploaded_text
+            assert "threshold_index" not in built_text
+            if role == "master":
+                assert "TASKS = (" in built_text
+            else:
+                assert "OBJECT_TASKS = (" in built_text
+        finally:
+            master_source.write_text(original_master, encoding="utf-8")
+            assistant_source.write_text(original_assistant, encoding="utf-8")
