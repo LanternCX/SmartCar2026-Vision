@@ -57,41 +57,26 @@ class ReadWriteUART:
         return len(data)
 
 
-class BlobBackedYoloTf:
-    """! @brief 测试中把既有假色块转换为 YOLO 检测框"""
+class FakeYoloTf:
+    """! @brief 记录 YOLO 加载与检测调用的测试桩"""
+
+    def __init__(self):
+        self.loaded_paths = []
+        self.detect_calls = []
 
     def load(self, path):
-        _ = path
-        return "blob-backed-yolo"
+        self.loaded_paths.append(path)
+        return "fake-yolo-net"
 
     def detect(self, net, img):
-        _ = net
-        find_blobs = getattr(img, "find_blobs", None)
-        if find_blobs is None:
-            return []
-        image_height = img.height() if getattr(img, "height", None) is not None else IMAGE_HEIGHT
-        detections = []
-        for blob in find_blobs([], pixels_threshold=200, area_threshold=200, merge=True):
-            left, top, width, height = blob.rect()
-            detections.append(
-                (
-                    float(left) / float(IMAGE_WIDTH),
-                    float(top) / float(image_height),
-                    float(left + width) / float(IMAGE_WIDTH),
-                    float(top + height) / float(image_height),
-                    1,
-                    0.95,
-                )
-            )
-        return detections
+        self.detect_calls.append((net, img))
+        return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
 
 
 def load_master():
     """! @brief 加载主车视觉入口模块"""
 
-    module = load_role_main_module("master", "master_hook_protocol_test_module")
-    module.tf = BlobBackedYoloTf()
-    return module
+    return load_role_main_module("master", "master_hook_protocol_test_module")
 
 
 IMAGE_WIDTH = 320
@@ -722,7 +707,7 @@ def test_master_search_target_can_be_reconfigured(monkeypatch) -> None:
         IMAGE_HEIGHT,
     )
 
-    assert best_blob.rect() == first_blob.rect()
+    assert best_blob is first_blob
     assert observation == (7, 0.0, 0.0, 400.0)
 
 
@@ -743,6 +728,7 @@ class ReturnGarageYellowImage:
 
     def __init__(
         self,
+        module,
         top=80,
         bottom=100,
         width=IMAGE_WIDTH,
@@ -750,6 +736,12 @@ class ReturnGarageYellowImage:
         left=None,
         right=None,
     ):
+        threshold = module.RETURN_GARAGE_LINE_YELLOW_THRESHOLD
+        self._yellow_pixel = (
+            (float(threshold[0]) + float(threshold[1])) / 2.0,
+            (float(threshold[2]) + float(threshold[3])) / 2.0,
+            (float(threshold[4]) + float(threshold[5])) / 2.0,
+        )
         self._top = int(top)
         self._bottom = int(bottom)
         self._width = int(width)
@@ -773,7 +765,7 @@ class ReturnGarageYellowImage:
             self._left <= logical_x <= self._right
             and self._top <= logical_y <= self._bottom
         ):
-            return (50, 0, 50)
+            return self._yellow_pixel
         return (0, 0, 0)
 
 
@@ -813,7 +805,7 @@ def test_master_return_line_y_uses_center_columns_bounds_average() -> None:
     """! @brief 回库黄线 Y 使用翻转后图像的屏幕中线附近上下界均值"""
 
     module = load_master()
-    img = ReturnGarageYellowImage(top=180, bottom=200)
+    img = ReturnGarageYellowImage(module, top=180, bottom=200)
 
     line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
@@ -824,7 +816,7 @@ def test_master_return_line_y_uses_pixel_threshold_without_blob_detection() -> N
     """! @brief 回库黄线 Y 在采样区逐像素比对黄色阈值"""
 
     module = load_master()
-    img = ReturnGarageYellowImage(top=180, bottom=200)
+    img = ReturnGarageYellowImage(module, top=180, bottom=200)
 
     line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
@@ -987,7 +979,7 @@ def test_master_return_line_limits_wide_yellow_to_lower_30px() -> None:
     module.RETURN_GARAGE_LINE_MAX_THICKNESS_PX = 30
 
     line_y = module.build_return_line_y_from_image(
-        ReturnGarageYellowImage(top=80, bottom=200),
+        ReturnGarageYellowImage(module, top=80, bottom=200),
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
     )
@@ -1002,7 +994,7 @@ def test_master_return_line_keeps_previous_when_horizontal_connected_is_too_shor
     module.RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
 
     line_y = module.build_return_line_y_from_image(
-        ReturnGarageYellowImage(top=180, bottom=200, left=150, right=170),
+        ReturnGarageYellowImage(module, top=180, bottom=200, left=150, right=170),
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
         188.0,
@@ -1016,7 +1008,7 @@ def test_master_return_line_stops_horizontal_scan_after_required_connected_pixel
 
     module = load_master()
     module.RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
-    img = ReturnGarageYellowImage(top=180, bottom=200, left=0, right=319)
+    img = ReturnGarageYellowImage(module, top=180, bottom=200, left=0, right=319)
 
     line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
@@ -1052,12 +1044,11 @@ def test_master_run_applies_lens_correction_before_processing() -> None:
     module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
     module.process_uart_input = lambda uart, rx_buffer, hook: rx_buffer
 
-    def stop_after_frame(uart, hook, img, image_width, image_height, yolo_net=None):
+    def stop_after_frame(uart, hook, img, image_width, image_height):
         _ = uart
         _ = hook
         _ = image_width
         _ = image_height
-        _ = yolo_net
         assert img is image
         assert image.lens_corr_called is True
         raise StopLoop()
@@ -1088,7 +1079,7 @@ def test_master_return_line_outside_follow_roi_keeps_following_without_finished_
         )
     )
     uart = FakeUART()
-    img = ReturnGarageYellowImage(top=80, bottom=100, left=130, right=190)
+    img = ReturnGarageYellowImage(module, top=80, bottom=100, left=130, right=190)
 
     module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
@@ -1115,7 +1106,7 @@ def test_master_return_line_inside_follow_roi_does_not_report_finished_event() -
         )
     )
     uart = FakeUART()
-    img = ReturnGarageYellowImage(top=180, bottom=200, left=130, right=190)
+    img = ReturnGarageYellowImage(module, top=180, bottom=200, left=130, right=190)
 
     for _ in range(6):
         module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
@@ -1138,7 +1129,7 @@ def test_master_return_line_below_target_y_does_not_report_finished_event() -> N
         )
     )
     uart = FakeUART()
-    img = ReturnGarageYellowImage(top=230, bottom=250, left=130, right=190)
+    img = ReturnGarageYellowImage(module, top=230, bottom=250, left=130, right=190)
 
     for _ in range(6):
         module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
@@ -1146,8 +1137,8 @@ def test_master_return_line_below_target_y_does_not_report_finished_event() -> N
     assert master_event_frames(module, uart.writes) == []
 
 
-def test_master_blob_candidates_report_box_area_as_value() -> None:
-    """! @brief 候选物体强度使用模型框面积"""
+def test_master_blob_candidates_report_area_as_value() -> None:
+    """! @brief 候选物体强度使用 blob 面积"""
 
     module = load_master()
 
@@ -1173,26 +1164,54 @@ def test_master_blob_candidates_report_box_area_as_value() -> None:
 
     candidates = module.build_blob_candidates(FakeImage())
 
-    assert candidates[0][3] == 1200
+    assert candidates[0][3] == 1234
 
 
-def test_master_object_candidates_use_yolo_detection() -> None:
-    """! @brief 主车物体候选由 YOLO 检测结果生成"""
+def test_master_blob_candidates_use_runtime_task_config() -> None:
+    """! @brief 主车候选提取直接使用当前配置的任务表"""
 
     module = load_master()
+    module.TASKS = (("runtime_target", (9, 8, 7, 6, 5, 4), 4, 12, 40),)
+    module.OBJECT_BLOB_PIXELS_THRESHOLD = 12
+    module.OBJECT_BLOB_AREA_THRESHOLD = 40
 
-    class FakeTf:
+    class FakeBlob:
+        def rect(self):
+            return (10, 20, 30, 40)
+
+        def cx(self):
+            return 25
+
+        def code(self):
+            return 1
+
+        def area(self):
+            return 1234
+
+    class FakeImage:
         def __init__(self):
-            self.loaded_paths = []
+            self.calls = []
 
-        def load(self, path):
-            self.loaded_paths.append(path)
-            return "fake-net"
+        def height(self):
+            return 100
 
-        def detect(self, net, img):
-            assert net == "fake-net"
-            assert img == "detect-image"
-            return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge, margin))
+            return [FakeBlob()]
+
+    img = FakeImage()
+    candidates = module.build_blob_candidates(img)
+
+    assert img.calls == [([(9, 8, 7, 6, 5, 4)], 12, 1, True, 4)]
+    assert candidates[0][0] == "runtime_target"
+
+
+def test_master_blob_candidates_use_yolo_when_flag_enabled() -> None:
+    """! @brief 打开开关后主车候选提取切换到 YOLO"""
+
+    module = load_master()
+    module.OBJECT_DETECTION_USE_YOLO = True
+    module.tf = FakeYoloTf()
 
     class FakeImage:
         def __init__(self):
@@ -1208,19 +1227,316 @@ def test_master_object_candidates_use_yolo_detection() -> None:
             self.copy_calls.append((scale, copy_to_fb))
             return "detect-image"
 
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            raise AssertionError("物体识别不应继续调用色块检测")
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            raise AssertionError("打开 YOLO 后不应继续调用色块识别")
 
-    module.tf = FakeTf()
     img = FakeImage()
+
     candidates = module.build_blob_candidates(img)
 
     assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
+    assert module.tf.detect_calls == [("fake-yolo-net", "detect-image")]
     assert img.copy_calls == [(module.YOLO_IMAGE_COPY_SCALE, 1)]
     assert candidates[0][0] == "red"
     assert candidates[0][1] == pytest.approx(160.0)
     assert candidates[0][2] == pytest.approx(210.0)
     assert candidates[0][3] == pytest.approx(3200.0)
+
+
+def test_master_blob_candidates_require_all_configured_thresholds() -> None:
+    """! @brief 主车候选提取一次性使用全部 LAB 阈值并要求颜色码完整命中"""
+
+    module = load_master()
+    module.TASKS = (
+        (
+            "red",
+            (
+                (0, 100, 18, 127, -23, 127),
+                (10, 90, 25, 127, -10, 120),
+            ),
+            3,
+            200,
+            200,
+        ),
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 160, 20)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 40
+
+        def code(self):
+            return 0b11
+
+        def area(self):
+            return 3200
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge, margin))
+            return [FakeBlob()]
+
+    img = FakeImage()
+    candidates = module.build_blob_candidates(img)
+
+    assert img.calls == [
+        (
+            [
+                (0, 100, 18, 127, -23, 127),
+                (10, 90, 25, 127, -10, 120),
+            ],
+            200,
+            1,
+            True,
+            3,
+        ),
+    ]
+    assert candidates[0][0] == "red"
+    assert candidates[0][1] == pytest.approx(160.0)
+    assert candidates[0][2] == pytest.approx(210.0)
+    assert candidates[0][3] == pytest.approx(3200.0)
+
+
+def test_master_search_selection_prefers_current_target_point() -> None:
+    """! @brief 主车连续帧选目标优先使用当前目标点"""
+
+    module = load_master()
+    module.TASKS = (("red", (0, 100, 18, 127, -23, 127), 1, 10, 10),)
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(search_hook_control_line(module))
+
+    class FakeBlob:
+        def __init__(self, center_x, center_y, bottom_y, area):
+            self._center_x = center_x
+            self._center_y = center_y
+            self._bottom_y = bottom_y
+            self._area = area
+
+        def rect(self):
+            width = 20
+            height = 20
+            top = IMAGE_HEIGHT - self._bottom_y
+            return (self._center_x - width / 2, top, width, height)
+
+        def cx(self):
+            return self._center_x
+
+        def cy(self):
+            return self._center_y
+
+        def area(self):
+            return self._area
+
+    class FakeImage:
+        def __init__(self, blobs):
+            self._blobs = blobs
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return self._blobs
+
+    module.build_observation_and_candidates_from_image(
+        hook,
+        FakeImage([FakeBlob(150, 50, 205, 300)]),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    observation, _, _, _ = module.build_observation_and_candidates_from_image(
+        hook,
+        FakeImage(
+            [
+                FakeBlob(153, 53, 205, 300),
+                FakeBlob(160, 90, 210, 300),
+            ]
+        ),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    _, x, y, _ = observation
+    assert x == pytest.approx(0.0)
+    assert y == pytest.approx(0.0)
+
+
+def test_master_search_selection_keeps_target_point_strategy() -> None:
+    """! @brief 主车搜索阶段保持按当前目标点选择候选"""
+
+    module = load_master()
+    module.TASKS = (("red", (0, 100, 18, 127, -23, 127), 1, 10, 10),)
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(search_hook_control_line(module))
+
+    class FakeBlob:
+        def __init__(self, center_x, center_y, bottom_y, area):
+            self._center_x = center_x
+            self._center_y = center_y
+            self._bottom_y = bottom_y
+            self._area = area
+
+        def rect(self):
+            width = 20
+            height = 20
+            top = IMAGE_HEIGHT - self._bottom_y
+            return (self._center_x - width / 2, top, width, height)
+
+        def cx(self):
+            return self._center_x
+
+        def cy(self):
+            return self._center_y
+
+        def area(self):
+            return self._area
+
+    class FakeImage:
+        def __init__(self, blobs):
+            self._blobs = blobs
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return self._blobs
+
+    module.build_observation_and_candidates_from_image(
+        hook,
+        FakeImage([FakeBlob(120, 40, 180, 300)]),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    observation, _, _, _ = module.build_observation_and_candidates_from_image(
+        hook,
+        FakeImage(
+            [
+                FakeBlob(122, 42, 170, 300),
+                FakeBlob(160, 90, 210, 300),
+            ]
+        ),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    _, x, y, _ = observation
+    assert x == pytest.approx(0.0)
+    assert y == pytest.approx(0.0)
+
+
+def test_master_blob_candidates_reject_missing_secondary_threshold() -> None:
+    """! @brief 主车候选颜色码未覆盖全部 LAB 阈值时不输出目标"""
+
+    module = load_master()
+    module.TASKS = (
+        (
+            "red",
+            (
+                (0, 100, 18, 127, -23, 127),
+                (10, 90, 25, 127, -10, 120),
+            ),
+            1,
+            200,
+            200,
+        ),
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 160, 20)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 40
+
+        def code(self):
+            return 0b01
+
+        def area(self):
+            return 3200
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [FakeBlob()]
+
+    assert module.build_blob_candidates(FakeImage()) == []
+
+
+def test_master_blob_candidates_apply_target_area_after_find_blobs() -> None:
+    """! @brief 主车候选在 find_blobs 之后再按最终目标面积过滤"""
+
+    module = load_master()
+    module.TASKS = (
+        (
+            "red",
+            ((1, 2, 3, 4, 5, 6),),
+            2,
+            6,
+            100,
+            True,
+        ),
+    )
+
+    class SmallBlob:
+        def rect(self):
+            return (80, 30, 20, 10)
+
+        def cx(self):
+            return 90
+
+        def cy(self):
+            return 35
+
+        def area(self):
+            return 80
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge, margin))
+            return [SmallBlob()]
+
+    img = FakeImage()
+
+    assert module.build_blob_candidates(img) == []
+    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 6, 1, True, 2)]
 
 
 def test_master_hook_waits_for_stable_target_before_event() -> None:
@@ -1380,7 +1696,55 @@ def test_master_target_found_sends_stable_zero_before_event() -> None:
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
     assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
-    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 400)
+    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 1)
+
+
+def test_master_search_frame_uses_task_id_as_target_found_event_value() -> None:
+    module = load_master()
+    module.TASKS = (
+        ("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),
+        ("brown", ((7, 8, 9, 10, 11, 12),), 0, 1, 1, True),
+    )
+    hook = module.MasterVisionHook(stable_frames=2, next_reliable_seq=30)
+    hook.handle_control_line(search_hook_control_line(module))
+
+    class BrownBlob:
+        def rect(self):
+            return (150, 30, 20, 30)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 45
+
+        def area(self):
+            return 300
+
+    class BrownOnlyImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            if thresholds == [(7, 8, 9, 10, 11, 12)]:
+                return [BrownBlob()]
+            return []
+
+        def draw_rectangle(self, x, y, w, h, color=None):
+            _ = (x, y, w, h, color)
+
+    uart = FakeUART()
+    img = BrownOnlyImage()
+
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 2)
 
 
 def test_master_pending_event_suppresses_velocity_between_retries() -> None:
@@ -1406,8 +1770,8 @@ def test_master_pending_event_suppresses_velocity_between_retries() -> None:
 
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
-    assert_master_event(module, uart.writes[1], 30, 7, module.EVENT_TARGET_FOUND, 400)
-    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 400)
+    assert_master_event(module, uart.writes[1], 30, 7, module.EVENT_TARGET_FOUND, 1)
+    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 1)
 
 
 def test_master_transport_finish_hook_does_not_arrive_on_yellow_contact_only() -> None:
@@ -1836,7 +2200,7 @@ def test_master_target_point_generates_p_search_velocity() -> None:
     )
 
     assert best_blob is not None
-    assert observation == pytest.approx((7.0, err_x, err_y, 800.0))
+    assert observation == pytest.approx((7.0, err_x, err_y, 300.0))
     assert velocity == pytest.approx(
         (
             expected_axis_velocity(
@@ -1854,52 +2218,8 @@ def test_master_search_y_velocity_decreases_when_target_gets_closer() -> None:
     """! @brief 主车目标接近时纵向搜索速度应变小"""
 
     module = load_master()
-
-    class FarBlob:
-        def rect(self):
-            return (120, 100, 80, 40)
-
-        def cx(self):
-            return 160
-
-        def cy(self):
-            return 120
-
-        def area(self):
-            return 1000
-
-    class CloseBlob:
-        def rect(self):
-            return (120, 20, 80, 80)
-
-        def cx(self):
-            return 160
-
-        def cy(self):
-            return 120
-
-        def area(self):
-            return 1000
-
-    class FakeImage:
-        def __init__(self, blob):
-            self._blob = blob
-
-        def height(self):
-            return IMAGE_HEIGHT
-
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            return [self._blob]
-
-    hook = module.MasterVisionHook()
-    hook.handle_control_line(search_hook_control_line(module))
-
-    far_observation, _ = module.build_observation_from_image(
-        hook, FakeImage(FarBlob()), IMAGE_WIDTH, IMAGE_HEIGHT
-    )
-    close_observation, _ = module.build_observation_from_image(
-        hook, FakeImage(CloseBlob()), IMAGE_WIDTH, IMAGE_HEIGHT
-    )
+    far_observation = (7, 0.0, -200.0, 1000.0)
+    close_observation = (7, 0.0, -100.0, 1000.0)
     far_velocity = module.build_search_velocity_from_observation(
         far_observation, IMAGE_HEIGHT
     )
@@ -2066,9 +2386,10 @@ def test_master_search_control_does_not_require_marker_span_or_min_corners() -> 
 
 
 def test_master_search_frame_waits_for_hook_context_before_velocity() -> None:
-    """! @brief 主车视觉收到同步上下文后才输出速度"""
+    """! @brief 主车视觉收到同步上下文后才输出速度，默认不绘制调试标记"""
 
     module = load_master()
+    module.MASTER_OBJECT_DEBUG_DRAW_ENABLED = False
     target_x, target_y = master_target_point(module)
     err_x = choose_outside_deadzone_offset(
         target_x,
@@ -2119,6 +2440,268 @@ def test_master_search_frame_waits_for_hook_context_before_velocity() -> None:
     assert hook.next_event_frame() is None
 
 
+def test_master_search_frame_draws_all_detected_objects() -> None:
+    """! @brief 主车调试画面开启后会上电绘制当前帧识别到的全部物体"""
+
+    module = load_master()
+    module.MASTER_OBJECT_DEBUG_DRAW_ENABLED = True
+
+    class LeftBlob:
+        def rect(self):
+            return (40, 100, 20, 40)
+
+        def cx(self):
+            return 50
+
+        def cy(self):
+            return 120
+
+        def area(self):
+            return 500
+
+    class RightBlob:
+        def rect(self):
+            return (220, 90, 30, 50)
+
+        def cx(self):
+            return 235
+
+        def cy(self):
+            return 115
+
+        def area(self):
+            return 650
+
+    class FakeImage:
+        def __init__(self):
+            self.rectangles = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None):
+            _ = (thresholds, pixels_threshold, area_threshold, merge)
+            if roi is not None:
+                return []
+            return [LeftBlob(), RightBlob()]
+
+        def draw_rectangle(self, x, y, w, h, color=None):
+            self.rectangles.append((x, y, w, h, color))
+
+    uart = FakeUART()
+    hook = module.MasterVisionHook()
+    img = FakeImage()
+
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert uart.writes == []
+    assert any(entry[:4] == (40, 100, 20, 40) for entry in img.rectangles)
+    assert any(entry[:4] == (220, 90, 30, 50) for entry in img.rectangles)
+
+
+def test_master_search_frame_marks_selection_before_hook_context() -> None:
+    """! @brief 主车调试模式上电后直接标出当前默认选点"""
+
+    module = load_master()
+    module.MASTER_OBJECT_DEBUG_DRAW_ENABLED = True
+    target_x, target_y = master_target_point(module)
+
+    class FakeBlob:
+        def rect(self):
+            return (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10
+
+        def area(self):
+            return 500
+
+    class FakeImage:
+        def __init__(self):
+            self.crosses = []
+            self.labels = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            if roi is not None:
+                return [FinishHookBlob(roi[0], roi[1], roi[2], roi[3], roi[2] * roi[3])]
+            return [FakeBlob()]
+
+        def draw_rectangle(self, x, y, w, h, color=None):
+            _ = (x, y, w, h, color)
+
+        def draw_cross(self, x, y, color=None):
+            self.crosses.append((x, y, color))
+
+        def draw_string(self, x, y, text, color=None):
+            self.labels.append((x, y, text, color))
+
+    uart = FakeUART()
+    hook = module.MasterVisionHook()
+    img = FakeImage()
+
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    expected_target_cross = (
+        IMAGE_WIDTH - 1 - int(target_x),
+        IMAGE_HEIGHT - 1 - int(target_y),
+    )
+    assert uart.writes == []
+    assert any(entry[:2] == expected_target_cross for entry in img.crosses)
+    assert any(entry[2] == "SELECT" for entry in img.labels)
+    assert any(str(entry[2]).startswith("finish touch=1") for entry in img.labels)
+
+
+def test_master_search_frame_labels_detected_objects_by_name() -> None:
+    """! @brief 主车调试画面会标出每个候选物体的名称"""
+
+    module = load_master()
+    module.MASTER_OBJECT_DEBUG_DRAW_ENABLED = True
+    module.TASKS = (
+        ("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),
+        ("brown", ((7, 8, 9, 10, 11, 12),), 0, 1, 1, True),
+    )
+
+    class RedBlob:
+        def rect(self):
+            return (40, 100, 20, 40)
+
+        def cx(self):
+            return 50
+
+        def cy(self):
+            return 120
+
+        def area(self):
+            return 500
+
+    class BrownBlob:
+        def rect(self):
+            return (220, 90, 30, 50)
+
+        def cx(self):
+            return 235
+
+        def cy(self):
+            return 115
+
+        def area(self):
+            return 650
+
+    class FakeImage:
+        def __init__(self):
+            self.rectangles = []
+            self.labels = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(
+            self,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge,
+            margin=0,
+            roi=None,
+        ):
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            if roi is not None:
+                return []
+            if thresholds == [(1, 2, 3, 4, 5, 6)]:
+                return [RedBlob()]
+            if thresholds == [(7, 8, 9, 10, 11, 12)]:
+                return [BrownBlob()]
+            return []
+
+        def draw_rectangle(self, x, y, w, h, color=None):
+            self.rectangles.append((x, y, w, h, color))
+
+        def draw_string(self, x, y, text, color=None):
+            self.labels.append((x, y, text, color))
+
+    uart = FakeUART()
+    hook = module.MasterVisionHook()
+    img = FakeImage()
+
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    texts = [entry[2] for entry in img.labels]
+    assert "red" in texts
+    assert "brown" in texts
+
+
+def test_master_search_frame_marks_selected_object_and_target_point() -> None:
+    """! @brief 主车调试画面标出当前选中目标与当前目标点"""
+
+    module = load_master()
+    module.MASTER_OBJECT_DEBUG_DRAW_ENABLED = True
+    target_x, target_y = master_target_point(module)
+
+    class FakeBlob:
+        def rect(self):
+            return (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10
+
+        def area(self):
+            return 500
+
+    class FakeImage:
+        def __init__(self):
+            self.crosses = []
+            self.labels = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            return [FakeBlob()]
+
+        def draw_rectangle(self, x, y, w, h, color=None):
+            _ = (x, y, w, h, color)
+
+        def draw_cross(self, x, y, color=None):
+            self.crosses.append((x, y, color))
+
+        def draw_string(self, x, y, text, color=None):
+            self.labels.append((x, y, text, color))
+
+    uart = FakeUART()
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(search_hook_control_line(module))
+    img = FakeImage()
+
+    module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    expected_target_cross = (
+        IMAGE_WIDTH - 1 - int(target_x),
+        IMAGE_HEIGHT - 1 - int(target_y),
+    )
+    assert any(entry[:2] == expected_target_cross for entry in img.crosses)
+    assert any(entry[2] == "SELECT" for entry in img.labels)
+
+
 def test_master_blob_candidates_use_normalized_bottom() -> None:
     """! @brief 主车候选目标使用归一化后的色块底边 y"""
 
@@ -2149,27 +2732,29 @@ def test_master_blob_candidates_use_normalized_bottom() -> None:
     assert candidates[0][2] == 80
 
 
-def test_master_search_frame_draws_blob_center_not_bottom() -> None:
-    """! @brief 主车调试标记绘制目标中心, 不把底边当中心点"""
+def test_master_search_frame_draws_selected_blob_rectangle() -> None:
+    """! @brief 主车调试标记绘制选中目标的矩形框"""
 
     module = load_master()
+    module.MASTER_OBJECT_DEBUG_DRAW_ENABLED = True
+    target_x, target_y = master_target_point(module)
 
     class FakeBlob:
         def rect(self):
-            return (190, 110, 20, 70)
+            return (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
 
         def cx(self):
-            return 200
+            return target_x
 
         def cy(self):
-            return 145
+            return IMAGE_HEIGHT - target_y + 10
 
         def area(self):
             return 500
 
     class FakeImage:
         def __init__(self):
-            self.crosses = []
+            self.rectangles = []
 
         def height(self):
             return IMAGE_HEIGHT
@@ -2177,8 +2762,8 @@ def test_master_search_frame_draws_blob_center_not_bottom() -> None:
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
             return [FakeBlob()]
 
-        def draw_cross(self, x, y):
-            self.crosses.append((x, y))
+        def draw_rectangle(self, x, y, w, h, color=None):
+            self.rectangles.append((x, y, w, h, color))
 
     uart = FakeUART()
     hook = module.MasterVisionHook()
@@ -2187,7 +2772,10 @@ def test_master_search_frame_draws_blob_center_not_bottom() -> None:
 
     module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
-    assert img.crosses[-1] == (200, 145)
+    assert any(
+        entry[:4] == (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
+        for entry in img.rectangles
+    )
 
 
 def test_master_hook_event_uses_configured_target_y_not_blob_center_y() -> None:
@@ -2230,8 +2818,8 @@ def test_master_hook_event_uses_configured_target_y_not_blob_center_y() -> None:
     )
     hook.accept_observation(observation)
 
-    assert observation == (7, 0.0, 0.0, 160.0)
-    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 160)
+    assert observation == (7, 0.0, 0.0, 4800.0)
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 4800)
 
 
 def test_master_candidate_selection_uses_configured_target_point() -> None:
@@ -2286,5 +2874,202 @@ def test_master_candidate_selection_uses_configured_target_point() -> None:
         hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT
     )
 
-    assert best_blob.rect() == HigherBottomBlob().rect()
-    assert observation == (7, 0.0, 0.0, 1600.0)
+    assert isinstance(best_blob, HigherBottomBlob)
+    assert observation == (7, 0.0, 0.0, 1000.0)
+
+
+def test_master_transport_alignment_keeps_original_candidate_selection() -> None:
+    """! @brief 主车搬运前对正阶段不使用目标窗口强过滤"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(
+        search_hook_control_line(
+            module,
+            state=int(module.STATE_SEARCH_OBJECT),
+            target=int(module.TARGET_OBJECT),
+            arg=int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+        )
+    )
+    target_x, target_y = master_target_point(module, module.MASTER_TRANSPORT_HOOK_CONFIG_ID)
+
+    class FakeBlob:
+        def rect(self):
+            width = 20
+            height = 20
+            return (
+                target_x + float(module.OBJECT_X_TOLERANCE_PX) + 10.0,
+                IMAGE_HEIGHT - target_y,
+                width,
+                height,
+            )
+
+        def cx(self):
+            return target_x + float(module.OBJECT_X_TOLERANCE_PX) + 20.0
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10.0
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            _ = (thresholds, pixels_threshold, area_threshold, merge)
+            return [FakeBlob()]
+
+    observation, best_blob = module.build_observation_from_image(
+        hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT
+    )
+
+    assert best_blob is not None
+    assert observation[3] == pytest.approx(300.0)
+
+
+def test_master_push_observation_accepts_x_outside_when_bottom_hits_target_window() -> None:
+    """! @brief 主车推行阶段只要求候选框底边命中目标窗口"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(finish_hook_control_line(module))
+    target_x, target_y = master_target_point(
+        module,
+        module.MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def rect(self):
+            width = 20
+            height = 20
+            return (
+                target_x + float(module.OBJECT_X_TOLERANCE_PX) + 10.0,
+                IMAGE_HEIGHT - target_y,
+                width,
+                height,
+            )
+
+        def cx(self):
+            return target_x + float(module.OBJECT_X_TOLERANCE_PX) + 20.0
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10.0
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            _ = (thresholds, pixels_threshold, area_threshold, merge)
+            return [FakeBlob()]
+
+    observation, best_blob = module.build_observation_from_image(
+        hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT
+    )
+
+    assert best_blob is not None
+    assert observation[3] == pytest.approx(300.0)
+
+
+def test_master_push_observation_prefers_largest_area_after_bottom_filter() -> None:
+    """! @brief 主车推行阶段在底边命中的候选中选择面积最大者"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(finish_hook_control_line(module))
+    target_x, target_y = master_target_point(
+        module,
+        module.MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def __init__(self, center_x, area):
+            self._center_x = center_x
+            self._area = area
+
+        def rect(self):
+            width = 20
+            height = 20
+            return (self._center_x - 10.0, IMAGE_HEIGHT - target_y, width, height)
+
+        def cx(self):
+            return self._center_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10.0
+
+        def area(self):
+            return self._area
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            _ = (thresholds, pixels_threshold, area_threshold, merge)
+            return [
+                FakeBlob(target_x, 300),
+                FakeBlob(target_x + float(module.OBJECT_X_TOLERANCE_PX) + 20.0, 800),
+            ]
+
+    observation, best_blob = module.build_observation_from_image(
+        hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT
+    )
+
+    assert best_blob is not None
+    assert observation[1] == pytest.approx(float(module.OBJECT_X_TOLERANCE_PX) + 20.0)
+    assert observation[3] == pytest.approx(800.0)
+
+
+def test_master_push_observation_ignores_candidates_when_bottom_outside_target_window() -> None:
+    """! @brief 主车推行阶段忽略底边未命中目标窗口的候选框"""
+
+    module = load_master()
+    hook = module.MasterVisionHook()
+    hook.handle_control_line(finish_hook_control_line(module))
+    target_x, target_y = master_target_point(
+        module,
+        module.MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def rect(self):
+            width = 20
+            height = 20
+            bottom_y = target_y + float(module.OBJECT_Y_TOLERANCE_PX) + 10.0
+            return (
+                target_x,
+                IMAGE_HEIGHT - bottom_y,
+                width,
+                height,
+            )
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            bottom_y = target_y + float(module.OBJECT_Y_TOLERANCE_PX) + 10.0
+            return IMAGE_HEIGHT - bottom_y + 10.0
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            _ = (thresholds, pixels_threshold, area_threshold, merge)
+            return [FakeBlob()]
+
+    observation, best_blob = module.build_observation_from_image(
+        hook, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT
+    )
+
+    assert best_blob is None
+    assert observation == (7, 0.0, 0.0, 0.0)

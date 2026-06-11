@@ -1,0 +1,58 @@
+{
+  "format": "chromaforge-v1",
+  "target": "openmv-find-blobs",
+  "objects": [
+    {
+      "id": "obj_1",
+      "name": "red",
+      "require_all_clusters": true,
+      "recognition_merge_gap": 3,
+      "min_recognition_block_area": 30,
+      "min_recognition_target_area": 70,
+      "max_recognition_side_length": 90,
+      "thresholds": [
+        [
+          16,
+          51,
+          21,
+          84,
+          -11,
+          52
+        ]
+      ],
+      "clusters": [
+        {
+          "id": "obj_1_blank_1",
+          "name": "blank-1",
+          "threshold_index": 0
+        }
+      ]
+    },
+    {
+      "id": "obj_2",
+      "name": "yellow",
+      "require_all_clusters": true,
+      "recognition_merge_gap": 3,
+      "min_recognition_block_area": 1,
+      "min_recognition_target_area": 1,
+      "max_recognition_side_length": 0,
+      "thresholds": [
+        [
+          58,
+          87,
+          -32,
+          -12,
+          64,
+          84
+        ]
+      ],
+      "clusters": [
+        {
+          "id": "obj_2_blank_1",
+          "name": "blank-1",
+          "threshold_index": 0
+        }
+      ]
+    }
+  ]
+}

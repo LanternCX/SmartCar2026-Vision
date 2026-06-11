@@ -31,7 +31,7 @@ UART_ID = 2
 # 串口波特率，需要与车端 UART6 保持一致。
 UART_BAUDRATE = 115200
 # 摄像头固定曝光时间，单位为微秒。
-EXP_TIME_US = 300
+EXP_TIME_US = 500
 # TARGET_FOUND 未确认时的重复发送间隔，单位为毫秒。
 RELIABLE_RESEND_INTERVAL_MS = 100
 # 固定帧模式编号。
@@ -43,9 +43,11 @@ FRAME_BODY_SIZE = 8
 FRAME_HEAD = 0xA5
 # 固定帧总长度。
 FRAME_SIZE = 13
-# YOLO 模型文件路径, 对应部署到 OpenART SD 卡根目录的模型文件。
+# 物体识别开关。False 使用色块阈值，True 使用 YOLO。
+OBJECT_DETECTION_USE_YOLO = False
+# YOLO 模型文件路径，对应部署到 OpenART SD 卡根目录的模型文件。
 YOLO_MODEL_PATH = "/sd/yolo.tflite"
-# YOLO 检测前对图像做缩放复制, 与模型验证脚本保持一致。
+# YOLO 检测前对图像做缩放复制，与模型验证脚本保持一致。
 YOLO_IMAGE_COPY_SCALE = 0.75
 # 物体识别最低置信度。
 YOLO_MIN_SCORE = 0.90
@@ -57,7 +59,7 @@ TOPIC_LOCAL_VISION_VELOCITY = 0x01
 TOPIC_MASTER_VISION_HOOK_SYNC = 0x10
 # 主车视觉事件回报 topic。
 TOPIC_MASTER_VISION_EVENT_REPORT = 0x12
-# 模型候选目标的最小面积，小于该值不会触发找到事件。
+# 红色候选目标的最小面积，小于该值不会触发找到事件。
 OBJECT_MIN_AREA = 50.0
 # 主车搜索目标丢失时输出的配置横向速度。
 MASTER_MISSING_SEARCH_VX = 0.0
@@ -110,7 +112,7 @@ MASTER_TRANSPORT_TARGET_Y_PX = 240.0
 # 主车收尾判定环带外扩像素。
 FINISH_HOOK_RING_EXPAND_PX = 5
 # 主车收尾判定黄色占比阈值。
-FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.2
+FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.1
 FINISH_HOOK_STABLE_FRAMES = 2
 # 车端协议中的主车搜索状态编号。
 STATE_SEARCH_OBJECT = 1
@@ -151,8 +153,20 @@ SEQ_RING_SIZE = 256
 # 判断环形序号新旧关系使用的半环长度。
 SEQ_HALF_RING = 128
 
+# ChromaForge 导出的色块合并间距。
+OBJECT_BLOB_MERGE_MARGIN = 0
+# ChromaForge 导出的最小识别色块面积。
+OBJECT_BLOB_PIXELS_THRESHOLD = 200
+# ChromaForge 导出的最小识别目标面积。
+OBJECT_BLOB_AREA_THRESHOLD = 200
+# 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
+TASKS = (
+    ('red', ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),
+)
 # 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
-FINISH_HOOK_YELLOW_THRESHOLD = (0, 100, -40, 10, 20, 127)
+FINISH_HOOK_YELLOW_THRESHOLD = (58, 87, -32, -12, 64, 84)
+# 回库黄线使用的黄色阈值，格式为 OpenART LAB 阈值。
+RETURN_GARAGE_LINE_YELLOW_THRESHOLD = (58, 87, -32, -12, 64, 84)
 # 回库黄线采样半宽, 单位像素。
 RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX = 5
 # 回库黄线目标 Y 坐标。
@@ -171,6 +185,8 @@ RETURN_GARAGE_LINE_MIN_SPEED = 0.0
 RETURN_GARAGE_LINE_MAX_THICKNESS_PX = 30
 # 回库黄线候选点左右水平联通黄线的最小合计长度, 单位像素。
 RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
+# 主车物体识别调试绘制总开关。
+MASTER_OBJECT_DEBUG_DRAW_ENABLED = False
 
 _I16_MIN = -32768
 _I16_MAX = 32767
@@ -543,7 +559,7 @@ def blob_area(blob):
 
 
 class YoloDetectionBlob:
-    """! @brief 让模型检测框复用现有候选与收尾判定接口"""
+    """! @brief 让模型检测框复用现有候选接口"""
 
     def __init__(self, left, top, right, bottom, label, score):
         self._left = float(left)
@@ -578,10 +594,90 @@ class YoloDetectionBlob:
         )
 
 
-def load_yolo_model():
-    """! @brief 加载 YOLO 模型"""
+def blob_center_y(blob):
+    """! @brief 读取候选物体中心 y 坐标"""
 
-    if tf is None:
+    cy_fn = getattr(blob, "cy", None)
+    if cy_fn is not None:
+        return float(cy_fn())
+    _, top, _, bottom = blob_rect_to_bbox(blob.rect())
+    return (float(top) + float(bottom)) / 2.0
+
+
+def blob_max_side_length(blob):
+    """! @brief 读取候选物体外接框的最大边长"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    return max(float(right - left), float(bottom - top))
+
+
+def task_thresholds(thresholds):
+    """! @brief 统一读取单 LAB 与多 LAB 任务配置"""
+
+    if len(thresholds) == 6 and not isinstance(thresholds[0], (tuple, list)):
+        return (thresholds,)
+    return thresholds
+
+
+def object_task_parts(task):
+    """! @brief 兼容读取旧版与新版找物体任务配置"""
+
+    if len(task) >= 7:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            max(0, int(task[5])),
+            bool(task[6]),
+        )
+    if len(task) >= 6:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            0,
+            bool(task[5]),
+        )
+    if len(task) >= 5:
+        return (
+            task[0],
+            task_thresholds(task[1]),
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            0,
+            True,
+        )
+    return (
+        task[0],
+        task_thresholds(task[1]),
+        OBJECT_BLOB_MERGE_MARGIN,
+        OBJECT_BLOB_PIXELS_THRESHOLD,
+        OBJECT_BLOB_AREA_THRESHOLD,
+        0,
+        True,
+    )
+
+
+def object_task_id(task_name):
+    """! @brief 根据任务名称返回物体编号"""
+
+    index = 1
+    for task in TASKS:
+        if task[0] == task_name:
+            return index
+        index += 1
+    return 0
+
+
+def load_yolo_model():
+    """! @brief 在开启开关时加载 YOLO 模型"""
+
+    if not OBJECT_DETECTION_USE_YOLO or tf is None:
         return None
     return tf.load(YOLO_MODEL_PATH)
 
@@ -628,15 +724,19 @@ def _build_yolo_candidates(img, yolo_net=None):
     net = yolo_net
     if net is None:
         net = load_yolo_model()
-    if net is None:
+    if net is None or tf is None:
         return []
     detect_img = _copy_image_for_yolo(img)
     image_width = _image_width(img)
     image_height = _image_height(img)
+    allowed_task_names = {task[0] for task in TASKS}
     candidates = []
     for detected in tf.detect(net, detect_img):
         x1, y1, x2, y2, label, score = detected
         if float(score) <= float(YOLO_MIN_SCORE):
+            continue
+        task_name = _label_name(label)
+        if task_name not in allowed_task_names:
             continue
         left = float(x1) * image_width
         top = float(y1) * image_height
@@ -648,24 +748,144 @@ def _build_yolo_candidates(img, yolo_net=None):
         _, _, _, protocol_bottom = normalize_bbox_for_protocol(
             left, top, right, bottom, image_height
         )
-        candidates.append(
-            (_label_name(label), blob.cx(), protocol_bottom, blob.area(), blob)
-        )
+        candidates.append((task_name, blob.cx(), protocol_bottom, blob.area(), blob))
     return candidates
 
 
+def _find_blobs_with_task_config(
+    img, thresholds, pixels_threshold, area_threshold, merge_margin
+):
+    """! @brief 按当前任务配置调用板端找色块接口"""
+
+    try:
+        return img.find_blobs(
+            list(thresholds),
+            pixels_threshold=pixels_threshold,
+            area_threshold=1,
+            merge=True,
+            margin=max(0, int(merge_margin)),
+        )
+    except TypeError:
+        return img.find_blobs(
+            list(thresholds),
+            pixels_threshold=pixels_threshold,
+            area_threshold=1,
+            merge=True,
+        )
+
+
+def _blob_code(blob):
+    """! @brief 读取合并色块的颜色码"""
+
+    code_fn = getattr(blob, "code", None)
+    if code_fn is not None:
+        return int(code_fn())
+    try:
+        return int(blob[8])
+    except Exception:
+        return None
+
+
+def _blob_matches_required_thresholds(blob, threshold_count, require_all_thresholds):
+    """! @brief 判断色块是否满足当前任务的颜色簇命中要求"""
+
+    if int(threshold_count) <= 1 or not bool(require_all_thresholds):
+        return True
+    code = _blob_code(blob)
+    if code is None:
+        return True
+    expected_code = (1 << int(threshold_count)) - 1
+    return (code & expected_code) == expected_code
+
+
+def blob_bbox_overlaps(left, top, right, bottom, other_blob):
+    """! @brief 判断两个候选框是否存在有效重叠"""
+
+    other_left, other_top, other_right, other_bottom = blob_rect_to_bbox(
+        other_blob.rect()
+    )
+    return (
+        min(float(right), float(other_right)) > max(float(left), float(other_left))
+        and min(float(bottom), float(other_bottom)) > max(float(top), float(other_top))
+    )
+
+
+def blob_matches_all_thresholds(img, blob, thresholds, pixels_threshold, area_threshold, merge):
+    """! @brief 判断候选色块是否被同一目标的全部 LAB 阈值命中"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    for threshold in thresholds[1:]:
+        blobs = img.find_blobs(
+            [threshold],
+            pixels_threshold=pixels_threshold,
+            area_threshold=area_threshold,
+            merge=merge,
+        )
+        matched = False
+        for other_blob in blobs:
+            if blob_bbox_overlaps(left, top, right, bottom, other_blob):
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
 def build_blob_candidates(img, yolo_net=None):
-    """! @brief 使用 YOLO 提取物体候选目标, 面积作为目标强度
+    """! @brief 提取物体候选目标, 面积作为目标强度
 
     @param img 当前图像对象
     @return 候选目标列表, 元素格式为 task_name, cx, bottom, area, blob
     """
 
-    return _build_yolo_candidates(img, yolo_net)
+    if OBJECT_DETECTION_USE_YOLO:
+        return _build_yolo_candidates(img, yolo_net)
+    candidates = []
+    for task in TASKS:
+        (
+            task_name,
+            thresholds,
+            merge_margin,
+            pixels_threshold,
+            area_threshold,
+            max_side_length,
+            require_all_thresholds,
+        ) = object_task_parts(task)
+        if len(thresholds) <= 0:
+            continue
+        blobs = _find_blobs_with_task_config(
+            img,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge_margin,
+        )
+        if not blobs:
+            continue
+        img_height = img.height()
+        for blob in blobs:
+            if not _blob_matches_required_thresholds(
+                blob,
+                len(thresholds),
+                require_all_thresholds,
+            ):
+                continue
+            if blob_area(blob) < float(area_threshold):
+                continue
+            if int(max_side_length) > 0 and blob_max_side_length(blob) > float(
+                max_side_length
+            ):
+                continue
+            left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+            _, _, _, bottom = normalize_bbox_for_protocol(
+                left, top, right, bottom, img_height
+            )
+            candidates.append((task_name, blob.cx(), bottom, blob_area(blob), blob))
+    return candidates
 
 
 def choose_best_candidate(candidates, target_x, target_y):
-    """! @brief 选择最靠近 hook 目标点的候选物体
+    """! @brief 选择最靠近当前目标点的候选物体
 
     @param candidates 候选目标列表
     @param target_x hook 目标点 x 坐标
@@ -678,6 +898,29 @@ def choose_best_candidate(candidates, target_x, target_y):
         key=lambda item: (float(item[1]) - float(target_x)) ** 2
         + (float(item[2]) - float(target_y)) ** 2,
     )
+
+
+def choose_largest_area_candidate(candidates):
+    """! @brief 选择面积最大的候选目标"""
+
+    return max(candidates, key=lambda item: float(item[3]))
+
+
+def filter_candidates_in_target_window(candidates, target_x, target_y, tolerance_x, tolerance_y):
+    """! @brief 保留底边命中当前目标窗口的候选目标"""
+
+    _ = (target_x, tolerance_x)
+    return [
+        candidate
+        for candidate in candidates
+        if abs(float(candidate[2]) - float(target_y)) <= float(tolerance_y)
+    ]
+
+
+def should_filter_candidates_by_target_window(hook):
+    """! @brief 判断当前上下文是否只接受命中目标窗口的候选目标"""
+
+    return hook.is_finish_hook_context()
 
 
 def build_search_target_point(
@@ -779,8 +1022,15 @@ def get_marker_corners(blob):
     return ((left, top), (right, top), (right, bottom), (left, bottom))
 
 
+def get_blob_rect(blob):
+    """! @brief 返回候选色块的标准矩形框"""
+
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    return (left, top, right - left, bottom - top)
+
+
 def draw_selected_marker(img, blob, pixel_x, pixel_y):
-    """! @brief 在调试画面上绘制选中物体角点与中心
+    """! @brief 在调试画面上绘制选中物体矩形框
 
     @param img 当前图像对象
     @param blob 被选中的候选色块对象
@@ -788,9 +1038,24 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     @param pixel_y 目标标记 y 坐标
     """
 
-    for corner_x, corner_y in get_marker_corners(blob):
-        img.draw_cross(corner_x, corner_y)
-    img.draw_cross(pixel_x, pixel_y)
+    _ = pixel_x
+    _ = pixel_y
+    _draw_debug_rectangle(img, get_blob_rect(blob))
+    _draw_debug_text(img, int(pixel_x) + 4, int(pixel_y) - 10, "SELECT")
+
+
+def draw_blob_candidates_debug(img, candidates):
+    """! @brief 在调试画面上绘制当前识别到的全部物体
+
+    @param img 当前图像对象
+    @param candidates 当前帧候选目标列表
+    """
+
+    for task_name, pixel_x, _, _, blob in candidates:
+        color = _debug_color_for_task_name(task_name)
+        _ = pixel_x
+        _draw_debug_rectangle_with_color(img, get_blob_rect(blob), color)
+        _draw_debug_text_with_color(img, pixel_x + 4, blob.cy() - 6, task_name, color)
 
 
 def _clamp(value, limit):
@@ -966,7 +1231,7 @@ def _return_line_pixel_matches(img, x, y, image_width, image_height):
     max_y = int(image_height) - 1
     return _pixel_matches_threshold(
         img.get_pixel(max_x - int(x), max_y - int(y)),
-        FINISH_HOOK_YELLOW_THRESHOLD,
+        RETURN_GARAGE_LINE_YELLOW_THRESHOLD,
     )
 
 
@@ -1444,6 +1709,14 @@ class MasterVisionHook:
             return int(float(hook_value or 0.0))
         if self.is_return_line_context():
             return int(float(value))
+        if (
+            self.context is not None
+            and int(self.context["state"]) == STATE_SEARCH_OBJECT
+            and int(self.context["target"]) == TARGET_OBJECT
+            and int(self.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
+            and hook_value is not None
+        ):
+            return int(hook_value)
         return int(float(value))
 
     def _resolve_event_type(self):
@@ -1632,27 +1905,84 @@ def build_observation_from_image(hook, img, image_width, image_height, yolo_net=
     @return observation, best_blob 元组
     """
 
+    observation, best_blob, _, _ = build_observation_and_candidates_from_image(
+        hook,
+        img,
+        image_width,
+        image_height,
+        yolo_net,
+    )
+    return observation, best_blob
+
+
+def build_observation_and_candidates_from_image(
+    hook,
+    img,
+    image_width,
+    image_height,
+    yolo_net=None,
+):
+    """! @brief 从图像生成一帧物体观测并返回全部候选色块"""
+
     candidates = build_blob_candidates(img, yolo_net)
     if not candidates:
-        return hook.build_observation(0, 0, 0, 0, image_width, image_height), None
+        return (
+            hook.build_observation(0, 0, 0, 0, image_width, image_height),
+            None,
+            None,
+            candidates,
+        )
     target_x, target_y = build_search_target_point(
         image_width,
         image_height,
         hook.current_target_config_id(),
     )
-    _, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
-        candidates, target_x, target_y
-    )
+    use_target_window_filter = should_filter_candidates_by_target_window(hook)
+    if use_target_window_filter:
+        candidates = filter_candidates_in_target_window(
+            candidates,
+            target_x,
+            target_y,
+            OBJECT_X_TOLERANCE_PX,
+            OBJECT_Y_TOLERANCE_PX,
+        )
+        if not candidates:
+            return (
+                hook.build_observation(0, 0, 0, 0, image_width, image_height),
+                None,
+                None,
+                candidates,
+            )
+    if use_target_window_filter:
+        task_name, pixel_x, bottom_y, area, best_blob = choose_largest_area_candidate(
+            candidates
+        )
+    else:
+        task_name, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
+            candidates,
+            target_x,
+            target_y,
+        )
     return (
         hook.build_observation(1, pixel_x, bottom_y, area, image_width, image_height),
         best_blob,
+        task_name,
+        candidates,
     )
 
 
-def build_hook_event_value(hook, img, best_blob, image_width, image_height):
+def build_hook_event_value(hook, img, best_blob, image_width, image_height, task_name=None):
     """! @brief 根据当前 hook 生成事件附加判定值"""
 
     if not hook.is_finish_hook_context():
+        if (
+            hook.context is not None
+            and int(hook.context["state"]) == STATE_SEARCH_OBJECT
+            and int(hook.context["target"]) == TARGET_OBJECT
+            and int(hook.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
+            and task_name is not None
+        ):
+            return object_task_id(task_name)
         return None
     return build_finish_hook_yellow_ratio_percent(
         img,
@@ -1703,6 +2033,39 @@ def _draw_debug_cross(img, x, y):
         draw_cross(int(x), int(y))
 
 
+def _draw_debug_protocol_point(img, image_width, image_height, x, y):
+    """! @brief 将协议坐标点映射到调试画面并绘制十字"""
+
+    draw_x = int(image_width) - 1 - int(x)
+    draw_y = int(image_height) - 1 - int(y)
+    _draw_debug_cross(img, draw_x, draw_y)
+
+
+def _draw_debug_rectangle(img, rect):
+    draw_rectangle = getattr(img, "draw_rectangle", None)
+    if draw_rectangle is None:
+        return
+    x, y, w, h = rect
+    try:
+        draw_rectangle(int(x), int(y), int(w), int(h))
+    except TypeError:
+        draw_rectangle((int(x), int(y), int(w), int(h)))
+
+
+def _draw_debug_rectangle_with_color(img, rect, color):
+    draw_rectangle = getattr(img, "draw_rectangle", None)
+    if draw_rectangle is None:
+        return
+    x, y, w, h = rect
+    try:
+        draw_rectangle(int(x), int(y), int(w), int(h), color=color)
+    except TypeError:
+        try:
+            draw_rectangle((int(x), int(y), int(w), int(h)), color=color)
+        except TypeError:
+            draw_rectangle((int(x), int(y), int(w), int(h)))
+
+
 def _draw_debug_text(img, x, y, text):
     draw_string = getattr(img, "draw_string", None)
     if draw_string is None:
@@ -1711,6 +2074,56 @@ def _draw_debug_text(img, x, y, text):
         draw_string(int(x), int(y), str(text), color=(255, 255, 255))
     except TypeError:
         draw_string(int(x), int(y), str(text))
+
+
+def _draw_debug_text_with_color(img, x, y, text, color):
+    draw_string = getattr(img, "draw_string", None)
+    if draw_string is None:
+        return
+    try:
+        draw_string(int(x), int(y), str(text), color=color)
+    except TypeError:
+        draw_string(int(x), int(y), str(text))
+
+
+def draw_finish_hook_debug(img, hook, blob, image_width, image_height, yellow_ratio):
+    """! @brief 绘制搬运收尾黄线接触判定信息"""
+
+    if blob is None:
+        _draw_debug_text(img, 2, 50, "finish touch=0 ratio=0.0 no target")
+        return
+    rois, _ = _build_finish_hook_ring_rois(blob, image_width, image_height)
+    for roi in rois:
+        _draw_debug_rectangle_with_color(img, roi, (255, 255, 0))
+    threshold_percent = float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0
+    touched = float(yellow_ratio) > threshold_percent
+    seen = bool(getattr(hook, "_finish_contact_seen", False))
+    _draw_debug_text(
+        img,
+        2,
+        50,
+        "finish touch=%d seen=%d ratio=%.1f/%.1f"
+        % (1 if touched else 0, 1 if seen else 0, float(yellow_ratio), threshold_percent),
+    )
+
+
+def _debug_color_for_task_name(task_name):
+    for task in TASKS:
+        task_name_in_config, thresholds, _, _, _, _, _ = object_task_parts(task)
+        if task_name_in_config != task_name:
+            continue
+        first_threshold = task_thresholds(thresholds)[0]
+        lab_center = (
+            int((int(first_threshold[0]) + int(first_threshold[1])) / 2),
+            int((int(first_threshold[2]) + int(first_threshold[3])) / 2),
+            int((int(first_threshold[4]) + int(first_threshold[5])) / 2),
+        )
+        if omv_image is not None:
+            try:
+                return tuple(int(value) for value in omv_image.lab_to_rgb(lab_center))
+            except Exception:
+                break
+    return (255, 255, 255)
 
 
 def draw_master_return_line_debug(img, image_width, image_height, line_y, vx, vy):
@@ -1787,23 +2200,104 @@ def process_search_frame(uart, hook, img, image_width, image_height, yolo_net=No
             write_reliable_line(uart, event_frame)
         if not hook.is_return_line_context():
             return
+    candidates = None
+    selected_candidate = None
+    debug_blob = None
+    debug_yellow_ratio = None
+    if MASTER_OBJECT_DEBUG_DRAW_ENABLED and not hook.is_return_line_context():
+        raw_candidates = build_blob_candidates(img, yolo_net)
+        draw_blob_candidates_debug(img, raw_candidates)
+        target_x, target_y = build_search_target_point(
+            image_width,
+            image_height,
+            hook.current_target_config_id(),
+        )
+        candidates = raw_candidates
+        use_target_window_filter = should_filter_candidates_by_target_window(hook)
+        if use_target_window_filter:
+            candidates = filter_candidates_in_target_window(
+                raw_candidates,
+                target_x,
+                target_y,
+                OBJECT_X_TOLERANCE_PX,
+                OBJECT_Y_TOLERANCE_PX,
+            )
+        if candidates:
+            if use_target_window_filter:
+                selected_candidate = choose_largest_area_candidate(candidates)
+            else:
+                selected_candidate = choose_best_candidate(
+                    candidates,
+                    target_x,
+                    target_y,
+                )
+            _, pixel_x, _, _, best_blob = selected_candidate
+            debug_blob = best_blob
+            _draw_debug_protocol_point(img, image_width, image_height, target_x, target_y)
+            draw_selected_marker(
+                img=img,
+                blob=best_blob,
+                pixel_x=pixel_x,
+                pixel_y=blob_center_y(best_blob),
+            )
+        if not hook.has_context() or hook.is_finish_hook_context():
+            debug_yellow_ratio = build_finish_hook_yellow_ratio_percent(
+                img,
+                debug_blob,
+                image_width,
+                image_height,
+            )
+            draw_finish_hook_debug(
+                img,
+                hook,
+                debug_blob,
+                image_width,
+                image_height,
+                debug_yellow_ratio,
+            )
     if not hook.has_context():
         return
     if hook.is_return_line_context():
         _process_return_line_frame(uart, hook, img, image_width, image_height)
         return
 
-    observation, best_blob = build_observation_from_image(
-        hook, img, image_width, image_height, yolo_net
-    )
-    _, x, y, _ = observation
-    if best_blob is not None:
-        draw_selected_marker(
-            img=img,
-            blob=best_blob,
-            pixel_x=int(float(x) + image_width / 2.0),
-            pixel_y=best_blob.cy(),
+    if candidates is None:
+        observation, best_blob, selected_task_name, candidates = (
+            build_observation_and_candidates_from_image(
+                hook,
+                img,
+                image_width,
+                image_height,
+                yolo_net,
+            )
         )
+    else:
+        selected_task_name = None
+        target_x, target_y = build_search_target_point(
+            image_width,
+            image_height,
+            hook.current_target_config_id(),
+        )
+        if not candidates:
+            observation = hook.build_observation(0, 0, 0, 0, image_width, image_height)
+            best_blob = None
+        else:
+            if selected_candidate is None or selected_candidate not in candidates:
+                if should_filter_candidates_by_target_window(hook):
+                    selected_candidate = choose_largest_area_candidate(candidates)
+                else:
+                    selected_candidate = choose_best_candidate(
+                        candidates,
+                        target_x,
+                        target_y,
+                    )
+            selected_task_name, pixel_x, bottom_y, area, best_blob = selected_candidate
+            if debug_blob is None:
+                debug_blob = best_blob
+            observation = hook.build_observation(
+                1, pixel_x, bottom_y, area, image_width, image_height
+            )
+    _, x, y, _ = observation
     if hook.is_orbit_correction_context():
         velocity = build_orbit_correction_velocity_from_observation(
             observation,
@@ -1812,15 +2306,20 @@ def process_search_frame(uart, hook, img, image_width, image_height, yolo_net=No
     else:
         velocity = build_search_velocity_from_observation(observation, image_height)
     write_data_line(uart, format_search_velocity_frame(*velocity))
-    hook.accept_observation(
-        observation,
-        hook_value=build_hook_event_value(
+    if hook.is_finish_hook_context() and debug_yellow_ratio is not None:
+        hook_value = debug_yellow_ratio
+    else:
+        hook_value = build_hook_event_value(
             hook,
             img,
             best_blob,
             image_width,
             image_height,
-        ),
+            selected_task_name,
+        )
+    hook.accept_observation(
+        observation,
+        hook_value=hook_value,
     )
 
 
@@ -1849,7 +2348,10 @@ def run():
         rx_buffer = process_uart_input(uart, rx_buffer, hook)
         img = sensor.snapshot()  # type: ignore
         apply_lens_correction(img)
-        process_search_frame(uart, hook, img, image_width, image_height, yolo_net)
+        if OBJECT_DETECTION_USE_YOLO:
+            process_search_frame(uart, hook, img, image_width, image_height, yolo_net)
+        else:
+            process_search_frame(uart, hook, img, image_width, image_height)
 
 
 if __name__ == "__main__":

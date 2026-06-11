@@ -2,9 +2,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE="$SCRIPT_DIR/main.py"
-MODEL_SOURCE="$SCRIPT_DIR/../yolo/yolo.tflite"
+RULES_PATH="$ROOT_DIR/calibration/chromaforge-rules.json"
+MODEL_SOURCE="$ROOT_DIR/yolo/yolo.tflite"
 TARGET_DIR="${TARGET_DIR:-/Volumes/NO NAME}"
+TARGET_PATH="$TARGET_DIR/main.py"
 INCLUDE_YOLO="${1:-}"
 
 if [ "$INCLUDE_YOLO" != "" ] && [ "$INCLUDE_YOLO" != "yolo" ]; then
@@ -17,19 +20,35 @@ if [ ! -f "$SOURCE" ]; then
   exit 1
 fi
 
+if [ ! -f "$RULES_PATH" ]; then
+  echo "未找到标定文件 $RULES_PATH" >&2
+  exit 1
+fi
+
 if [ ! -d "$TARGET_DIR" ]; then
   echo "未找到目标目录 $TARGET_DIR" >&2
   exit 1
 fi
 
-cp "$SOURCE" "$TARGET_DIR/main.py"
+cd "$ROOT_DIR"
+
+uv run python -m calibration.chromaforge_export_adapter \
+  "$RULES_PATH" \
+  --source "$SOURCE" \
+  --output "$SOURCE" \
+  --task-constant-name TASKS
+
+cp "$SOURCE" "$TARGET_PATH"
 if [ "$INCLUDE_YOLO" = "yolo" ]; then
   if [ ! -f "$MODEL_SOURCE" ]; then
-    echo "未找到 $MODEL_SOURCE" >&2
+    echo "未找到模型文件 $MODEL_SOURCE" >&2
     exit 1
   fi
   cp "$MODEL_SOURCE" "$TARGET_DIR/yolo.tflite"
-  echo "已复制到 $TARGET_DIR/main.py 和 YOLO 模型"
-else
-  echo "已复制到 $TARGET_DIR/main.py"
+fi
+
+echo "已更新主车入口: $SOURCE"
+echo "已上传主车入口: $TARGET_PATH"
+if [ "$INCLUDE_YOLO" = "yolo" ]; then
+  echo "已上传 YOLO 模型: $TARGET_DIR/yolo.tflite"
 fi

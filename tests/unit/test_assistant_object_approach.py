@@ -35,45 +35,50 @@ class BadReadUART:
         return b"\xff"
 
 
-class BlobBackedYoloTf:
-    """测试中把既有假色块转换为 YOLO 检测框."""
+class FakeYoloTf:
+    """记录 YOLO 加载与检测调用的测试桩."""
+
+    def __init__(self):
+        self.loaded_paths = []
+        self.detect_calls = []
 
     def load(self, path):
-        _ = path
-        return "blob-backed-yolo"
+        self.loaded_paths.append(path)
+        return "fake-yolo-net"
 
     def detect(self, net, img):
-        _ = net
-        find_blobs = getattr(img, "find_blobs", None)
-        if find_blobs is None:
-            return []
-        image_height = img.height() if getattr(img, "height", None) is not None else IMAGE_HEIGHT
-        detections = []
-        for blob in find_blobs([], pixels_threshold=200, area_threshold=200, merge=True):
-            left, top, width, height = blob.rect()
-            detections.append(
-                (
-                    float(left) / float(IMAGE_WIDTH),
-                    float(top) / float(image_height),
-                    float(left + width) / float(IMAGE_WIDTH),
-                    float(top + height) / float(image_height),
-                    1,
-                    0.95,
-                )
-            )
-        return detections
+        self.detect_calls.append((net, img))
+        return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
 
 
 def load_assistant():
     """加载辅车视觉入口模块."""
 
-    module = load_main_module("assistant_object_approach_test_module")
-    module.tf = BlobBackedYoloTf()
-    return module
+    return load_main_module("assistant_object_approach_test_module")
+
+
+def yellow_pixel_for(module):
+    """根据当前回库黄线阈值构造命中像素."""
+
+    return tuple(
+        int((float(min_value) + float(max_value)) / 2)
+        for min_value, max_value in (
+            module.RETURN_LINE_YELLOW_THRESHOLD[0:2],
+            module.RETURN_LINE_YELLOW_THRESHOLD[2:4],
+            module.RETURN_LINE_YELLOW_THRESHOLD[4:6],
+        )
+    )
 
 
 IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
+
+
+def pack_task_arg(config_id, object_id):
+    packed = (int(config_id) & 0xFF) | ((int(object_id) & 0xFF) << 8)
+    if packed >= 0x8000:
+        packed -= 0x10000
+    return packed
 
 
 def assistant_target_point(module, config_id=None):
@@ -269,11 +274,79 @@ def test_assistant_sync_packet_switches_to_object_mode_and_replies_ack() -> None
     assert_assistant_ack(
         module,
         state.handle_control_line(
-            assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+            assistant_sync_frame(
+                12,
+                module.STATE_APPROACH_OBJECT,
+                module.TARGET_OBJECT,
+                pack_task_arg(1, 2),
+            )
         ),
         12,
     )
     assert state.mode == module.MODE_APPROACH_OBJECT
+    assert state.current_object_config_id() == 1
+
+
+def test_assistant_sync_packet_exposes_selected_object_id() -> None:
+    module = load_assistant()
+    state = module.AssistantVisionState()
+
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(1, 2),
+        )
+    )
+
+    assert state.current_object_id() == 2
+
+
+def test_assistant_packed_approach_sync_still_emits_target_found_event() -> None:
+    module = load_assistant()
+    state = module.AssistantVisionState(stable_frames=1)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.OBJECT_APPROACH_CONFIG_ID, 2),
+        )
+    )
+
+    state.accept_object_observation(centered_object_observation(module, 180))
+
+    assert_assistant_event(
+        module,
+        state.next_event_frame(),
+        12,
+        module.EVENT_TARGET_FOUND,
+        180,
+    )
+
+
+def test_assistant_packed_transport_sync_still_emits_aligned_event() -> None:
+    module = load_assistant()
+    state = module.AssistantVisionState(stable_frames=1)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 2),
+        )
+    )
+
+    state.accept_object_observation(centered_transport_observation(module, 180))
+
+    assert_assistant_event(
+        module,
+        state.next_event_frame(),
+        12,
+        module.EVENT_ALIGNED,
+        180,
+    )
 
 
 def test_assistant_sync_packet_switches_to_orbit_correction_mode() -> None:
@@ -289,13 +362,301 @@ def test_assistant_sync_packet_switches_to_orbit_correction_mode() -> None:
                 12,
                 module.STATE_ORBIT,
                 module.TARGET_OBJECT,
-                module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+                pack_task_arg(module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID, 2),
             )
         ),
         12,
     )
     assert state.mode == module.MODE_ORBIT_OBJECT
-    assert state.current_object_config_id() == module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID
+
+
+def test_process_object_frame_filters_candidates_by_selected_object_id() -> None:
+    module = load_assistant()
+    module.OBJECT_TASKS = (
+        ("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),
+        ("brown", ((7, 8, 9, 10, 11, 12),), 0, 1, 1, True),
+    )
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.OBJECT_APPROACH_CONFIG_ID, 2),
+        )
+    )
+
+    target_x, target_y = assistant_target_point(module, module.OBJECT_APPROACH_CONFIG_ID)
+
+    class RedBlob:
+        def rect(self):
+            return (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10
+
+        def area(self):
+            return 300
+
+    class BrownBlob:
+        def rect(self):
+            return (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10
+
+        def area(self):
+            return 300
+
+    class MixedImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            if thresholds == [(1, 2, 3, 4, 5, 6)]:
+                return [RedBlob()]
+            if thresholds == [(7, 8, 9, 10, 11, 12)]:
+                return [BrownBlob()]
+            return []
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+    uart = FakeUART()
+    module.process_object_frame(uart, state, MixedImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert_velocity_frame(
+        module,
+        uart.writes[0],
+        0.0,
+        0.0,
+    )
+    assert state.current_object_config_id() == module.OBJECT_APPROACH_CONFIG_ID
+    assert state.current_object_id() == 2
+
+
+def test_process_object_frame_prefers_target_window_candidate_in_transport() -> None:
+    """辅车推行阶段优先选择当前目标窗口内的候选框."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_TRANSPORT_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def __init__(self, center_x, center_y, bottom_y, area):
+            self._center_x = center_x
+            self._center_y = center_y
+            self._bottom_y = bottom_y
+            self._area = area
+
+        def rect(self):
+            width = 20
+            height = 20
+            top = IMAGE_HEIGHT - self._bottom_y
+            return (self._center_x - width / 2, top, width, height)
+
+        def cx(self):
+            return self._center_x
+
+        def cy(self):
+            return self._center_y
+
+        def area(self):
+            return self._area
+
+    class FakeImage:
+        def __init__(self, blobs):
+            self._blobs = blobs
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return self._blobs
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+    uart = FakeUART()
+
+    module.process_object_frame(
+        uart,
+        state,
+        FakeImage(
+            [
+                FakeBlob(target_x - 30.0, 53, target_y - 35.0, 300),
+                FakeBlob(target_x, 90, target_y, 300),
+            ]
+        ),
+        IMAGE_WIDTH,
+        IMAGE_HEIGHT,
+    )
+
+    assert_velocity_frame(
+        module,
+        uart.writes[0],
+        0.0,
+        0.0,
+    )
+
+
+def test_process_object_frame_transport_alignment_keeps_original_candidate_selection() -> None:
+    """辅车搬运前对正阶段不使用目标窗口强过滤."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def rect(self):
+            bottom_y = target_y - float(module.OBJECT_Y_TOLERANCE_PX) - 20.0
+            return (target_x - 10.0, IMAGE_HEIGHT - bottom_y, 20, 20)
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            bottom_y = target_y - float(module.OBJECT_Y_TOLERANCE_PX) - 20.0
+            return IMAGE_HEIGHT - bottom_y + 10.0
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [FakeBlob()]
+
+        def draw_cross(self, x, y, color=None):
+            _ = (x, y, color)
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+        def draw_string(self, x, y, text, color=None):
+            _ = (x, y, text, color)
+
+    uart = FakeUART()
+
+    module.process_object_frame(uart, state, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    frame = module.decode_frame(uart.writes[0])
+    assert frame is not None
+    body = module.decode_velocity_body(frame["body"])
+    assert body["vy"] != pytest.approx(module.OBJECT_MISSING_SEARCH_VY)
+
+
+def test_process_object_frame_marks_selected_object_and_target_point() -> None:
+    """辅车找物体调试画面标出当前选中目标与当前目标点."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_APPROACH_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.OBJECT_APPROACH_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(module)
+
+    class FakeBlob:
+        def rect(self):
+            return (target_x - 10, IMAGE_HEIGHT - target_y, 20, 20)
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def __init__(self):
+            self.crosses = []
+            self.labels = []
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [FakeBlob()]
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+        def draw_cross(self, x, y, color=None):
+            self.crosses.append((x, y, color))
+
+        def draw_string(self, x, y, text, color=None):
+            self.labels.append((x, y, text, color))
+
+    uart = FakeUART()
+    img = FakeImage()
+
+    module.process_object_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    expected_target_cross = (
+        IMAGE_WIDTH - 1 - int(target_x),
+        IMAGE_HEIGHT - 1 - int(target_y),
+    )
+    assert any(entry[:2] == expected_target_cross for entry in img.crosses)
+    assert any(entry[2] == "SELECT" for entry in img.labels)
 
 
 def test_assistant_orbit_correction_uses_independent_velocity_params_without_event() -> None:
@@ -705,7 +1066,7 @@ def test_assistant_target_found_sends_stable_zero_before_event() -> None:
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
     assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
-    assert_assistant_event(module, uart.writes[2], 12, module.EVENT_TARGET_FOUND, 400)
+    assert_assistant_event(module, uart.writes[2], 12, module.EVENT_TARGET_FOUND, 300)
 
 
 def test_assistant_pending_event_suppresses_velocity_between_retries() -> None:
@@ -735,8 +1096,8 @@ def test_assistant_pending_event_suppresses_velocity_between_retries() -> None:
 
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
-    assert_assistant_event(module, uart.writes[1], 12, module.EVENT_TARGET_FOUND, 400)
-    assert_assistant_event(module, uart.writes[2], 12, module.EVENT_TARGET_FOUND, 400)
+    assert_assistant_event(module, uart.writes[1], 12, module.EVENT_TARGET_FOUND, 300)
+    assert_assistant_event(module, uart.writes[2], 12, module.EVENT_TARGET_FOUND, 300)
 
 
 def test_assistant_hook_repeats_event_until_matching_ack() -> None:
@@ -791,6 +1152,32 @@ def test_assistant_transport_mode_emits_aligned_for_transport_config() -> None:
     observation = centered_transport_observation(module, 180)
     state.accept_object_observation(observation)
 
+    assert_assistant_event(module, state.next_event_frame(), 12, module.EVENT_ALIGNED, 180)
+
+
+def test_assistant_orbit_state_transport_config_aligns_to_transport_target() -> None:
+    """主车绕行后辅车跳过绕行时直接按搬运目标点对正."""
+
+    module = load_assistant()
+    state = module.AssistantVisionState(stable_frames=1)
+
+    assert_assistant_ack(
+        module,
+        state.handle_control_line(
+            assistant_sync_frame(
+                12,
+                int(module.STATE_ORBIT),
+                int(module.TARGET_OBJECT),
+                pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 2),
+            )
+        ),
+        12,
+    )
+    observation = centered_transport_observation(module, 180)
+    state.accept_object_observation(observation)
+
+    assert state.mode == module.MODE_APPROACH_OBJECT
+    assert state.current_object_config_id() == module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
     assert_assistant_event(module, state.next_event_frame(), 12, module.EVENT_ALIGNED, 180)
 
 
@@ -855,23 +1242,168 @@ def test_assistant_transport_mode_keeps_object_velocity_output() -> None:
     assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
 
 
-def test_assistant_object_candidates_use_yolo_detection() -> None:
-    """辅车物体候选由 YOLO 检测结果生成."""
+def test_process_object_frame_accepts_x_outside_when_bottom_hits_target_window_in_transport() -> None:
+    """辅车推行阶段只要求候选框底边命中目标窗口."""
 
     module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_TRANSPORT_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
 
-    class FakeTf:
-        def __init__(self):
-            self.loaded_paths = []
+    class FakeBlob:
+        def rect(self):
+            width = 20
+            height = 20
+            return (
+                target_x + float(module.OBJECT_X_TOLERANCE_PX) + 10.0,
+                IMAGE_HEIGHT - target_y,
+                width,
+                height,
+            )
 
-        def load(self, path):
-            self.loaded_paths.append(path)
-            return "fake-net"
+        def cx(self):
+            return target_x + float(module.OBJECT_X_TOLERANCE_PX) + 20.0
 
-        def detect(self, net, img):
-            assert net == "fake-net"
-            assert img == "detect-image"
-            return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10.0
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [FakeBlob()]
+
+        def draw_cross(self, x, y, color=None):
+            _ = (x, y, color)
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+        def draw_string(self, x, y, text, color=None):
+            _ = (x, y, text, color)
+
+    uart = FakeUART()
+
+    module.process_object_frame(uart, state, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert_velocity_frame(
+        module,
+        uart.writes[0],
+        expected_axis_velocity(
+            float(module.OBJECT_X_TOLERANCE_PX) + 20.0,
+            module.OBJECT_APPROACH_KP_X,
+            module.OBJECT_APPROACH_MIN_SPEED,
+            module.OBJECT_APPROACH_MAX_VX,
+        ),
+        0.0,
+    )
+
+
+def test_process_object_frame_prefers_largest_area_after_bottom_filter_in_transport() -> None:
+    """辅车推行阶段在底边命中的候选中选择面积最大者."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_TRANSPORT_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def __init__(self, center_x, area):
+            self._center_x = center_x
+            self._area = area
+
+        def rect(self):
+            width = 20
+            height = 20
+            return (self._center_x - 10.0, IMAGE_HEIGHT - target_y, width, height)
+
+        def cx(self):
+            return self._center_x
+
+        def cy(self):
+            return IMAGE_HEIGHT - target_y + 10.0
+
+        def area(self):
+            return self._area
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [
+                FakeBlob(target_x, 300),
+                FakeBlob(target_x + float(module.OBJECT_X_TOLERANCE_PX) + 20.0, 800),
+            ]
+
+        def draw_cross(self, x, y, color=None):
+            _ = (x, y, color)
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+        def draw_string(self, x, y, text, color=None):
+            _ = (x, y, text, color)
+
+    uart = FakeUART()
+
+    module.process_object_frame(uart, state, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert_velocity_frame(
+        module,
+        uart.writes[0],
+        expected_axis_velocity(
+            float(module.OBJECT_X_TOLERANCE_PX) + 20.0,
+            module.OBJECT_APPROACH_KP_X,
+            module.OBJECT_APPROACH_MIN_SPEED,
+            module.OBJECT_APPROACH_MAX_VX,
+        ),
+        0.0,
+    )
+
+
+def test_assistant_object_candidates_use_yolo_when_flag_enabled() -> None:
+    """打开开关后辅车找物体候选切换到 YOLO."""
+
+    module = load_assistant()
+    module.OBJECT_DETECTION_USE_YOLO = True
+    module.tf = FakeYoloTf()
 
     class FakeImage:
         def __init__(self):
@@ -887,19 +1419,94 @@ def test_assistant_object_candidates_use_yolo_detection() -> None:
             self.copy_calls.append((scale, copy_to_fb))
             return "detect-image"
 
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            raise AssertionError("物体识别不应继续调用色块检测")
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            raise AssertionError("打开 YOLO 后不应继续调用色块识别")
 
-    module.tf = FakeTf()
     img = FakeImage()
+
     candidates = module.build_object_blob_candidates(img)
 
     assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
+    assert module.tf.detect_calls == [("fake-yolo-net", "detect-image")]
     assert img.copy_calls == [(module.YOLO_IMAGE_COPY_SCALE, 1)]
     assert candidates[0][0] == "red"
     assert candidates[0][1] == pytest.approx(160.0)
     assert candidates[0][3] == pytest.approx(210.0)
     assert candidates[0][4] == pytest.approx(3200.0)
+
+
+def test_process_object_frame_ignores_candidates_when_bottom_outside_target_window_in_transport() -> None:
+    """辅车推行阶段忽略底边未命中目标窗口的候选框."""
+
+    module = load_assistant()
+    module.OBJECT_TASKS = (("red", ((1, 2, 3, 4, 5, 6),), 0, 1, 1, True),)
+    state = module.AssistantVisionState(stable_frames=99)
+    state.handle_control_line(
+        assistant_sync_frame(
+            12,
+            module.STATE_TRANSPORT_OBJECT,
+            module.TARGET_OBJECT,
+            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+        )
+    )
+    target_x, target_y = assistant_target_point(
+        module,
+        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+    )
+
+    class FakeBlob:
+        def rect(self):
+            width = 20
+            height = 20
+            bottom_y = target_y + float(module.OBJECT_Y_TOLERANCE_PX) + 10.0
+            return (
+                target_x,
+                IMAGE_HEIGHT - bottom_y,
+                width,
+                height,
+            )
+
+        def cx(self):
+            return target_x
+
+        def cy(self):
+            bottom_y = target_y + float(module.OBJECT_Y_TOLERANCE_PX) + 10.0
+            return IMAGE_HEIGHT - bottom_y + 10.0
+
+        def area(self):
+            return 300
+
+    class FakeImage:
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [FakeBlob()]
+
+        def draw_cross(self, x, y, color=None):
+            _ = (x, y, color)
+
+        def draw_rectangle(self, x, y, w, h):
+            _ = (x, y, w, h)
+
+        def draw_string(self, x, y, text, color=None):
+            _ = (x, y, text, color)
+
+    uart = FakeUART()
+
+    module.process_object_frame(uart, state, FakeImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    assert_velocity_frame(
+        module,
+        uart.writes[0],
+        module.OBJECT_MISSING_SEARCH_VX,
+        module.OBJECT_MISSING_SEARCH_VY,
+    )
 
 
 def test_assistant_process_uart_input_writes_local_ack() -> None:
@@ -938,6 +1545,7 @@ def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
     """辅车回库黄线模式只根据本地黄线输出速度."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     module.RETURN_LINE_DEADZONE_Y_PX = 2.0
     module.RETURN_LINE_KP_Y = -0.5
     module.RETURN_LINE_MAX_VY = 10.0
@@ -979,7 +1587,7 @@ def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 130 <= logical_x <= 190 and 180 <= logical_y <= 200:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     img = YellowImage()
@@ -997,6 +1605,7 @@ def test_assistant_return_line_does_not_filter_y_before_160() -> None:
     """辅车回库黄线不再按固定 160px 顶边过滤黄线."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     module.RETURN_LINE_TARGET_Y_PX = 220.0
     module.RETURN_LINE_DEADZONE_Y_PX = 2.0
     module.RETURN_LINE_KP_Y = -0.5
@@ -1028,7 +1637,7 @@ def test_assistant_return_line_does_not_filter_y_before_160() -> None:
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 130 <= logical_x <= 190 and 80 <= logical_y <= 100:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     module.process_frame(uart, state, OutsideImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
@@ -1044,6 +1653,7 @@ def test_assistant_return_line_limits_wide_yellow_to_lower_30px() -> None:
     """辅车回库黄线过厚时保留下界并限制参与计算的厚度."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     module.RETURN_LINE_MAX_THICKNESS_PX = 30
 
     class WideYellowImage:
@@ -1051,7 +1661,7 @@ def test_assistant_return_line_limits_wide_yellow_to_lower_30px() -> None:
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 130 <= logical_x <= 190 and 80 <= logical_y <= 200:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     line_y = module.build_return_line_y_from_image(
@@ -1067,6 +1677,7 @@ def test_assistant_return_line_keeps_previous_when_horizontal_connected_is_too_s
     """辅车回库黄线候选点左右水平联通不足时沿用上一帧有效值."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     module.RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
 
     class NarrowYellowImage:
@@ -1074,7 +1685,7 @@ def test_assistant_return_line_keeps_previous_when_horizontal_connected_is_too_s
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 150 <= logical_x <= 170 and 180 <= logical_y <= 200:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     line_y = module.build_return_line_y_from_image(
@@ -1091,6 +1702,7 @@ def test_assistant_return_line_stops_horizontal_scan_after_required_connected_pi
     """辅车回库黄线水平联通满足阈值后不继续扫完整行."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     module.RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
 
     class LongYellowImage:
@@ -1101,7 +1713,7 @@ def test_assistant_return_line_stops_horizontal_scan_after_required_connected_pi
             self.pixel_reads.append((int(x), int(y)))
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 180 <= logical_y <= 200:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     img = LongYellowImage()
@@ -1161,6 +1773,7 @@ def test_assistant_return_line_below_target_y_does_not_report_finished_event() -
     """辅车回库黄线模式保留 Y 大于 160 的黄线判定."""
 
     module = load_assistant()
+    yellow_pixel = yellow_pixel_for(module)
     state = module.AssistantVisionState()
     state.handle_control_line(
         assistant_sync_frame(
@@ -1194,7 +1807,7 @@ def test_assistant_return_line_below_target_y_does_not_report_finished_event() -
             logical_x = IMAGE_WIDTH - 1 - int(x)
             logical_y = IMAGE_HEIGHT - 1 - int(y)
             if 130 <= logical_x <= 190 and 230 <= logical_y <= 250:
-                return (50, 0, 50)
+                return yellow_pixel
             return (0, 0, 0)
 
     for _ in range(6):
@@ -1273,12 +1886,11 @@ def test_assistant_run_applies_lens_correction_before_processing() -> None:
     module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
     module.process_uart_input = lambda uart, rx_buffer, state: rx_buffer
 
-    def stop_after_frame(uart, state, img, image_width, image_height, yolo_net=None):
+    def stop_after_frame(uart, state, img, image_width, image_height):
         _ = uart
         _ = state
         _ = image_width
         _ = image_height
-        _ = yolo_net
         assert img is image
         assert image.lens_corr_called is True
         raise StopLoop()

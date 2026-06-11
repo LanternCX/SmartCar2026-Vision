@@ -216,6 +216,8 @@ def test_follow_color_tasks_use_runtime_config() -> None:
     """跟随模式候选提取直接使用当前配置的任务表."""
     module = load_main_module("vision_main_test_module_unit")
     module.FOLLOW_TASKS = (("runtime_follow", (1, 2, 3, 4, 5, 6)),)
+    module.OBJECT_BLOB_PIXELS_THRESHOLD = 12
+    module.OBJECT_BLOB_AREA_THRESHOLD = 40
 
     class FakeBlob:
         def rect(self):
@@ -247,116 +249,384 @@ def test_follow_color_tasks_use_runtime_config() -> None:
     img = FakeImage()
     candidates = module.build_blob_candidates(img)
 
-    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 200, 200, True)]
+    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 12, 40, True)]
     assert candidates[0][0] == "runtime_follow"
 
 
-def test_object_candidates_use_yolo_detection() -> None:
-    """找物体候选提取使用 YOLO 检测结果."""
+def test_object_color_tasks_use_runtime_config() -> None:
+    """找物体候选提取直接使用当前配置的任务表."""
     module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_TASKS = (("runtime_object", (6, 5, 4, 3, 2, 1)),)
+    module.OBJECT_BLOB_PIXELS_THRESHOLD = 12
+    module.OBJECT_BLOB_AREA_THRESHOLD = 40
 
-    class FakeTf:
-        def __init__(self):
-            self.loaded_paths = []
+    class FakeBlob:
+        def rect(self):
+            return (10, 20, 30, 40)
 
-        def load(self, path):
-            self.loaded_paths.append(path)
-            return "fake-net"
+        def cx(self):
+            return 25
 
-        def detect(self, net, img):
-            assert net == "fake-net"
-            assert img == "detect-image"
-            return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
+        def cy(self):
+            return 40
+
+        def area(self):
+            return 1234
 
     class FakeImage:
         def __init__(self):
-            self.copy_calls = []
-
-        def width(self):
-            return 320
-
-        def height(self):
-            return 240
-
-        def copy(self, scale, copy_to_fb):
-            self.copy_calls.append((scale, copy_to_fb))
-            return "detect-image"
-
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            raise AssertionError("找物体候选不应继续调用色块检测")
-
-    module.tf = FakeTf()
-    img = FakeImage()
-    candidates = module.build_object_blob_candidates(img)
-
-    assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
-    assert img.copy_calls == [(module.YOLO_IMAGE_COPY_SCALE, 1)]
-    assert candidates[0][0] == "red"
-    assert candidates[0][1] == pytest.approx(160.0)
-    assert candidates[0][3] == pytest.approx(210.0)
-
-
-def test_build_object_blob_candidates_reports_box_area_as_value() -> None:
-    """找物体候选目标携带模型框面积用于稳定判定."""
-    module = load_main_module("vision_main_test_module_unit")
-
-    class FakeTf:
-        def load(self, path):
-            _ = path
-            return "fake-net"
-
-        def detect(self, net, img):
-            _ = net
-            _ = img
-            return [(0.1, 0.2, 0.4, 0.6, 2, 0.95)]
-
-    class FakeImage:
-        def width(self):
-            return 320
+            self.calls = []
 
         def height(self):
             return 100
 
-    module.tf = FakeTf()
-    candidates = module.build_object_blob_candidates(FakeImage())
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge))
+            return [FakeBlob()]
 
-    assert candidates[0][0] == "blue"
-    assert candidates[0][3] == pytest.approx(80.0)
-    assert candidates[0][4] == pytest.approx(3840.0)
+    img = FakeImage()
+    candidates = module.build_object_blob_candidates(img)
+
+    assert img.calls == [([(6, 5, 4, 3, 2, 1)], 12, 1, True)]
+    assert candidates[0][0] == "runtime_object"
 
 
-def test_draw_selected_marker_draws_corners_without_bounding_box() -> None:
-    """调试显示必须画四个角点而不是外接框."""
+def test_object_color_candidates_require_all_configured_thresholds() -> None:
+    """找物体候选一次性使用全部 LAB 阈值并要求颜色码完整命中."""
     module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_TASKS = (
+        (
+            "red",
+            (
+                (0, 100, 18, 127, -23, 127),
+                (10, 90, 25, 127, -10, 120),
+            ),
+            6,
+            12,
+            40,
+        ),
+    )
 
     class FakeBlob:
-        def corners(self):
-            return ((11, 20), (18, 21), (30, 20), (35, 27))
+        def rect(self):
+            return (80, 30, 160, 20)
 
-        def min_corners(self):
-            return ((10, 20), (30, 20), (36, 50), (4, 50))
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 40
+
+        def code(self):
+            return 0b11
+
+        def area(self):
+            return 3200
 
     class FakeImage:
         def __init__(self):
-            self.crosses = []
+            self.calls = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge, margin))
+            return [FakeBlob()]
+
+    img = FakeImage()
+    candidates = module.build_object_blob_candidates(img)
+
+    assert img.calls == [
+        (
+            [
+                (0, 100, 18, 127, -23, 127),
+                (10, 90, 25, 127, -10, 120),
+            ],
+            12,
+                1,
+                True,
+                6,
+            ),
+    ]
+    assert candidates[0][0] == "red"
+    assert candidates[0][1] == pytest.approx(160.0)
+    assert candidates[0][3] == pytest.approx(210.0)
+    assert candidates[0][4] == pytest.approx(3200.0)
+
+
+def test_object_color_candidates_reject_missing_secondary_threshold() -> None:
+    """找物体候选颜色码未覆盖全部 LAB 阈值时不输出目标."""
+    module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_TASKS = (
+        (
+            "red",
+            (
+                (0, 100, 18, 127, -23, 127),
+                (10, 90, 25, 127, -10, 120),
+            ),
+            6,
+            12,
+            40,
+        ),
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 160, 20)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 40
+
+        def code(self):
+            return 0b01
+
+        def area(self):
+            return 3200
+
+    class FakeImage:
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = thresholds
+            _ = pixels_threshold
+            _ = area_threshold
+            _ = merge
+            _ = margin
+            return [FakeBlob()]
+
+    assert module.build_object_blob_candidates(FakeImage()) == []
+
+
+def test_object_color_candidates_apply_target_area_after_find_blobs() -> None:
+    """找物体候选在 find_blobs 之后再按最终目标面积过滤."""
+    module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_TASKS = (
+        (
+            "red",
+            ((1, 2, 3, 4, 5, 6),),
+            2,
+            6,
+            100,
+            True,
+        ),
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 20, 10)
+
+        def cx(self):
+            return 90
+
+        def cy(self):
+            return 35
+
+        def area(self):
+            return 80
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge, margin))
+            return [FakeBlob()]
+
+    img = FakeImage()
+
+    assert module.build_object_blob_candidates(img) == []
+    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 6, 1, True, 2)]
+
+
+def test_object_color_candidates_apply_max_side_length_limit_for_assistant() -> None:
+    """辅车找物体候选超出最大边长时必须被过滤."""
+    module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_TASKS = (
+        (
+            "red",
+            ((1, 2, 3, 4, 5, 6),),
+            2,
+            6,
+            100,
+            12,
+            True,
+        ),
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 20, 13)
+
+        def cx(self):
+            return 90
+
+        def cy(self):
+            return 35
+
+        def area(self):
+            return 260
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge, margin))
+            return [FakeBlob()]
+
+    img = FakeImage()
+
+    assert module.build_object_blob_candidates(img) == []
+    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 6, 1, True, 2)]
+
+
+def test_blob_candidates_apply_max_side_length_limit_for_master() -> None:
+    """主车候选超出最大边长时必须被过滤."""
+    module = load_role_main_module("master", "vision_master_main_test_module_unit")
+    module.TASKS = (
+        (
+            "red",
+            ((1, 2, 3, 4, 5, 6),),
+            2,
+            6,
+            100,
+            12,
+            True,
+        ),
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 20, 13)
+
+        def cx(self):
+            return 90
+
+        def area(self):
+            return 260
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge, margin))
+            return [FakeBlob()]
+
+    img = FakeImage()
+
+    assert module.build_blob_candidates(img) == []
+    assert img.calls == [([(1, 2, 3, 4, 5, 6)], 6, 1, True, 2)]
+
+
+def test_object_color_candidates_support_legacy_task_without_per_object_params() -> None:
+    """旧任务配置缺少单物体参数时继续使用全局默认值."""
+    module = load_main_module("vision_main_test_module_unit")
+    module.OBJECT_BLOB_MERGE_MARGIN = 0
+    module.OBJECT_BLOB_PIXELS_THRESHOLD = 21
+    module.OBJECT_BLOB_AREA_THRESHOLD = 34
+    module.OBJECT_TASKS = (("red", ((0, 100, 18, 127, -23, 127),)),)
+
+    class FakeBlob:
+        def rect(self):
+            return (80, 30, 160, 20)
+
+        def cx(self):
+            return 160
+
+        def cy(self):
+            return 40
+
+        def area(self):
+            return 3200
+
+    class FakeImage:
+        def __init__(self):
+            self.calls = []
+
+        def height(self):
+            return 240
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            self.calls.append((thresholds, pixels_threshold, area_threshold, merge))
+            return [FakeBlob()]
+
+    img = FakeImage()
+    module.build_object_blob_candidates(img)
+
+    assert img.calls == [([(0, 100, 18, 127, -23, 127)], 21, 1, True)]
+
+
+def test_build_object_blob_candidates_reports_area_as_value() -> None:
+    """找物体候选目标必须携带面积值用于稳定判定."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    class FakeBlob:
+        def rect(self):
+            return (10, 20, 30, 40)
+
+        def cx(self):
+            return 25
+
+        def cy(self):
+            return 40
+
+        def area(self):
+            return 1234
+
+    class FakeImage:
+        def height(self):
+            return 100
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
+            return [FakeBlob()]
+
+    candidates = module.build_object_blob_candidates(FakeImage())
+
+    assert candidates[0][3] == 80
+    assert candidates[0][4] == 1234
+
+
+def test_draw_selected_marker_draws_bounding_box() -> None:
+    """调试显示必须画外接框，便于区分不同候选."""
+    module = load_main_module("vision_main_test_module_unit")
+
+    class FakeBlob:
+        def rect(self):
+            return (4, 20, 32, 30)
+
+    class FakeImage:
+        def __init__(self):
             self.rectangles = []
+            self.labels = []
 
-        def draw_cross(self, x, y):
-            self.crosses.append((x, y))
+        def draw_rectangle(self, x, y, w, h, color=None):
+            self.rectangles.append((x, y, w, h, color))
 
-        def draw_rectangle(self, rect):
-            self.rectangles.append(rect)
+        def draw_string(self, x, y, text, color=None):
+            self.labels.append((x, y, text, color))
 
     img = FakeImage()
     blob = FakeBlob()
 
     module.draw_selected_marker(img=img, blob=blob, pixel_x=20, pixel_y=35)
 
-    assert img.rectangles == []
-    assert len(img.crosses) == 5
-    assert (20, 35) in img.crosses
-    for point in ((10, 20), (30, 20), (36, 50), (4, 50)):
-        assert point in img.crosses
+    assert img.rectangles == [(4, 20, 32, 30, None)]
+    assert any(entry[2] == "SELECT" for entry in img.labels)
 
 
 

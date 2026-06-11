@@ -18,7 +18,6 @@
 
 - 运行时代码按角色维护在 `assistant/main.py` 与 `master/main.py`。
 - 每个角色目录独立维护面向 OpenART 设备部署的 `build.sh`。
-- 模型权重本地放在 `yolo/yolo.tflite`, 部署时按需复制到 OpenART 存储根目录。
 - 本仓库不维护独立 `.agents/skills` 体系。
 - 本仓库不维护题面规则文档副本。
 - 文档、注释和规则入口通过 review 检查。
@@ -40,10 +39,9 @@
 
 - 接收 RT1021 下发的主车视觉同步帧, body 字段为 `context_id/state/target/arg`。
 - 使用主车视觉同步 topic 的 ACK 帧确认可靠同步包。
-- 使用 YOLO 模型提取物体候选框。
 - 基于候选目标识别框中心点计算搜索 P 环。
 - 输出主车搜索速度短帧, body 字段为 `vx/vy/omega/has_omega`, 其中 `omega=0`、`has_omega=0`。
-- 速度短帧独立于 hook 上下文, 每帧直接根据模型识别结果输出。
+- 速度短帧独立于 hook 上下文, 每帧直接根据当前识别开关选择的结果输出。
 - 在 hook 条件满足时输出主车视觉事件回报帧, body 字段为 `context_id/event/value`。
 - `arg=1` 表示主车物体搜索 hook 配置, 稳定满足条件后回报 `TARGET_FOUND=6`。
 - `arg=2` 表示主车搬运入口对正 hook 配置, 稳定满足条件后回报 `ALIGNED=7`。
@@ -59,7 +57,7 @@
 `assistant/main.py` 运行在辅车 OpenART 上, 负责辅车跟随主车色标和辅车找目标物体:
 
 - 跟随模式识别主车色标。
-- 找物体模式使用 YOLO 模型识别目标物体。
+- 找物体模式可通过代码开关选择色块阈值或 YOLO 模型识别目标物体。
 - 在 OpenART 端完成角色内阶段判断。
 - 输出辅车视觉速度修正短帧, body 字段为 `vx/vy/omega/has_omega`, 其中 `omega=0`、`has_omega=0`。
 - 接收辅车 RT1021 下发的本地任务同步帧, body 字段为 `state/target/arg`。
@@ -70,7 +68,7 @@
 
 ## 辅车找物体规则
 
-- 找物体模式使用 YOLO 模型候选框，与主车目标搜索保持一致。
+- 找物体模式可通过代码开关选择色块阈值或 YOLO 模型，与主车目标搜索保持一致。
 - 找物体目标点按同步配置编号切换，可通过对应目标点参数调整。
 - 找物体同步 `arg=1` 使用寻找阶段目标点，默认 `x=160, y=210`。
 - 搬运入口同步 `arg=2` 使用推行前对正目标点，默认 `x=160, y=240`。
@@ -92,14 +90,14 @@
 
 ## 角色部署
 
-每个角色目录提供独立构建脚本, 脚本会把本目录的 `main.py` 复制为设备根目录的 `main.py`。
+每个角色目录各自维护独立构建脚本。脚本会读取角色目录外部 `calibration/` 下的共享标定文件，更新本角色源码入口，并上传到板端目录。
 
 ```bash
 ./assistant/build.sh
 ./master/build.sh
 ```
 
-默认设备挂载目录为 `/Volumes/NO NAME`。需要指定目标目录时使用 `TARGET_DIR`:
+默认板端目录为 `/Volumes/NO NAME`。需要指定板端目录时使用 `TARGET_DIR`:
 
 ```bash
 TARGET_DIR=/path/to/device ./assistant/build.sh
@@ -112,6 +110,28 @@ TARGET_DIR=/path/to/device ./master/build.sh
 ./assistant/build.sh yolo
 ./master/build.sh yolo
 ```
+
+## 物体识别开关
+
+- `master/main.py` 中的 `OBJECT_DETECTION_USE_YOLO`
+- `assistant/main.py` 中的 `OBJECT_DETECTION_USE_YOLO`
+
+设为 `False` 时使用当前色块阈值识别，设为 `True` 时使用 `yolo.tflite` 模型识别。
+
+## ChromaForge 色彩标定接入
+
+`calibration/chromaforge_export_adapter.py` 负责把同目录的 `chromaforge-rules.json` 转为 OpenART 入口可用的识别配置。规则文件每次运行都会校验。新格式下, 每个物体会携带自己的识别参数, 包括合并间距、面积下限、最大边长和颜色簇命中要求; 老格式顶层参数仍可作为回退值读取。
+
+手动生成单个入口:
+
+```bash
+uv run python calibration/chromaforge_export_adapter.py \
+  --source master/main.py \
+  --output /tmp/master-main.py \
+  --task-constant-name TASKS
+```
+
+只需要配置片段时省略 `--source` 和 `--output`。
 
 ## 验证命令
 
