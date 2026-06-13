@@ -1,6 +1,8 @@
 """测试辅助函数."""
 
 import importlib.util
+import sys
+import types
 from pathlib import Path
 
 
@@ -23,10 +25,16 @@ TOPIC_ASSISTANT_VISION_EVENT_REPORT = 0x13
 _SCALE = 1000.0
 
 
-def role_main_path(role: str) -> Path:
+def role_entry_path(role: str, entry_name: str = "main.py") -> Path:
     """返回指定角色的视觉入口路径."""
 
-    return ROOT / role / "main.py"
+    return ROOT / role / entry_name
+
+
+def role_main_path(role: str) -> Path:
+    """返回指定角色的默认视觉入口路径."""
+
+    return role_entry_path(role, "main.py")
 
 
 def load_main_module(module_name: str):
@@ -38,11 +46,75 @@ def load_main_module(module_name: str):
 def load_role_main_module(role: str, module_name: str):
     """按真实模块导入方式加载指定角色 main.py, 但不触发运行入口."""
 
-    spec = importlib.util.spec_from_file_location(module_name, role_main_path(role))
+    return load_role_entry_module(role, "main.py", module_name)
+
+
+def load_role_entry_module(role: str, entry_name: str, module_name: str):
+    """按真实模块导入方式加载指定角色入口, 但不触发运行入口."""
+
+    _install_board_runtime_stubs()
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        role_entry_path(role, entry_name),
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _install_board_runtime_stubs() -> None:
+    """为主机测试补齐 OpenART 入口需要的最小模块桩."""
+
+    if "sensor" not in sys.modules:
+        sensor_module = types.ModuleType("sensor")
+        sensor_module.RGB565 = "RGB565"
+        sensor_module.QVGA = "QVGA"
+        sensor_module.reset = lambda: None
+        sensor_module.set_pixformat = lambda *_args, **_kwargs: None
+        sensor_module.set_framesize = lambda *_args, **_kwargs: None
+        sensor_module.set_vflip = lambda *_args, **_kwargs: None
+        sensor_module.set_hmirror = lambda *_args, **_kwargs: None
+        sensor_module.skip_frames = lambda *_args, **_kwargs: None
+        sensor_module.set_auto_gain = lambda *_args, **_kwargs: None
+        sensor_module.set_auto_whitebal = lambda *_args, **_kwargs: None
+        sensor_module.set_auto_exposure = lambda *_args, **_kwargs: None
+        sensor_module.width = lambda: 320
+        sensor_module.height = lambda: 240
+        sensor_module.snapshot = lambda: None
+        sys.modules["sensor"] = sensor_module
+
+    if "tf" not in sys.modules:
+        tf_module = types.ModuleType("tf")
+        tf_module.load = lambda path: path
+        tf_module.detect = lambda _net, _img: ()
+        sys.modules["tf"] = tf_module
+
+    if "image" not in sys.modules:
+        image_module = types.ModuleType("image")
+        image_module.rgb_to_lab = lambda pixel: pixel
+        image_module.lab_to_rgb = lambda pixel: pixel
+        sys.modules["image"] = image_module
+
+    if "machine" not in sys.modules:
+        machine_module = types.ModuleType("machine")
+
+        class FakeUART:
+            def __init__(self, *_args, **_kwargs):
+                self.buffer = []
+
+            def any(self):
+                return 0
+
+            def read(self, _size):
+                return None
+
+            def write(self, data):
+                self.buffer.append(data)
+                return len(data)
+
+        machine_module.UART = FakeUART
+        sys.modules["machine"] = machine_module
 
 
 def encode_frame(mode: int, topic: int, seq: int, body: bytes) -> bytes:

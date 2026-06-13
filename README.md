@@ -41,15 +41,15 @@
 - 使用主车视觉同步 topic 的 ACK 帧确认可靠同步包。
 - 基于候选目标识别框中心点计算搜索 P 环。
 - 输出主车搜索速度短帧, body 字段为 `vx/vy/omega/has_omega`, 其中 `omega=0`、`has_omega=0`。
-- 速度短帧独立于 hook 上下文, 每帧直接根据当前识别开关选择的结果输出。
-- 在 hook 条件满足时输出主车视觉事件回报帧, body 字段为 `context_id/event/value`。
-- `arg=1` 表示主车物体搜索 hook 配置, 稳定满足条件后回报 `TARGET_FOUND=6`。
-- `arg=2` 表示主车搬运入口对正 hook 配置, 稳定满足条件后回报 `ALIGNED=7`。
-- `arg=5` 表示主车回库黄线 hook 配置, 后退段回报 `RETURN_LINE_ALIGNED=10`, 平移段在有效跟随区域连续 5 帧算不出黄线时回报 `RETURN_GARAGE_FINISHED=12`。
-- 主车搜索目标点按 hook 配置编号切换：`arg=1` 使用寻找阶段目标点，默认 `x=160, y=210`；`arg=2` 使用搬运入口对正目标点，默认 `x=160, y=240`。
-- hook 判定使用物体中心相对目标点的横向误差。
-- hook 判定使用物体底边相对目标点的纵向误差。
-- hook 判定使用候选目标面积。
+- 速度短帧独立于 task 上下文, 每帧直接根据当前识别开关选择的结果输出。
+- 在 task 条件满足时输出主车视觉事件回报帧, body 字段为 `context_id/event/value`。
+- `arg=1` 表示主车物体搜索 task 配置, 稳定满足条件后回报 `TARGET_FOUND=6`。
+- `arg=2` 表示主车搬运入口对正 task 配置, 稳定满足条件后回报 `ALIGNED=7`。
+- `arg=5` 表示主车回库黄线 task 配置, 后退段回报 `RETURN_LINE_ALIGNED=10`, 平移段在有效跟随区域连续 5 帧算不出黄线时回报 `RETURN_GARAGE_FINISHED=12`。
+- 主车搜索目标点按 task 配置编号切换：`arg=1` 使用寻找阶段目标点，默认 `x=160, y=210`；`arg=2` 使用搬运入口对正目标点，默认 `x=160, y=240`。
+- task 判定使用物体中心相对目标点的横向误差。
+- task 判定使用物体底边相对目标点的纵向误差。
+- task 判定使用候选目标面积。
 - 主车搜索控制使用 `v` 数据流, 不依赖周期 `o` 观测包。
 
 ### OpenART Vision assistant
@@ -81,7 +81,7 @@
 ## 主车视觉发送规则
 
 - `master/main.py` 的 `v` 数据流包直接写出, 不执行发送前后延时。
-- `master/main.py` 的 `v` 数据流包不等待 hook 上下文建立。
+- `master/main.py` 的 `v` 数据流包不等待 task 上下文建立。
 - `master/main.py` 的可靠帧在当前入口层直接写出, 不额外插入发送保护延时。
 - 未确认的 `r` 事件按低频节奏重复发送, 不随每帧图像重复写出。
 - 主通信串口: `UART(2)`。
@@ -95,6 +95,7 @@
 ```bash
 ./assistant/build.sh
 ./master/build.sh
+./master/build_v2.sh
 ```
 
 默认板端目录为 `/Volumes/NO NAME`。需要指定板端目录时使用 `TARGET_DIR`:
@@ -102,6 +103,7 @@
 ```bash
 TARGET_DIR=/path/to/device ./assistant/build.sh
 TARGET_DIR=/path/to/device ./master/build.sh
+TARGET_DIR=/path/to/device ./master/build_v2.sh
 ```
 
 需要同步 YOLO 权重时传入 `yolo` 参数:
@@ -109,6 +111,7 @@ TARGET_DIR=/path/to/device ./master/build.sh
 ```bash
 ./assistant/build.sh yolo
 ./master/build.sh yolo
+./master/build_v2.sh yolo
 ```
 
 ## 物体识别开关
