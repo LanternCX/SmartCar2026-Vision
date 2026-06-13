@@ -113,21 +113,21 @@ class FakeImage:
 
 def task_sync_frame(module, seq=12, context_id=7, state=None, target=None, arg=None):
     if state is None:
-        state = int(module.STATE_SEARCH_OBJECT)
+        state = int(module.State.SEARCH_OBJECT)
     if target is None:
-        target = int(module.TARGET_OBJECT)
+        target = int(module.Target.OBJECT)
     if arg is None:
-        arg = int(module.MASTER_SEARCH_TASK_CONFIG_ID)
+        arg = int(module.Task.SEARCH)
     return encode_frame(
         MODE_TCP,
-        module.TOPIC_MASTER_VISION_TASK_SYNC,
+        module.Topic.MASTER_VISION_TASK_SYNC,
         seq,
         module.encode_master_vision_task_sync_body(context_id, state, target, arg),
     )
 
 
 def event_ack_frame(module, seq):
-    return encode_frame(MODE_ACK, module.TOPIC_MASTER_VISION_EVENT_REPORT, seq, b"")
+    return encode_frame(MODE_ACK, module.Topic.MASTER_VISION_EVENT_REPORT, seq, b"")
 
 
 def search_aligned_detection():
@@ -221,7 +221,7 @@ class BadReadUART:
 
 
 def build_search_observation(module, area, err_x=0.0, err_y=0.0):
-    target_x, target_y = module.build_search_target_point(module.MASTER_SEARCH_TASK_CONFIG_ID)
+    target_x, target_y = module.build_search_target_point(module.Task.SEARCH)
     return module.build_observation(1, target_x + err_x, target_y + err_y, area)
 
 
@@ -244,23 +244,42 @@ def test_master_main_v2_replies_task_sync_ack_and_records_task() -> None:
 
     assert decode_frame(reply) == {
         "mode": MODE_ACK,
-        "topic": module.TOPIC_MASTER_VISION_TASK_SYNC,
+        "topic": module.Topic.MASTER_VISION_TASK_SYNC,
         "seq": 12,
         "body": b"\x00" * 8,
     }
     assert module.state.current_task["context_id"] == 7
-    assert module.state.current_task["arg"] == module.MASTER_SEARCH_TASK_CONFIG_ID
+    assert module.state.current_task["arg"] == module.Task.SEARCH
 
 
 def test_master_main_v2_runtime_state_uses_state_object() -> None:
     module = load_master_v2()
 
     assert hasattr(module, "state")
+    assert hasattr(module, "State")
+    assert hasattr(module, "Mode")
+    assert hasattr(module, "Topic")
+    assert hasattr(module, "Task")
+    assert hasattr(module, "Event")
+    assert hasattr(module, "Target")
     module.reset_runtime_state(next_event_seq=9)
 
     assert module.state.current_task is None
     assert module.state.next_event_seq == 9
     assert not hasattr(module, "CURRENT_TASK")
+    assert module.State.SEARCH_OBJECT == 1
+    assert module.Mode.UDP == 0x01
+    assert module.Topic.MASTER_VISION_EVENT_REPORT == 0x12
+    assert module.Task.SEARCH == 1
+    assert module.Event.TARGET_FOUND == 6
+    assert module.Target.OBJECT == 1
+    assert not hasattr(module, "MODE_UDP")
+    assert not hasattr(module, "TOPIC_MASTER_VISION_EVENT_REPORT")
+    assert not hasattr(module, "STATE_SEARCH_OBJECT")
+    assert not hasattr(module, "TaskConfig")
+    assert not hasattr(module, "MASTER_SEARCH_TASK_CONFIG_ID")
+    assert not hasattr(module, "EVENT_TARGET_FOUND")
+    assert not hasattr(module, "TARGET_OBJECT")
 
 
 def test_master_main_v2_process_uart_input_replies_ack_for_task_sync_frame() -> None:
@@ -273,7 +292,7 @@ def test_master_main_v2_process_uart_input_replies_ack_for_task_sync_frame() -> 
     assert rx_buffer == b""
     assert decode_frame(uart.writes[0]) == {
         "mode": MODE_ACK,
-        "topic": module.TOPIC_MASTER_VISION_TASK_SYNC,
+        "topic": module.Topic.MASTER_VISION_TASK_SYNC,
         "seq": 12,
         "body": b"\x00" * 8,
     }
@@ -288,7 +307,7 @@ def test_master_main_v2_process_uart_input_resyncs_before_task_sync_frame() -> N
     rx_buffer = module.process_uart_input(b"")
 
     assert rx_buffer == b""
-    assert decode_frame(uart.writes[0])["topic"] == module.TOPIC_MASTER_VISION_TASK_SYNC
+    assert decode_frame(uart.writes[0])["topic"] == module.Topic.MASTER_VISION_TASK_SYNC
     assert module.state.current_task is not None
 
 
@@ -321,16 +340,16 @@ def test_master_main_v2_non_new_context_does_not_override_active_task() -> None:
     module = load_master_v2()
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     module.handle_control_frame(
-        task_sync_frame(module, seq=13, context_id=6, state=int(module.STATE_ORBITING), arg=9)
+        task_sync_frame(module, seq=13, context_id=6, state=int(module.State.ORBITING), arg=9)
     )
 
     observation = build_search_observation(module, 180.0)
 
     assert module.state.current_task == {
         "context_id": 7,
-        "state": module.STATE_SEARCH_OBJECT,
-        "target": module.TARGET_OBJECT,
-        "arg": module.MASTER_SEARCH_TASK_CONFIG_ID,
+        "state": module.State.SEARCH_OBJECT,
+        "target": module.Target.OBJECT,
+        "arg": module.Task.SEARCH,
     }
     assert observation == (7, 0.0, 0.0, 180.0)
 
@@ -406,7 +425,7 @@ def test_master_main_v2_search_uses_yolo_candidates_for_velocity_and_target_foun
     }
     assert latest_event(type("U", (), {"writes": [uart.writes[1]]})()) == {
         "context_id": 7,
-        "event": module.EVENT_TARGET_FOUND,
+        "event": module.Event.TARGET_FOUND,
         "value": 1,
     }
 
@@ -449,7 +468,7 @@ def test_master_main_v2_debug_display_shows_preview_without_task_sync() -> None:
 def test_master_main_v2_build_observation_and_candidates_uses_cached_candidates_without_current_image() -> None:
     module = load_master_v2()
     module.handle_control_frame(task_sync_frame(module, context_id=7))
-    target_x, target_y = module.build_search_target_point(module.MASTER_SEARCH_TASK_CONFIG_ID)
+    target_x, target_y = module.build_search_target_point(module.Task.SEARCH)
     blob = module.YoloDetectionBlob(
         target_x - 10.0,
         IMAGE_HEIGHT - target_y,
@@ -595,8 +614,8 @@ def test_master_main_v2_orbit_outputs_only_velocity_correction_without_event() -
     module.handle_control_frame(
         task_sync_frame(
             module,
-            state=int(module.STATE_ORBITING),
-            arg=int(module.MASTER_ORBIT_TASK_CONFIG_ID),
+            state=int(module.State.ORBITING),
+            arg=int(module.Task.ORBIT),
         )
     )
     uart = FakeUART()
@@ -618,8 +637,8 @@ def test_master_main_v2_transport_alignment_reports_aligned_event() -> None:
         task_sync_frame(
             module,
             context_id=9,
-            state=int(module.STATE_SEARCH_OBJECT),
-            arg=int(module.MASTER_TRANSPORT_TASK_CONFIG_ID),
+            state=int(module.State.SEARCH_OBJECT),
+            arg=int(module.Task.TRANSPORT),
         )
     )
     uart = FakeUART()
@@ -631,7 +650,7 @@ def test_master_main_v2_transport_alignment_reports_aligned_event() -> None:
 
     assert latest_event(type("U", (), {"writes": [uart.writes[1]]})()) == {
         "context_id": 9,
-        "event": module.EVENT_ALIGNED,
+        "event": module.Event.ALIGNED,
         "value": 400,
     }
 
@@ -639,7 +658,7 @@ def test_master_main_v2_transport_alignment_reports_aligned_event() -> None:
 def test_master_main_v2_candidate_selection_uses_configured_target_point() -> None:
     module = load_master_v2()
     module.state.yolo_net = "fake-net"
-    target_x, target_y = module.build_search_target_point(module.MASTER_SEARCH_TASK_CONFIG_ID)
+    target_x, target_y = module.build_search_target_point(module.Task.SEARCH)
     module.tf.detect = lambda net, img: [
         pixel_detection(target_x - 40, IMAGE_HEIGHT - target_y, target_x + 40, IMAGE_HEIGHT - target_y + 20),
         pixel_detection(
@@ -661,7 +680,7 @@ def test_master_main_v2_candidate_selection_uses_configured_target_point() -> No
 def test_master_main_v2_transport_alignment_keeps_candidate_selection() -> None:
     module = load_master_v2()
     module.state.yolo_net = "fake-net"
-    target_x, target_y = module.build_search_target_point(module.MASTER_TRANSPORT_TASK_CONFIG_ID)
+    target_x, target_y = module.build_search_target_point(module.Task.TRANSPORT)
     module.tf.detect = lambda net, img: [
         pixel_detection(
             target_x + float(module.OBJECT_X_TOLERANCE_PX) + 10.0,
@@ -673,9 +692,9 @@ def test_master_main_v2_transport_alignment_keeps_candidate_selection() -> None:
     module.handle_control_frame(
         task_sync_frame(
             module,
-            state=int(module.STATE_SEARCH_OBJECT),
-            target=int(module.TARGET_OBJECT),
-            arg=int(module.MASTER_TRANSPORT_TASK_CONFIG_ID),
+            state=int(module.State.SEARCH_OBJECT),
+            target=int(module.Target.OBJECT),
+            arg=int(module.Task.TRANSPORT),
         )
     )
 
@@ -689,7 +708,7 @@ def test_master_main_v2_transport_alignment_keeps_candidate_selection() -> None:
 def test_master_main_v2_finish_accepts_x_outside_when_bottom_hits_target_window() -> None:
     module = load_master_v2()
     module.state.yolo_net = "fake-net"
-    target_x, target_y = module.build_search_target_point(module.MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID)
+    target_x, target_y = module.build_search_target_point(module.Task.TRANSPORT_FINISH)
     module.tf.detect = lambda net, img: [
         pixel_detection(
             target_x + float(module.OBJECT_X_TOLERANCE_PX) + 10.0,
@@ -701,9 +720,9 @@ def test_master_main_v2_finish_accepts_x_outside_when_bottom_hits_target_window(
     module.handle_control_frame(
         task_sync_frame(
             module,
-            state=int(module.STATE_TRANSPORT_OBJECT),
-            target=int(module.TARGET_EDGE_LINE),
-            arg=int(module.MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID),
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
         )
     )
 
@@ -717,7 +736,7 @@ def test_master_main_v2_finish_accepts_x_outside_when_bottom_hits_target_window(
 def test_master_main_v2_finish_prefers_largest_area_after_bottom_filter() -> None:
     module = load_master_v2()
     module.state.yolo_net = "fake-net"
-    target_x, target_y = module.build_search_target_point(module.MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID)
+    target_x, target_y = module.build_search_target_point(module.Task.TRANSPORT_FINISH)
     module.tf.detect = lambda net, img: [
         pixel_detection(target_x - 10.0, IMAGE_HEIGHT - target_y, target_x + 10.0, IMAGE_HEIGHT - target_y + 20),
         pixel_detection(
@@ -730,9 +749,9 @@ def test_master_main_v2_finish_prefers_largest_area_after_bottom_filter() -> Non
     module.handle_control_frame(
         task_sync_frame(
             module,
-            state=int(module.STATE_TRANSPORT_OBJECT),
-            target=int(module.TARGET_EDGE_LINE),
-            arg=int(module.MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID),
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
         )
     )
 
@@ -747,7 +766,7 @@ def test_master_main_v2_finish_prefers_largest_area_after_bottom_filter() -> Non
 def test_master_main_v2_finish_ignores_candidates_when_bottom_outside_target_window() -> None:
     module = load_master_v2()
     module.state.yolo_net = "fake-net"
-    target_x, target_y = module.build_search_target_point(module.MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID)
+    target_x, target_y = module.build_search_target_point(module.Task.TRANSPORT_FINISH)
     module.tf.detect = lambda net, img: [
         pixel_detection(
             target_x - 10.0,
@@ -759,9 +778,9 @@ def test_master_main_v2_finish_ignores_candidates_when_bottom_outside_target_win
     module.handle_control_frame(
         task_sync_frame(
             module,
-            state=int(module.STATE_TRANSPORT_OBJECT),
-            target=int(module.TARGET_EDGE_LINE),
-            arg=int(module.MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID),
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
         )
     )
 
@@ -784,9 +803,9 @@ def test_master_main_v2_finish_uses_target_window_and_reports_arrived_after_cont
         task_sync_frame(
             module,
             context_id=11,
-            state=int(module.STATE_TRANSPORT_OBJECT),
-            target=int(module.TARGET_EDGE_LINE),
-            arg=int(module.MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID),
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
         )
     )
     uart = FakeUART()
@@ -801,7 +820,7 @@ def test_master_main_v2_finish_uses_target_window_and_reports_arrived_after_cont
 
     assert latest_event(uart) == {
         "context_id": 11,
-        "event": module.EVENT_ARRIVED,
+        "event": module.Event.ARRIVED,
         "value": 0,
     }
 
@@ -813,9 +832,9 @@ def test_master_main_v2_return_retreat_reports_line_aligned() -> None:
         task_sync_frame(
             module,
             context_id=13,
-            state=int(module.STATE_RETURN_GARAGE_RETREAT),
-            target=int(module.TARGET_EDGE_LINE),
-            arg=int(module.MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID),
+            state=int(module.State.RETURN_GARAGE_RETREAT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.RETURN_GARAGE_LINE),
         )
     )
     uart = FakeUART()
@@ -828,7 +847,7 @@ def test_master_main_v2_return_retreat_reports_line_aligned() -> None:
 
     assert latest_event(uart) == {
         "context_id": 13,
-        "event": module.EVENT_RETURN_LINE_ALIGNED,
+        "event": module.Event.RETURN_LINE_ALIGNED,
         "value": 160,
     }
 
@@ -892,9 +911,9 @@ def test_master_main_v2_return_line_runtime_does_not_use_blob_detection() -> Non
         task_sync_frame(
             module,
             context_id=7,
-            state=int(module.STATE_RETURN_GARAGE_LINE),
-            target=int(module.TARGET_EDGE_LINE),
-            arg=int(module.MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID),
+            state=int(module.State.RETURN_GARAGE_LINE),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.RETURN_GARAGE_LINE),
         )
     )
     uart = FakeUART()
@@ -917,9 +936,9 @@ def test_master_main_v2_return_line_reports_finished_after_x270_missing_for_five
         task_sync_frame(
             module,
             context_id=15,
-            state=int(module.STATE_RETURN_GARAGE_LINE),
-            target=int(module.TARGET_EDGE_LINE),
-            arg=int(module.MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID),
+            state=int(module.State.RETURN_GARAGE_LINE),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.RETURN_GARAGE_LINE),
         )
     )
     uart = FakeUART()
@@ -931,7 +950,7 @@ def test_master_main_v2_return_line_reports_finished_after_x270_missing_for_five
 
     assert latest_event(uart) == {
         "context_id": 15,
-        "event": module.EVENT_RETURN_GARAGE_FINISHED,
+        "event": module.Event.RETURN_GARAGE_FINISHED,
         "value": 0,
     }
 
@@ -949,11 +968,11 @@ def test_master_main_v2_pending_event_blocks_non_return_velocity_until_ack() -> 
     run_frame(module, img)
     run_frame(module, img)
 
-    assert decode_frame(uart.writes[-1])["topic"] == module.TOPIC_MASTER_VISION_EVENT_REPORT
+    assert decode_frame(uart.writes[-1])["topic"] == module.Topic.MASTER_VISION_EVENT_REPORT
     module.handle_control_frame(event_ack_frame(module, 1))
     run_frame(module, img)
 
-    assert decode_frame(uart.writes[-1])["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+    assert decode_frame(uart.writes[-1])["topic"] == module.Topic.LOCAL_VISION_VELOCITY
 
 
 def test_master_main_v2_run_applies_lens_correction_and_uses_yolo_detect_before_processing() -> None:

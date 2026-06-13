@@ -34,10 +34,53 @@ UART_BAUDRATE = 115200
 EXP_TIME_US = 500
 # TARGET_FOUND 未确认时的重复发送间隔，单位为毫秒。
 RELIABLE_RESEND_INTERVAL_MS = 100
-# 固定帧模式编号。
-MODE_UDP = 0x01
-MODE_TCP = 0x02
-MODE_ACK = 0x03
+
+# 固定帧模式编号分组。
+class Mode:
+    UDP = 0x01
+    TCP = 0x02
+    ACK = 0x03
+
+
+# 主车视觉协议 topic 编号分组。
+class Topic:
+    LOCAL_VISION_VELOCITY = 0x01
+    MASTER_VISION_HOOK_SYNC = 0x10
+    MASTER_VISION_EVENT_REPORT = 0x12
+
+# 主车状态编号分组。
+class State:
+    SEARCH_OBJECT = 1
+    ORBITING = 2
+    TRANSPORT_OBJECT = 4
+    RETURN_GARAGE_RETREAT = 6
+    RETURN_GARAGE_LINE = 7
+
+
+# 主车目标编号分组。
+class Target:
+    OBJECT = 1
+    EDGE_LINE = 3
+
+
+# 主车任务编号分组。
+class Task:
+    SEARCH = 1
+    TRANSPORT = 2
+    TRANSPORT_FINISH = 3
+    ORBIT = 4
+    RETURN_GARAGE_LINE = 5
+
+
+# 主车事件编号分组。
+class Event:
+    TARGET_FOUND = 6
+    ALIGNED = 7
+    ARRIVED = 8
+    RETURN_LINE_ALIGNED = 10
+    RETURN_GARAGE_FINISHED = 12
+
+
 # 固定帧 body 槽位长度。
 FRAME_BODY_SIZE = 8
 FRAME_HEAD = 0xA5
@@ -53,12 +96,6 @@ YOLO_IMAGE_COPY_SCALE = 0.75
 YOLO_MIN_SCORE = 0.90
 # YOLO 标签编号映射。
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
-# 本地视觉速度 topic。
-TOPIC_LOCAL_VISION_VELOCITY = 0x01
-# 主车视觉同步 topic。
-TOPIC_MASTER_VISION_HOOK_SYNC = 0x10
-# 主车视觉事件回报 topic。
-TOPIC_MASTER_VISION_EVENT_REPORT = 0x12
 # 红色候选目标的最小面积，小于该值不会触发找到事件。
 OBJECT_MIN_AREA = 50.0
 # 主车搜索目标丢失时输出的配置横向速度。
@@ -114,40 +151,6 @@ FINISH_HOOK_RING_EXPAND_PX = 5
 # 主车收尾判定黄色占比阈值。
 FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.1
 FINISH_HOOK_STABLE_FRAMES = 2
-# 车端协议中的主车搜索状态编号。
-STATE_SEARCH_OBJECT = 1
-# 车端协议中的主车绕行状态编号。
-STATE_ORBITING = 2
-# 车端协议中的主车搬运状态编号。
-STATE_TRANSPORT_OBJECT = 4
-# 车端协议中的主车回库后退状态编号。
-STATE_RETURN_GARAGE_RETREAT = 6
-# 车端协议中的主车回库黄线平移状态编号。
-STATE_RETURN_GARAGE_LINE = 7
-# 车端协议中的物体目标编号。
-TARGET_OBJECT = 1
-# 车端协议中的边线目标编号。
-TARGET_EDGE_LINE = 3
-# 车端下发的主车搜索 hook 配置编号。
-MASTER_SEARCH_HOOK_CONFIG_ID = 1
-# 车端下发的主车搬运 hook 配置编号。
-MASTER_TRANSPORT_HOOK_CONFIG_ID = 2
-# 车端下发的主车收尾判定 hook 配置编号。
-MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID = 3
-# 车端下发的主车绕行视觉修正配置编号。
-MASTER_ORBIT_HOOK_CONFIG_ID = 4
-# 车端下发的主车回库黄线配置编号。
-MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID = 5
-# 车端协议中的目标找到事件编号。
-EVENT_TARGET_FOUND = 6
-# 车端协议中的对正完成事件编号。
-EVENT_ALIGNED = 7
-# 车端协议中的收尾到达事件编号。
-EVENT_ARRIVED = 8
-# 车端协议中的回库黄线对正事件编号。
-EVENT_RETURN_LINE_ALIGNED = 10
-# 车端协议中的回库完成事件编号。
-EVENT_RETURN_GARAGE_FINISHED = 12
 # 可靠包序号的环形范围大小。
 SEQ_RING_SIZE = 256
 # 判断环形序号新旧关系使用的半环长度。
@@ -186,7 +189,7 @@ RETURN_GARAGE_LINE_MAX_THICKNESS_PX = 30
 # 回库黄线候选点左右水平联通黄线的最小合计长度, 单位像素。
 RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
 # 主车物体识别调试绘制总开关。
-MASTER_OBJECT_DEBUG_DRAW_ENABLED = False
+MASTER_OBJECT_DEBUG_DRAW_ENABLED = True
 
 _I16_MIN = -32768
 _I16_MAX = 32767
@@ -347,7 +350,7 @@ def parse_sync_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
-    if frame["mode"] != MODE_TCP or frame["topic"] != TOPIC_MASTER_VISION_HOOK_SYNC:
+    if frame["mode"] != Mode.TCP or frame["topic"] != Topic.MASTER_VISION_HOOK_SYNC:
         return None
     packet = decode_master_vision_hook_sync_body(frame["body"])
     return {
@@ -369,7 +372,7 @@ def parse_ack_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
-    if frame["mode"] != MODE_ACK or frame["topic"] != TOPIC_MASTER_VISION_EVENT_REPORT:
+    if frame["mode"] != Mode.ACK or frame["topic"] != Topic.MASTER_VISION_EVENT_REPORT:
         return None
     return {"reliable_seq": int(frame["seq"])}
 
@@ -428,7 +431,7 @@ def format_ack_frame(reliable_seq):
     @return ACK 短帧
     """
 
-    return encode_frame(MODE_ACK, TOPIC_MASTER_VISION_HOOK_SYNC, reliable_seq, b"")
+    return encode_frame(Mode.ACK, Topic.MASTER_VISION_HOOK_SYNC, reliable_seq, b"")
 
 
 def format_search_velocity_frame(vx, vy):
@@ -440,8 +443,8 @@ def format_search_velocity_frame(vx, vy):
     """
 
     return encode_frame(
-        MODE_UDP,
-        TOPIC_LOCAL_VISION_VELOCITY,
+        Mode.UDP,
+        Topic.LOCAL_VISION_VELOCITY,
         0,
         encode_velocity_body(vx, vy, 0.0, False),
     )
@@ -458,8 +461,8 @@ def format_event_frame(reliable_seq, context_id, event, value):
     """
 
     return encode_frame(
-        MODE_TCP,
-        TOPIC_MASTER_VISION_EVENT_REPORT,
+        Mode.TCP,
+        Topic.MASTER_VISION_EVENT_REPORT,
         reliable_seq,
         encode_master_vision_event_report_body(context_id, event, value),
     )
@@ -518,9 +521,9 @@ def _find_control_frame_start(rx_buffer):
             continue
         mode = frame["mode"]
         topic = frame["topic"]
-        if mode == MODE_TCP and topic == TOPIC_MASTER_VISION_HOOK_SYNC:
+        if mode == Mode.TCP and topic == Topic.MASTER_VISION_HOOK_SYNC:
             return index
-        if mode == MODE_ACK and topic == TOPIC_MASTER_VISION_EVENT_REPORT:
+        if mode == Mode.ACK and topic == Topic.MASTER_VISION_EVENT_REPORT:
             return index
     return -1
 
@@ -924,18 +927,18 @@ def should_filter_candidates_by_target_window(hook):
 
 
 def build_search_target_point(
-    image_width, image_height, config_id=MASTER_SEARCH_HOOK_CONFIG_ID
+    image_width, image_height, config_id=Task.SEARCH
 ):
     """! @brief 根据当前 hook 配置生成主车搜索目标点"""
 
     _ = image_width
     _ = image_height
     target_x = float(MASTER_SEARCH_TARGET_X_PX)
-    if int(config_id) == int(MASTER_ORBIT_HOOK_CONFIG_ID):
+    if int(config_id) == int(Task.ORBIT):
         return float(MASTER_ORBIT_TARGET_X_PX), float(MASTER_ORBIT_TARGET_Y_PX)
     if int(config_id) in (
-        int(MASTER_TRANSPORT_HOOK_CONFIG_ID),
-        int(MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID),
+        int(Task.TRANSPORT),
+        int(Task.TRANSPORT_FINISH),
     ):
         return target_x, float(MASTER_TRANSPORT_TARGET_Y_PX)
     return target_x, float(MASTER_SEARCH_TARGET_Y_PX)
@@ -1429,7 +1432,7 @@ class MasterVisionHook:
         """! @brief 返回当前 hook 使用的目标点配置编号"""
 
         if self.context is None:
-            return MASTER_SEARCH_HOOK_CONFIG_ID
+            return Task.SEARCH
         return int(self.context["arg"])
 
     def is_finish_hook_context(self):
@@ -1438,9 +1441,9 @@ class MasterVisionHook:
         if self.context is None:
             return False
         return (
-            int(self.context["state"]) == int(STATE_TRANSPORT_OBJECT)
-            and int(self.context["target"]) == int(TARGET_EDGE_LINE)
-            and int(self.context["arg"]) == int(MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID)
+            int(self.context["state"]) == int(State.TRANSPORT_OBJECT)
+            and int(self.context["target"]) == int(Target.EDGE_LINE)
+            and int(self.context["arg"]) == int(Task.TRANSPORT_FINISH)
         )
 
     def is_orbit_correction_context(self):
@@ -1449,9 +1452,9 @@ class MasterVisionHook:
         if self.context is None:
             return False
         return (
-            int(self.context["state"]) == int(STATE_ORBITING)
-            and int(self.context["target"]) == int(TARGET_OBJECT)
-            and int(self.context["arg"]) == int(MASTER_ORBIT_HOOK_CONFIG_ID)
+            int(self.context["state"]) == int(State.ORBITING)
+            and int(self.context["target"]) == int(Target.OBJECT)
+            and int(self.context["arg"]) == int(Task.ORBIT)
         )
 
     def is_return_line_context(self):
@@ -1460,11 +1463,11 @@ class MasterVisionHook:
         if self.context is None:
             return False
         return (
-            int(self.context["target"]) == int(TARGET_EDGE_LINE)
-            and int(self.context["arg"]) == int(MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID)
+            int(self.context["target"]) == int(Target.EDGE_LINE)
+            and int(self.context["arg"]) == int(Task.RETURN_GARAGE_LINE)
             and (
-                int(self.context["state"]) == int(STATE_RETURN_GARAGE_RETREAT)
-                or int(self.context["state"]) == int(STATE_RETURN_GARAGE_LINE)
+                int(self.context["state"]) == int(State.RETURN_GARAGE_RETREAT)
+                or int(self.context["state"]) == int(State.RETURN_GARAGE_LINE)
             )
         )
 
@@ -1631,7 +1634,7 @@ class MasterVisionHook:
     ):
         """! @brief 处理回库黄线配置下的对正与丢线完成事件"""
 
-        if event_type == EVENT_RETURN_LINE_ALIGNED:
+        if event_type == Event.RETURN_LINE_ALIGNED:
             if (
                 float(value) > 0.0
                 and float(value) <= float(RETURN_GARAGE_LINE_TARGET_Y_PX)
@@ -1640,13 +1643,13 @@ class MasterVisionHook:
             else:
                 self._stable_count = 0
                 return
-        elif event_type == EVENT_RETURN_GARAGE_FINISHED:
+        elif event_type == Event.RETURN_GARAGE_FINISHED:
             self._stable_count = 0
             return
         else:
             return
         required_stable_frames = self._required_stable_frames()
-        if event_type == EVENT_RETURN_GARAGE_FINISHED:
+        if event_type == Event.RETURN_GARAGE_FINISHED:
             required_stable_frames = 5
         if self._stable_count >= required_stable_frames:
             self._create_event(
@@ -1711,9 +1714,9 @@ class MasterVisionHook:
             return int(float(value))
         if (
             self.context is not None
-            and int(self.context["state"]) == STATE_SEARCH_OBJECT
-            and int(self.context["target"]) == TARGET_OBJECT
-            and int(self.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
+            and int(self.context["state"]) == State.SEARCH_OBJECT
+            and int(self.context["target"]) == Target.OBJECT
+            and int(self.context["arg"]) == Task.SEARCH
             and hook_value is not None
         ):
             return int(hook_value)
@@ -1731,41 +1734,41 @@ class MasterVisionHook:
         target = int(self.context["target"])
         arg = int(self.context["arg"])
         if (
-            state == STATE_SEARCH_OBJECT
-            and target == TARGET_OBJECT
-            and arg == MASTER_SEARCH_HOOK_CONFIG_ID
+            state == State.SEARCH_OBJECT
+            and target == Target.OBJECT
+            and arg == Task.SEARCH
         ):
-            return EVENT_TARGET_FOUND
+            return Event.TARGET_FOUND
         if (
-            state == STATE_SEARCH_OBJECT
-            and target == TARGET_OBJECT
-            and arg == MASTER_TRANSPORT_HOOK_CONFIG_ID
+            state == State.SEARCH_OBJECT
+            and target == Target.OBJECT
+            and arg == Task.TRANSPORT
         ):
-            return EVENT_ALIGNED
+            return Event.ALIGNED
         if (
-            state == STATE_ORBITING
-            and target == TARGET_OBJECT
-            and arg == MASTER_ORBIT_HOOK_CONFIG_ID
+            state == State.ORBITING
+            and target == Target.OBJECT
+            and arg == Task.ORBIT
         ):
             return None
         if (
-            state == STATE_TRANSPORT_OBJECT
-            and target == TARGET_EDGE_LINE
-            and arg == MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID
+            state == State.TRANSPORT_OBJECT
+            and target == Target.EDGE_LINE
+            and arg == Task.TRANSPORT_FINISH
         ):
-            return EVENT_ARRIVED
+            return Event.ARRIVED
         if (
-            state == STATE_RETURN_GARAGE_RETREAT
-            and target == TARGET_EDGE_LINE
-            and arg == MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID
+            state == State.RETURN_GARAGE_RETREAT
+            and target == Target.EDGE_LINE
+            and arg == Task.RETURN_GARAGE_LINE
         ):
-            return EVENT_RETURN_LINE_ALIGNED
+            return Event.RETURN_LINE_ALIGNED
         if (
-            state == STATE_RETURN_GARAGE_LINE
-            and target == TARGET_EDGE_LINE
-            and arg == MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID
+            state == State.RETURN_GARAGE_LINE
+            and target == Target.EDGE_LINE
+            and arg == Task.RETURN_GARAGE_LINE
         ):
-            return EVENT_RETURN_GARAGE_FINISHED
+            return Event.RETURN_GARAGE_FINISHED
         return None
 
     def _allocate_reliable_seq(self):
@@ -1977,9 +1980,9 @@ def build_hook_event_value(hook, img, best_blob, image_width, image_height, task
     if not hook.is_finish_hook_context():
         if (
             hook.context is not None
-            and int(hook.context["state"]) == STATE_SEARCH_OBJECT
-            and int(hook.context["target"]) == TARGET_OBJECT
-            and int(hook.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
+            and int(hook.context["state"]) == State.SEARCH_OBJECT
+            and int(hook.context["target"]) == Target.OBJECT
+            and int(hook.context["arg"]) == Task.SEARCH
             and task_name is not None
         ):
             return object_task_id(task_name)
@@ -2004,7 +2007,7 @@ def _process_return_line_frame(uart, hook, img, image_width, image_height):
     hook.remember_return_line_y(line_y)
     velocity = build_return_line_velocity_from_y(line_y)
     write_data_line(uart, format_search_velocity_frame(*velocity))
-    if int(hook.context["state"]) == int(STATE_RETURN_GARAGE_RETREAT):
+    if int(hook.context["state"]) == int(State.RETURN_GARAGE_RETREAT):
         hook.accept_observation(hook.build_return_line_observation(line_y))
         return
     if line_y is None:

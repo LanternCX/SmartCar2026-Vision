@@ -34,14 +34,61 @@ UART_BAUDRATE = 115200
 EXP_TIME_US = 500
 # 可靠事件默认重发间隔，单位为毫秒。
 RELIABLE_RESEND_INTERVAL_MS = 100
+
+# 固定帧模式编号分组。
+class Mode:
+    UDP = 0x01
+    TCP = 0x02
+    ACK = 0x03
+
+
+# 辅车视觉协议 topic 编号分组。
+class Topic:
+    LOCAL_VISION_VELOCITY = 0x01
+    ASSISTANT_VISION_TASK_SYNC = 0x11
+    ASSISTANT_VISION_EVENT_REPORT = 0x13
+
+# 辅车运行模式分组。
+class RunMode:
+    FOLLOW = "follow"
+    APPROACH_OBJECT = "approach_object"
+    ORBIT_OBJECT = "orbit_object"
+    RETURN_LINE = "return_line"
+
+
+# 辅车找物体状态编号分组。
+class State:
+    APPROACH_OBJECT = 2
+    ORBIT = 3
+    TRANSPORT_OBJECT = 4
+    RETURN_FOLLOW = 6
+
+
+# 辅车目标编号分组。
+class Target:
+    NONE = 0
+    OBJECT = 1
+
+
+# 辅车任务编号分组。
+class Task:
+    SEARCH = 1
+    TRANSPORT = 2
+    ORBIT = 3
+    RETURN_GARAGE_LINE = 5
+
+
+# 辅车事件编号分组。
+class Event:
+    TARGET_FOUND = 6
+    ALIGNED = 7
+    RETURN_GARAGE_FINISHED = 12
+
+
 # 可靠序号使用 0..255 环形空间。
 SEQ_RING_SIZE = 256
 # 判断序号新旧使用的半环长度。
 SEQ_HALF_RING = 128
-# 固定帧模式编号。
-MODE_UDP = 0x01
-MODE_TCP = 0x02
-MODE_ACK = 0x03
 # 固定帧 body 槽位长度。
 FRAME_BODY_SIZE = 8
 FRAME_HEAD = 0xA5
@@ -57,47 +104,6 @@ YOLO_IMAGE_COPY_SCALE = 0.75
 YOLO_MIN_SCORE = 0.90
 # YOLO 标签编号映射。
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
-# 本地视觉速度 topic。
-TOPIC_LOCAL_VISION_VELOCITY = 0x01
-# 本地视觉任务同步 topic。
-TOPIC_ASSISTANT_VISION_TASK_SYNC = 0x11
-# 本地视觉事件回报 topic。
-TOPIC_ASSISTANT_VISION_EVENT_REPORT = 0x13
-
-# 默认运行模式。
-MODE_FOLLOW = "follow"
-# 接收到同步后切换的找物体模式。
-MODE_APPROACH_OBJECT = "approach_object"
-# 接收到同步后切换的绕行修正模式。
-MODE_ORBIT_OBJECT = "orbit_object"
-# 接收到同步后切换的回库黄线巡线模式。
-MODE_RETURN_LINE = "return_line"
-# 辅车找物体状态编号。
-STATE_APPROACH_OBJECT = 2
-# 辅车绕行状态编号。
-STATE_ORBIT = 3
-# 辅车推行状态编号。
-STATE_TRANSPORT_OBJECT = 4
-# 辅车回库黄线状态编号。
-STATE_RETURN_FOLLOW = 6
-# 无目标编号。
-TARGET_NONE = 0
-# 物体目标编号。
-TARGET_OBJECT = 1
-# 找物体同步参数编号。
-OBJECT_APPROACH_CONFIG_ID = 1
-# 搬运对正同步参数编号。
-ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID = 2
-# 绕行修正同步参数编号。
-ASSISTANT_ORBIT_OBJECT_CONFIG_ID = 3
-# 回库黄线同步参数编号。
-ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID = 5
-# TARGET_FOUND 事件编号。
-EVENT_TARGET_FOUND = 6
-# ALIGNED 事件编号。
-EVENT_ALIGNED = 7
-# RETURN_GARAGE_FINISHED 事件编号。
-EVENT_RETURN_GARAGE_FINISHED = 12
 
 # ChromaForge 导出的色块合并间距。
 OBJECT_BLOB_MERGE_MARGIN = 0
@@ -375,8 +381,8 @@ def format_vision_frame(vx, vy):
     """
 
     return encode_frame(
-        MODE_UDP,
-        TOPIC_LOCAL_VISION_VELOCITY,
+        Mode.UDP,
+        Topic.LOCAL_VISION_VELOCITY,
         0,
         encode_velocity_body(vx, vy, 0.0, False),
     )
@@ -389,7 +395,7 @@ def format_ack_frame(reliable_seq):
     @return ACK 短帧
     """
 
-    return encode_frame(MODE_ACK, TOPIC_ASSISTANT_VISION_TASK_SYNC, reliable_seq, b"")
+    return encode_frame(Mode.ACK, Topic.ASSISTANT_VISION_TASK_SYNC, reliable_seq, b"")
 
 
 def format_event_frame(reliable_seq, event, value):
@@ -402,8 +408,8 @@ def format_event_frame(reliable_seq, event, value):
     """
 
     return encode_frame(
-        MODE_TCP,
-        TOPIC_ASSISTANT_VISION_EVENT_REPORT,
+        Mode.TCP,
+        Topic.ASSISTANT_VISION_EVENT_REPORT,
         reliable_seq,
         encode_assistant_vision_event_report_body(event, value),
     )
@@ -419,7 +425,7 @@ def parse_sync_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
-    if frame["mode"] != MODE_TCP or frame["topic"] != TOPIC_ASSISTANT_VISION_TASK_SYNC:
+    if frame["mode"] != Mode.TCP or frame["topic"] != Topic.ASSISTANT_VISION_TASK_SYNC:
         return None
     packet = decode_assistant_vision_task_sync_body(frame["body"])
     return {
@@ -440,7 +446,7 @@ def parse_ack_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
-    if frame["mode"] != MODE_ACK or frame["topic"] != TOPIC_ASSISTANT_VISION_EVENT_REPORT:
+    if frame["mode"] != Mode.ACK or frame["topic"] != Topic.ASSISTANT_VISION_EVENT_REPORT:
         return None
     return {"reliable_seq": int(frame["seq"])}
 
@@ -1238,8 +1244,8 @@ def should_filter_candidates_by_target_window(state):
         return False
     config_id = state.current_object_config_id()
     return (
-        int(state.current_sync["state"]) == int(STATE_TRANSPORT_OBJECT)
-        and int(config_id) == int(ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID)
+        int(state.current_sync["state"]) == int(State.TRANSPORT_OBJECT)
+        and int(config_id) == int(Task.TRANSPORT)
     )
 
 
@@ -1274,7 +1280,7 @@ def build_object_observation(
     area,
     image_width,
     image_height,
-    config_id=OBJECT_APPROACH_CONFIG_ID,
+    config_id=Task.SEARCH,
 ):
     """! @brief 根据物体中心、底边和面积生成找物体观测
 
@@ -1305,16 +1311,16 @@ def build_object_observation(
 def build_object_target_point(
     image_width,
     image_height,
-    config_id=OBJECT_APPROACH_CONFIG_ID,
+    config_id=Task.SEARCH,
 ):
     """! @brief 根据当前配置生成找物体目标点"""
 
     _ = image_width
     _ = image_height
     target_x = float(OBJECT_APPROACH_TARGET_X_PX)
-    if int(config_id) == int(ASSISTANT_ORBIT_OBJECT_CONFIG_ID):
+    if int(config_id) == int(Task.ORBIT):
         return float(OBJECT_ORBIT_TARGET_X_PX), float(OBJECT_ORBIT_TARGET_Y_PX)
-    if int(config_id) == int(ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID):
+    if int(config_id) == int(Task.TRANSPORT):
         return target_x, float(ASSISTANT_TRANSPORT_TARGET_Y_PX)
     return target_x, float(OBJECT_APPROACH_TARGET_Y_PX)
 
@@ -1445,7 +1451,7 @@ class AssistantVisionState:
         self.tolerance_x = float(tolerance_x)
         self.tolerance_y = float(tolerance_y)
         self.required_stable_frames = int(stable_frames)
-        self.mode = MODE_FOLLOW
+        self.mode = RunMode.FOLLOW
         self.current_sync = None
         self._last_sync_seq = None
         self._stable_count = 0
@@ -1513,46 +1519,46 @@ class AssistantVisionState:
         """
 
         if (
-            int(sync["state"]) == STATE_APPROACH_OBJECT
-            and int(sync["target"]) == TARGET_OBJECT
+            int(sync["state"]) == State.APPROACH_OBJECT
+            and int(sync["target"]) == Target.OBJECT
             and (
-                unpack_task_arg_config(sync["arg"]) == OBJECT_APPROACH_CONFIG_ID
+                unpack_task_arg_config(sync["arg"]) == Task.SEARCH
                 or unpack_task_arg_config(sync["arg"])
-                == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+                == Task.TRANSPORT
             )
         ):
-            return MODE_APPROACH_OBJECT
+            return RunMode.APPROACH_OBJECT
         if (
-            int(sync["state"]) == STATE_TRANSPORT_OBJECT
-            and int(sync["target"]) == TARGET_OBJECT
-            and unpack_task_arg_config(sync["arg"]) == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+            int(sync["state"]) == State.TRANSPORT_OBJECT
+            and int(sync["target"]) == Target.OBJECT
+            and unpack_task_arg_config(sync["arg"]) == Task.TRANSPORT
         ):
-            return MODE_APPROACH_OBJECT
+            return RunMode.APPROACH_OBJECT
         if (
-            int(sync["state"]) == STATE_ORBIT
-            and int(sync["target"]) == TARGET_OBJECT
-            and unpack_task_arg_config(sync["arg"]) == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+            int(sync["state"]) == State.ORBIT
+            and int(sync["target"]) == Target.OBJECT
+            and unpack_task_arg_config(sync["arg"]) == Task.TRANSPORT
         ):
-            return MODE_APPROACH_OBJECT
+            return RunMode.APPROACH_OBJECT
         if (
-            int(sync["state"]) == STATE_ORBIT
-            and int(sync["target"]) == TARGET_OBJECT
-            and unpack_task_arg_config(sync["arg"]) == ASSISTANT_ORBIT_OBJECT_CONFIG_ID
+            int(sync["state"]) == State.ORBIT
+            and int(sync["target"]) == Target.OBJECT
+            and unpack_task_arg_config(sync["arg"]) == Task.ORBIT
         ):
-            return MODE_ORBIT_OBJECT
+            return RunMode.ORBIT_OBJECT
         if (
-            int(sync["state"]) == STATE_RETURN_FOLLOW
-            and int(sync["target"]) == TARGET_NONE
-            and unpack_task_arg_config(sync["arg"]) == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
+            int(sync["state"]) == State.RETURN_FOLLOW
+            and int(sync["target"]) == Target.NONE
+            and unpack_task_arg_config(sync["arg"]) == Task.RETURN_GARAGE_LINE
         ):
-            return MODE_RETURN_LINE
-        return MODE_FOLLOW
+            return RunMode.RETURN_LINE
+        return RunMode.FOLLOW
 
     def current_object_config_id(self):
         """! @brief 返回当前找物体阶段使用的目标点配置编号"""
 
         if self.current_sync is None:
-            return OBJECT_APPROACH_CONFIG_ID
+            return Task.SEARCH
         return unpack_task_arg_config(self.current_sync["arg"])
 
     def current_object_id(self):
@@ -1596,7 +1602,7 @@ class AssistantVisionState:
         @param observation x, y, value 观测字段元组
         """
 
-        if self.mode != MODE_APPROACH_OBJECT or self.current_sync is None:
+        if self.mode != RunMode.APPROACH_OBJECT or self.current_sync is None:
             self._stable_count = 0
             return
         current_sync_seq = int(self.current_sync["reliable_seq"])
@@ -1624,7 +1630,7 @@ class AssistantVisionState:
         self._stable_count = 0
         return
 
-        if self.mode != MODE_RETURN_LINE or self.current_sync is None:
+        if self.mode != RunMode.RETURN_LINE or self.current_sync is None:
             self._stable_count = 0
             return
         current_sync_seq = int(self.current_sync["reliable_seq"])
@@ -1670,29 +1676,29 @@ class AssistantVisionState:
         target = int(self.current_sync["target"])
         config_id = unpack_task_arg_config(self.current_sync["arg"])
         if (
-            state == STATE_APPROACH_OBJECT
-            and target == TARGET_OBJECT
-            and config_id == OBJECT_APPROACH_CONFIG_ID
+            state == State.APPROACH_OBJECT
+            and target == Target.OBJECT
+            and config_id == Task.SEARCH
         ):
-            return EVENT_TARGET_FOUND
+            return Event.TARGET_FOUND
         if (
-            state == STATE_APPROACH_OBJECT
-            and target == TARGET_OBJECT
-            and config_id == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+            state == State.APPROACH_OBJECT
+            and target == Target.OBJECT
+            and config_id == Task.TRANSPORT
         ):
-            return EVENT_ALIGNED
+            return Event.ALIGNED
         if (
-            state == STATE_ORBIT
-            and target == TARGET_OBJECT
-            and config_id == ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
+            state == State.ORBIT
+            and target == Target.OBJECT
+            and config_id == Task.TRANSPORT
         ):
-            return EVENT_ALIGNED
+            return Event.ALIGNED
         if (
-            state == STATE_RETURN_FOLLOW
-            and target == TARGET_NONE
-            and config_id == ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID
+            state == State.RETURN_FOLLOW
+            and target == Target.NONE
+            and config_id == Task.RETURN_GARAGE_LINE
         ):
-            return EVENT_RETURN_GARAGE_FINISHED
+            return Event.RETURN_GARAGE_FINISHED
         return None
 
     def _create_event(self, reliable_seq, event, value):
@@ -1796,9 +1802,9 @@ def _find_control_frame_start(rx_buffer):
             continue
         mode = frame["mode"]
         topic = frame["topic"]
-        if mode == MODE_TCP and topic == TOPIC_ASSISTANT_VISION_TASK_SYNC:
+        if mode == Mode.TCP and topic == Topic.ASSISTANT_VISION_TASK_SYNC:
             return index
-        if mode == MODE_ACK and topic == TOPIC_ASSISTANT_VISION_EVENT_REPORT:
+        if mode == Mode.ACK and topic == Topic.ASSISTANT_VISION_EVENT_REPORT:
             return index
     return -1
 
@@ -1945,7 +1951,7 @@ def process_object_frame(uart, state, img, image_width, image_height, yolo_net=N
             )
             _draw_debug_protocol_point(img, image_width, image_height, target_x, target_y)
             draw_selected_marker(img=img, blob=best_blob, pixel_x=pixel_x, pixel_y=pixel_y)
-    if state.mode == MODE_ORBIT_OBJECT:
+    if state.mode == RunMode.ORBIT_OBJECT:
         vx, vy = build_object_orbit_velocity_from_observation(observation, image_height)
     else:
         vx, vy = build_object_approach_velocity_from_observation(
@@ -2083,9 +2089,9 @@ def process_frame(uart, state, img, image_width, image_height, yolo_net=None):
             write_line(uart, event_frame)
         return
 
-    if state.mode == MODE_APPROACH_OBJECT or state.mode == MODE_ORBIT_OBJECT:
+    if state.mode == RunMode.APPROACH_OBJECT or state.mode == RunMode.ORBIT_OBJECT:
         process_object_frame(uart, state, img, image_width, image_height, yolo_net)
-    elif state.mode == MODE_RETURN_LINE:
+    elif state.mode == RunMode.RETURN_LINE:
         process_return_line_frame(uart, state, img, image_width, image_height)
     else:
         process_follow_frame(uart, img, image_width, image_height)

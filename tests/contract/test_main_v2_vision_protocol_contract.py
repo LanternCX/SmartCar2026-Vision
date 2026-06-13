@@ -23,12 +23,12 @@ def test_master_main_v2_formats_velocity_and_reliable_event_frames() -> None:
     velocity_frame = decode_frame(module.format_search_velocity_frame(1.0, -0.5))
     ack_frame = decode_frame(module.format_ack_frame(12))
     event_frame = decode_frame(
-        module.format_event_frame(30, 7, module.EVENT_TARGET_FOUND, 300)
+        module.format_event_frame(30, 7, module.Event.TARGET_FOUND, 300)
     )
 
     assert velocity_frame is not None
     assert velocity_frame["mode"] == MODE_UDP
-    assert velocity_frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+    assert velocity_frame["topic"] == module.Topic.LOCAL_VISION_VELOCITY
     assert velocity_frame["seq"] == 0
     assert decode_velocity_body(velocity_frame["body"]) == {
         "vx": 1.0,
@@ -38,17 +38,17 @@ def test_master_main_v2_formats_velocity_and_reliable_event_frames() -> None:
     }
     assert ack_frame == {
         "mode": MODE_ACK,
-        "topic": module.TOPIC_MASTER_VISION_TASK_SYNC,
+        "topic": module.Topic.MASTER_VISION_TASK_SYNC,
         "seq": 12,
         "body": b"\x00" * 8,
     }
     assert event_frame is not None
     assert event_frame["mode"] == MODE_TCP
-    assert event_frame["topic"] == module.TOPIC_MASTER_VISION_EVENT_REPORT
+    assert event_frame["topic"] == module.Topic.MASTER_VISION_EVENT_REPORT
     assert event_frame["seq"] == 30
     assert decode_master_vision_event_report_body(event_frame["body"]) == {
         "context_id": 7,
-        "event": module.EVENT_TARGET_FOUND,
+        "event": module.Event.TARGET_FOUND,
         "value": 300,
     }
 
@@ -77,7 +77,7 @@ def test_master_main_v2_missing_target_velocity_frame_uses_configured_search_spe
 
     assert frame is not None
     assert frame["mode"] == MODE_UDP
-    assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+    assert frame["topic"] == module.Topic.LOCAL_VISION_VELOCITY
     assert decode_velocity_body(frame["body"]) == {
         "vx": module.MASTER_MISSING_SEARCH_VX,
         "vy": module.MASTER_MISSING_SEARCH_VY,
@@ -89,14 +89,14 @@ def test_master_main_v2_missing_target_velocity_frame_uses_configured_search_spe
 def test_master_main_v2_return_garage_events_use_reliable_event_topic() -> None:
     module = load_master_v2()
     finished_frame = decode_frame(
-        module.format_event_frame(32, 7, module.EVENT_RETURN_GARAGE_FINISHED, 0)
+        module.format_event_frame(32, 7, module.Event.RETURN_GARAGE_FINISHED, 0)
     )
 
     assert finished_frame is not None
     assert finished_frame["mode"] == MODE_TCP
-    assert finished_frame["topic"] == module.TOPIC_MASTER_VISION_EVENT_REPORT
+    assert finished_frame["topic"] == module.Topic.MASTER_VISION_EVENT_REPORT
     assert decode_master_vision_event_report_body(finished_frame["body"]) == {
         "context_id": 7,
-        "event": module.EVENT_RETURN_GARAGE_FINISHED,
+        "event": module.Event.RETURN_GARAGE_FINISHED,
         "value": 0,
     }

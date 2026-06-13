@@ -16,12 +16,51 @@ EXP_TIME_US = 500
 # 未确认可靠事件的重发间隔, 单位为毫秒.
 RELIABLE_RESEND_INTERVAL_MS = 100
 
-# 高频速度数据流使用的模式编号.
-MODE_UDP = 0x01
-# 低频可靠同步与事件回报使用的模式编号.
-MODE_TCP = 0x02
-# 可靠确认帧使用的模式编号.
-MODE_ACK = 0x03
+# 高频速度数据流与可靠协议模式编号分组.
+class Mode:
+    UDP = 0x01
+    TCP = 0x02
+    ACK = 0x03
+
+
+# 主车视觉协议 topic 编号分组.
+class Topic:
+    LOCAL_VISION_VELOCITY = 0x01
+    MASTER_VISION_TASK_SYNC = 0x10
+    MASTER_VISION_EVENT_REPORT = 0x12
+
+# 主车状态编号分组.
+class State:
+    SEARCH_OBJECT = 1
+    ORBITING = 2
+    TRANSPORT_OBJECT = 4
+    RETURN_GARAGE_RETREAT = 6
+    RETURN_GARAGE_LINE = 7
+
+
+# 主车目标编号分组.
+class Target:
+    OBJECT = 1
+    EDGE_LINE = 3
+
+
+# 主车任务配置编号分组.
+class Task:
+    SEARCH = 1
+    TRANSPORT = 2
+    TRANSPORT_FINISH = 3
+    ORBIT = 4
+    RETURN_GARAGE_LINE = 5
+
+
+# 主车事件编号分组.
+class Event:
+    TARGET_FOUND = 6
+    ALIGNED = 7
+    ARRIVED = 8
+    RETURN_LINE_ALIGNED = 10
+    RETURN_GARAGE_FINISHED = 12
+
 # 固定短帧的 body 槽位长度, 单位为字节.
 FRAME_BODY_SIZE = 8
 # 固定短帧的帧头字节.
@@ -41,13 +80,6 @@ YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
 MASTER_DEBUG_DISPLAY_ENABLED = False
 # 旧版高帧率手感对应的参考帧率.
 VISION_REFERENCE_FPS = 18
-
-# OpenART 下发主车本地视觉速度的 topic 编号.
-TOPIC_LOCAL_VISION_VELOCITY = 0x01
-# RT1021 下发主车本地视觉任务同步的 topic 编号.
-TOPIC_MASTER_VISION_TASK_SYNC = 0x10
-# OpenART 回报主车视觉可靠事件的 topic 编号.
-TOPIC_MASTER_VISION_EVENT_REPORT = 0x12
 
 # 候选框被认为有效目标的最小面积阈值.
 OBJECT_MIN_AREA = 50.0
@@ -137,44 +169,6 @@ RETURN_LINE_FINISH_ROW_Y_PX = 160
 RETURN_LINE_FINISH_COLUMN_X_PX = 270
 # 回库完成判定所需的连续满足帧数.
 RETURN_LINE_MISSING_FINISH_FRAMES = 5
-
-# 主车搜索状态编号.
-STATE_SEARCH_OBJECT = 1
-# 主车绕行状态编号.
-STATE_ORBITING = 2
-# 主车搬运状态编号.
-STATE_TRANSPORT_OBJECT = 4
-# 主车回库后退找黄线状态编号.
-STATE_RETURN_GARAGE_RETREAT = 6
-# 主车回库黄线平移状态编号.
-STATE_RETURN_GARAGE_LINE = 7
-
-# 物体目标类型编号.
-TARGET_OBJECT = 1
-# 边线目标类型编号.
-TARGET_EDGE_LINE = 3
-
-# 主车搜索任务配置编号.
-MASTER_SEARCH_TASK_CONFIG_ID = 1
-# 主车搬运入口对正任务配置编号.
-MASTER_TRANSPORT_TASK_CONFIG_ID = 2
-# 主车搬运收尾任务配置编号.
-MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID = 3
-# 主车绕行修正任务配置编号.
-MASTER_ORBIT_TASK_CONFIG_ID = 4
-# 主车回库黄线任务配置编号.
-MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID = 5
-
-# 发现目标事件编号.
-EVENT_TARGET_FOUND = 6
-# 搬运入口对正完成事件编号.
-EVENT_ALIGNED = 7
-# 搬运收尾到位事件编号.
-EVENT_ARRIVED = 8
-# 回库后退对正黄线完成事件编号.
-EVENT_RETURN_LINE_ALIGNED = 10
-# 回库完成事件编号.
-EVENT_RETURN_GARAGE_FINISHED = 12
 
 # 可靠序号环空间总长度.
 SEQ_RING_SIZE = 256
@@ -369,7 +363,7 @@ def parse_task_sync_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
-    if frame["mode"] != MODE_TCP or frame["topic"] != TOPIC_MASTER_VISION_TASK_SYNC:
+    if frame["mode"] != Mode.TCP or frame["topic"] != Topic.MASTER_VISION_TASK_SYNC:
         return None
     packet = decode_master_vision_task_sync_body(frame["body"])
     return {
@@ -385,7 +379,7 @@ def parse_event_ack_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
-    if frame["mode"] != MODE_ACK or frame["topic"] != TOPIC_MASTER_VISION_EVENT_REPORT:
+    if frame["mode"] != Mode.ACK or frame["topic"] != Topic.MASTER_VISION_EVENT_REPORT:
         return None
     return {"reliable_seq": int(frame["seq"])}
 
@@ -415,13 +409,13 @@ def should_resend(now_ms, last_sent_ms, interval_ms):
 
 
 def format_ack_frame(reliable_seq):
-    return encode_frame(MODE_ACK, TOPIC_MASTER_VISION_TASK_SYNC, reliable_seq, b"")
+    return encode_frame(Mode.ACK, Topic.MASTER_VISION_TASK_SYNC, reliable_seq, b"")
 
 
 def format_search_velocity_frame(vx, vy):
     return encode_frame(
-        MODE_UDP,
-        TOPIC_LOCAL_VISION_VELOCITY,
+        Mode.UDP,
+        Topic.LOCAL_VISION_VELOCITY,
         0,
         encode_velocity_body(vx, vy, 0.0, False),
     )
@@ -429,8 +423,8 @@ def format_search_velocity_frame(vx, vy):
 
 def format_event_frame(reliable_seq, context_id, event, value):
     return encode_frame(
-        MODE_TCP,
-        TOPIC_MASTER_VISION_EVENT_REPORT,
+        Mode.TCP,
+        Topic.MASTER_VISION_EVENT_REPORT,
         reliable_seq,
         encode_master_vision_event_report_body(context_id, event, value),
     )
@@ -466,9 +460,9 @@ def _find_control_frame_start(rx_buffer):
         frame = decode_frame(rx_buffer[index : index + FRAME_SIZE])
         if frame is None:
             continue
-        if frame["mode"] == MODE_TCP and frame["topic"] == TOPIC_MASTER_VISION_TASK_SYNC:
+        if frame["mode"] == Mode.TCP and frame["topic"] == Topic.MASTER_VISION_TASK_SYNC:
             return index
-        if frame["mode"] == MODE_ACK and frame["topic"] == TOPIC_MASTER_VISION_EVENT_REPORT:
+        if frame["mode"] == Mode.ACK and frame["topic"] == Topic.MASTER_VISION_EVENT_REPORT:
             return index
     return -1
 
@@ -594,11 +588,11 @@ def filter_candidates_in_target_window(candidates, target_y, tolerance_y):
 
 def build_search_target_point(config_id):
     target_x = float(MASTER_SEARCH_TARGET_X_PX)
-    if int(config_id) == int(MASTER_ORBIT_TASK_CONFIG_ID):
+    if int(config_id) == int(Task.ORBIT):
         return float(MASTER_ORBIT_TARGET_X_PX), float(MASTER_ORBIT_TARGET_Y_PX)
     if int(config_id) in (
-        int(MASTER_TRANSPORT_TASK_CONFIG_ID),
-        int(MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID),
+        int(Task.TRANSPORT),
+        int(Task.TRANSPORT_FINISH),
     ):
         return target_x, float(MASTER_TRANSPORT_TARGET_Y_PX)
     return target_x, float(MASTER_SEARCH_TARGET_Y_PX)
@@ -607,7 +601,7 @@ def build_search_target_point(config_id):
 def current_task_config_id():
     current_task = state.current_task
     if current_task is None:
-        return MASTER_SEARCH_TASK_CONFIG_ID
+        return Task.SEARCH
     return int(current_task["arg"])
 
 
@@ -615,9 +609,9 @@ def is_finish_task_context():
     current_task = state.current_task
     return (
         current_task is not None
-        and int(current_task["state"]) == int(STATE_TRANSPORT_OBJECT)
-        and int(current_task["target"]) == int(TARGET_EDGE_LINE)
-        and int(current_task["arg"]) == int(MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID)
+        and int(current_task["state"]) == int(State.TRANSPORT_OBJECT)
+        and int(current_task["target"]) == int(Target.EDGE_LINE)
+        and int(current_task["arg"]) == int(Task.TRANSPORT_FINISH)
     )
 
 
@@ -625,9 +619,9 @@ def is_orbit_task_context():
     current_task = state.current_task
     return (
         current_task is not None
-        and int(current_task["state"]) == int(STATE_ORBITING)
-        and int(current_task["target"]) == int(TARGET_OBJECT)
-        and int(current_task["arg"]) == int(MASTER_ORBIT_TASK_CONFIG_ID)
+        and int(current_task["state"]) == int(State.ORBITING)
+        and int(current_task["target"]) == int(Target.OBJECT)
+        and int(current_task["arg"]) == int(Task.ORBIT)
     )
 
 
@@ -635,11 +629,11 @@ def is_return_line_task_context():
     current_task = state.current_task
     return (
         current_task is not None
-        and int(current_task["target"]) == int(TARGET_EDGE_LINE)
-        and int(current_task["arg"]) == int(MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID)
+        and int(current_task["target"]) == int(Target.EDGE_LINE)
+        and int(current_task["arg"]) == int(Task.RETURN_GARAGE_LINE)
         and int(current_task["state"]) in (
-            int(STATE_RETURN_GARAGE_RETREAT),
-            int(STATE_RETURN_GARAGE_LINE),
+            int(State.RETURN_GARAGE_RETREAT),
+            int(State.RETURN_GARAGE_LINE),
         )
     )
 
@@ -870,7 +864,7 @@ def draw_return_line_debug(img, line_y, velocity):
 def draw_search_preview_debug(img, candidates):
     draw_object_candidates_debug(img, candidates)
     if candidates:
-        target_x, target_y = build_search_target_point(MASTER_SEARCH_TASK_CONFIG_ID)
+        target_x, target_y = build_search_target_point(Task.SEARCH)
         task_name, _, _, _, best_blob = choose_best_candidate(candidates, target_x, target_y)
         draw_selected_candidate_debug(img, task_name, best_blob)
         draw_protocol_target_point_debug(img, target_x, target_y)
@@ -1107,9 +1101,9 @@ def build_task_event_value(img, best_blob, task_name=None):
     current_task = state.current_task
     if (
         current_task is not None
-        and int(current_task["state"]) == int(STATE_SEARCH_OBJECT)
-        and int(current_task["target"]) == int(TARGET_OBJECT)
-        and int(current_task["arg"]) == int(MASTER_SEARCH_TASK_CONFIG_ID)
+        and int(current_task["state"]) == int(State.SEARCH_OBJECT)
+        and int(current_task["target"]) == int(Target.OBJECT)
+        and int(current_task["arg"]) == int(Task.SEARCH)
         and task_name is not None
     ):
         return object_task_id(task_name)
@@ -1123,16 +1117,16 @@ def current_event_type():
     task_state = int(current_task["state"])
     target = int(current_task["target"])
     arg = int(current_task["arg"])
-    if task_state == STATE_SEARCH_OBJECT and target == TARGET_OBJECT and arg == MASTER_SEARCH_TASK_CONFIG_ID:
-        return EVENT_TARGET_FOUND
-    if task_state == STATE_SEARCH_OBJECT and target == TARGET_OBJECT and arg == MASTER_TRANSPORT_TASK_CONFIG_ID:
-        return EVENT_ALIGNED
-    if task_state == STATE_TRANSPORT_OBJECT and target == TARGET_EDGE_LINE and arg == MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID:
-        return EVENT_ARRIVED
-    if task_state == STATE_RETURN_GARAGE_RETREAT and target == TARGET_EDGE_LINE and arg == MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID:
-        return EVENT_RETURN_LINE_ALIGNED
-    if task_state == STATE_RETURN_GARAGE_LINE and target == TARGET_EDGE_LINE and arg == MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID:
-        return EVENT_RETURN_GARAGE_FINISHED
+    if task_state == State.SEARCH_OBJECT and target == Target.OBJECT and arg == Task.SEARCH:
+        return Event.TARGET_FOUND
+    if task_state == State.SEARCH_OBJECT and target == Target.OBJECT and arg == Task.TRANSPORT:
+        return Event.ALIGNED
+    if task_state == State.TRANSPORT_OBJECT and target == Target.EDGE_LINE and arg == Task.TRANSPORT_FINISH:
+        return Event.ARRIVED
+    if task_state == State.RETURN_GARAGE_RETREAT and target == Target.EDGE_LINE and arg == Task.RETURN_GARAGE_LINE:
+        return Event.RETURN_LINE_ALIGNED
+    if task_state == State.RETURN_GARAGE_LINE and target == Target.EDGE_LINE and arg == Task.RETURN_GARAGE_LINE:
+        return Event.RETURN_GARAGE_FINISHED
     return None
 
 
@@ -1146,15 +1140,15 @@ def resolve_event_value(observation_value, event_value):
     if is_finish_task_context():
         return int(float(event_value))
     if is_return_line_task_context():
-        if current_event_type() == EVENT_RETURN_GARAGE_FINISHED:
+        if current_event_type() == Event.RETURN_GARAGE_FINISHED:
             return 0
         return int(float(observation_value))
     current_task = state.current_task
     if (
         current_task is not None
-        and int(current_task["state"]) == int(STATE_SEARCH_OBJECT)
-        and int(current_task["target"]) == int(TARGET_OBJECT)
-        and int(current_task["arg"]) == int(MASTER_SEARCH_TASK_CONFIG_ID)
+        and int(current_task["state"]) == int(State.SEARCH_OBJECT)
+        and int(current_task["target"]) == int(Target.OBJECT)
+        and int(current_task["arg"]) == int(Task.SEARCH)
         and event_value is not None
     ):
         return int(event_value)
@@ -1237,7 +1231,7 @@ def _accept_return_line_observation(context_id, observation_value, img, event_ty
     image_width = int(img.width())
     image_height = int(img.height())
 
-    if event_type == EVENT_RETURN_LINE_ALIGNED:
+    if event_type == Event.RETURN_LINE_ALIGNED:
         if float(observation_value) > 0.0 and float(observation_value) <= float(RETURN_GARAGE_LINE_TARGET_Y_PX):
             state.stable_frame_count += 1
             if state.stable_frame_count >= required_stable_frames():

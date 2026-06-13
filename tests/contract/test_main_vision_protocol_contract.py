@@ -144,7 +144,7 @@ def test_assistant_formats_ack_and_reliable_event_frames() -> None:
     module = load_main_module("vision_main_test_module_contract")
     ack_frame = decode_frame(module.format_ack_frame(12))
     event_frame = decode_frame(
-        module.format_event_frame(12, module.EVENT_TARGET_FOUND, 180)
+        module.format_event_frame(12, module.Event.TARGET_FOUND, 180)
     )
 
     assert ack_frame == {
@@ -158,7 +158,7 @@ def test_assistant_formats_ack_and_reliable_event_frames() -> None:
     assert event_frame["topic"] == TOPIC_ASSISTANT_VISION_EVENT_REPORT
     assert event_frame["seq"] == 12
     assert decode_assistant_vision_event_report_body(event_frame["body"]) == {
-        "event": module.EVENT_TARGET_FOUND,
+        "event": module.Event.TARGET_FOUND,
         "value": 180,
     }
 
@@ -196,7 +196,7 @@ def test_master_formats_velocity_and_reliable_event_frames() -> None:
     velocity_frame = decode_frame(module.format_search_velocity_frame(1.0, -0.5))
     ack_frame = decode_frame(module.format_ack_frame(12))
     event_frame = decode_frame(
-        module.format_event_frame(30, 7, module.EVENT_TARGET_FOUND, 300)
+        module.format_event_frame(30, 7, module.Event.TARGET_FOUND, 300)
     )
 
     assert velocity_frame is not None
@@ -221,7 +221,7 @@ def test_master_formats_velocity_and_reliable_event_frames() -> None:
     assert event_frame["seq"] == 30
     assert decode_master_vision_event_report_body(event_frame["body"]) == {
         "context_id": 7,
-        "event": module.EVENT_TARGET_FOUND,
+        "event": module.Event.TARGET_FOUND,
         "value": 300,
     }
 
@@ -283,15 +283,15 @@ def test_master_return_garage_events_use_reliable_event_topic() -> None:
     module = load_role_main_module("master", "vision_master_return_contract_module")
 
     finished_frame = decode_frame(
-        module.format_event_frame(32, 7, module.EVENT_RETURN_GARAGE_FINISHED, 0)
+        module.format_event_frame(32, 7, module.Event.RETURN_GARAGE_FINISHED, 0)
     )
 
-    assert int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID) == 5
+    assert int(module.Task.RETURN_GARAGE_LINE) == 5
     assert finished_frame is not None
     assert finished_frame["mode"] == MODE_TCP
     assert finished_frame["topic"] == TOPIC_MASTER_VISION_EVENT_REPORT
     assert decode_master_vision_event_report_body(finished_frame["body"]) == {
         "context_id": 7,
-        "event": module.EVENT_RETURN_GARAGE_FINISHED,
+        "event": module.Event.RETURN_GARAGE_FINISHED,
         "value": 0,
     }

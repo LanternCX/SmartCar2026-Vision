@@ -79,6 +79,23 @@ def load_master():
     return load_role_main_module("master", "master_hook_protocol_test_module")
 
 
+def test_master_exposes_grouped_enum_constants() -> None:
+    module = load_master()
+
+    assert module.Mode.UDP == 0x01
+    assert module.Topic.MASTER_VISION_EVENT_REPORT == 0x12
+    assert module.State.SEARCH_OBJECT == 1
+    assert module.Target.OBJECT == 1
+    assert module.Task.SEARCH == 1
+    assert module.Event.TARGET_FOUND == 6
+    assert not hasattr(module, "MODE_UDP")
+    assert not hasattr(module, "TOPIC_MASTER_VISION_EVENT_REPORT")
+    assert not hasattr(module, "STATE_SEARCH_OBJECT")
+    assert not hasattr(module, "TARGET_OBJECT")
+    assert not hasattr(module, "MASTER_SEARCH_HOOK_CONFIG_ID")
+    assert not hasattr(module, "EVENT_TARGET_FOUND")
+
+
 IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
 
@@ -87,7 +104,7 @@ def master_target_point(module, config_id=None):
     """! @brief 返回当前主车指定配置的搜索目标点"""
 
     if config_id is None:
-        config_id = module.MASTER_SEARCH_HOOK_CONFIG_ID
+        config_id = module.Task.SEARCH
     return module.build_search_target_point(IMAGE_WIDTH, IMAGE_HEIGHT, config_id)
 
 
@@ -110,7 +127,7 @@ def centered_master_transport_observation(module, hook, area):
 
     target_x, target_y = master_target_point(
         module,
-        module.MASTER_TRANSPORT_HOOK_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
     return hook.build_observation(
         1,
@@ -194,9 +211,9 @@ def finish_hook_control_line(module):
     return master_sync_frame(
         12,
         7,
-        int(module.STATE_TRANSPORT_OBJECT),
-        int(module.TARGET_EDGE_LINE),
-        int(module.MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID),
+        int(module.State.TRANSPORT_OBJECT),
+        int(module.Target.EDGE_LINE),
+        int(module.Task.TRANSPORT_FINISH),
     )
 
 
@@ -206,9 +223,9 @@ def orbit_hook_control_line(module):
     return master_sync_frame(
         12,
         7,
-        int(module.STATE_ORBITING),
-        int(module.TARGET_OBJECT),
-        int(module.MASTER_ORBIT_HOOK_CONFIG_ID),
+        int(module.State.ORBITING),
+        int(module.Target.OBJECT),
+        int(module.Task.ORBIT),
     )
 
 
@@ -223,11 +240,11 @@ def search_hook_control_line(
     """! @brief 构造主车搜索或修正同步包"""
 
     if state is None:
-        state = int(module.STATE_SEARCH_OBJECT)
+        state = int(module.State.SEARCH_OBJECT)
     if target is None:
-        target = int(module.TARGET_OBJECT)
+        target = int(module.Target.OBJECT)
     if arg is None:
-        arg = int(module.MASTER_SEARCH_HOOK_CONFIG_ID)
+        arg = int(module.Task.SEARCH)
     return master_sync_frame(seq, context_id, state, target, arg)
 
 
@@ -299,8 +316,8 @@ def assert_velocity_frame(module, frame_bytes, vx, vy):
 
     frame = module.decode_frame(frame_bytes)
     assert frame is not None
-    assert frame["mode"] == module.MODE_UDP
-    assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+    assert frame["mode"] == module.Mode.UDP
+    assert frame["topic"] == module.Topic.LOCAL_VISION_VELOCITY
     body = module.decode_velocity_body(frame["body"])
     assert body["vx"] == pytest.approx(vx)
     assert body["vy"] == pytest.approx(vy)
@@ -316,7 +333,7 @@ def master_event_frames(module, writes):
         frame = module.decode_frame(frame_bytes)
         if frame is None:
             continue
-        if frame["topic"] == module.TOPIC_MASTER_VISION_EVENT_REPORT:
+        if frame["topic"] == module.Topic.MASTER_VISION_EVENT_REPORT:
             frames.append(frame_bytes)
     return frames
 
@@ -452,7 +469,7 @@ def test_master_orbit_sync_switches_to_orbit_correction_context() -> None:
     assert_master_ack(module, hook.handle_control_line(orbit_hook_control_line(module)), 12)
 
     assert hook.is_orbit_correction_context()
-    assert hook.current_target_config_id() == module.MASTER_ORBIT_HOOK_CONFIG_ID
+    assert hook.current_target_config_id() == module.Task.ORBIT
 
 
 def test_master_orbit_correction_uses_independent_velocity_params_without_event() -> None:
@@ -470,7 +487,7 @@ def test_master_orbit_correction_uses_independent_velocity_params_without_event(
     hook.handle_control_line(orbit_hook_control_line(module))
     target_x, target_y = master_target_point(
         module,
-        module.MASTER_ORBIT_HOOK_CONFIG_ID,
+        module.Task.ORBIT,
     )
     err_x = 10.0
     err_y = 12.0
@@ -520,7 +537,7 @@ def test_master_orbit_correction_zero_kp_outputs_zero_velocity() -> None:
     module.MASTER_ORBIT_KP_Y = 0.0
     target_x, target_y = master_target_point(
         module,
-        module.MASTER_ORBIT_HOOK_CONFIG_ID,
+        module.Task.ORBIT,
     )
     observation = module.MasterVisionHook().build_observation(
         1,
@@ -549,7 +566,7 @@ def test_master_repeated_sync_replies_ack_without_reapplying() -> None:
     assert_master_ack(module, hook.handle_control_line(search_hook_control_line(module)), 12)
     hook.accept_observation(observation)
 
-    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 180)
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.Event.TARGET_FOUND, 180)
 
 
 def test_master_non_new_context_does_not_override_active_context() -> None:
@@ -584,7 +601,7 @@ def test_master_reliable_seq_is_separate_from_context_id() -> None:
     hook.handle_control_line(master_event_ack_frame(12))
     now_ms[0] += 20
 
-    assert_master_event(module, event_frame, 30, 7, module.EVENT_TARGET_FOUND, 180)
+    assert_master_event(module, event_frame, 30, 7, module.Event.TARGET_FOUND, 180)
     assert hook.next_event_frame() == event_frame
 
 
@@ -611,17 +628,17 @@ def test_master_transport_observation_uses_transport_target_point() -> None:
     hook.handle_control_line(
         search_hook_control_line(
             module,
-            state=int(module.STATE_SEARCH_OBJECT),
-            arg=int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+            state=int(module.State.SEARCH_OBJECT),
+            arg=int(module.Task.TRANSPORT),
         )
     )
     search_target_x, search_target_y = master_target_point(
         module,
-        module.MASTER_SEARCH_HOOK_CONFIG_ID,
+        module.Task.SEARCH,
     )
     transport_target_x, transport_target_y = master_target_point(
         module,
-        module.MASTER_TRANSPORT_HOOK_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
 
     search_observation = hook.build_observation(
@@ -849,9 +866,9 @@ def test_master_return_retreat_line_alignment_reports_reliable_event() -> None:
         master_sync_frame(
             12,
             7,
-            int(module.STATE_RETURN_GARAGE_RETREAT),
-            int(module.TARGET_EDGE_LINE),
-            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+            int(module.State.RETURN_GARAGE_RETREAT),
+            int(module.Target.EDGE_LINE),
+            int(module.Task.RETURN_GARAGE_LINE),
         )
     )
     module.RETURN_GARAGE_LINE_TARGET_Y_PX = 90.0
@@ -864,7 +881,7 @@ def test_master_return_retreat_line_alignment_reports_reliable_event() -> None:
         hook.next_event_frame(),
         30,
         7,
-        module.EVENT_RETURN_LINE_ALIGNED,
+        module.Event.RETURN_LINE_ALIGNED,
         80,
     )
 
@@ -878,9 +895,9 @@ def test_master_return_retreat_line_before_target_does_not_report_event() -> Non
         master_sync_frame(
             12,
             7,
-            int(module.STATE_RETURN_GARAGE_RETREAT),
-            int(module.TARGET_EDGE_LINE),
-            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+            int(module.State.RETURN_GARAGE_RETREAT),
+            int(module.Target.EDGE_LINE),
+            int(module.Task.RETURN_GARAGE_LINE),
         )
     )
     module.RETURN_GARAGE_LINE_TARGET_Y_PX = 90.0
@@ -900,9 +917,9 @@ def test_master_return_line_ignores_marker_found_observation() -> None:
         master_sync_frame(
             12,
             7,
-            int(module.STATE_RETURN_GARAGE_LINE),
-            int(module.TARGET_EDGE_LINE),
-            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+            int(module.State.RETURN_GARAGE_LINE),
+            int(module.Target.EDGE_LINE),
+            int(module.Task.RETURN_GARAGE_LINE),
         )
     )
 
@@ -921,9 +938,9 @@ def test_master_return_line_missing_yellow_does_not_report_finished_event() -> N
         master_sync_frame(
             12,
             7,
-            int(module.STATE_RETURN_GARAGE_LINE),
-            int(module.TARGET_EDGE_LINE),
-            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+            int(module.State.RETURN_GARAGE_LINE),
+            int(module.Target.EDGE_LINE),
+            int(module.Task.RETURN_GARAGE_LINE),
         )
     )
 
@@ -941,9 +958,9 @@ def test_master_return_line_runtime_does_not_use_blob_detection() -> None:
         master_sync_frame(
             12,
             7,
-            int(module.STATE_RETURN_GARAGE_LINE),
-            int(module.TARGET_EDGE_LINE),
-            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+            int(module.State.RETURN_GARAGE_LINE),
+            int(module.Target.EDGE_LINE),
+            int(module.Task.RETURN_GARAGE_LINE),
         )
     )
     uart = FakeUART()
@@ -1073,9 +1090,9 @@ def test_master_return_line_outside_follow_roi_keeps_following_without_finished_
         master_sync_frame(
             12,
             7,
-            int(module.STATE_RETURN_GARAGE_LINE),
-            int(module.TARGET_EDGE_LINE),
-            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+            int(module.State.RETURN_GARAGE_LINE),
+            int(module.Target.EDGE_LINE),
+            int(module.Task.RETURN_GARAGE_LINE),
         )
     )
     uart = FakeUART()
@@ -1100,9 +1117,9 @@ def test_master_return_line_inside_follow_roi_does_not_report_finished_event() -
         master_sync_frame(
             12,
             7,
-            int(module.STATE_RETURN_GARAGE_LINE),
-            int(module.TARGET_EDGE_LINE),
-            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+            int(module.State.RETURN_GARAGE_LINE),
+            int(module.Target.EDGE_LINE),
+            int(module.Task.RETURN_GARAGE_LINE),
         )
     )
     uart = FakeUART()
@@ -1123,9 +1140,9 @@ def test_master_return_line_below_target_y_does_not_report_finished_event() -> N
         master_sync_frame(
             12,
             7,
-            int(module.STATE_RETURN_GARAGE_LINE),
-            int(module.TARGET_EDGE_LINE),
-            int(module.MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID),
+            int(module.State.RETURN_GARAGE_LINE),
+            int(module.Target.EDGE_LINE),
+            int(module.Task.RETURN_GARAGE_LINE),
         )
     )
     uart = FakeUART()
@@ -1559,7 +1576,7 @@ def test_master_hook_waits_for_stable_target_before_event() -> None:
     second_frame = hook.next_event_frame()
 
     assert first_frame is None
-    assert_master_event(module, second_frame, 30, 7, module.EVENT_TARGET_FOUND, 150)
+    assert_master_event(module, second_frame, 30, 7, module.Event.TARGET_FOUND, 150)
 
 
 def test_master_hook_does_not_event_when_condition_is_not_met() -> None:
@@ -1621,15 +1638,15 @@ def test_master_transport_hook_emits_aligned_for_transport_config() -> None:
     hook.handle_control_line(
         search_hook_control_line(
             module,
-            state=int(module.STATE_SEARCH_OBJECT),
-            arg=int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+            state=int(module.State.SEARCH_OBJECT),
+            arg=int(module.Task.TRANSPORT),
         )
     )
     observation = centered_master_transport_observation(module, hook, 180)
 
     hook.accept_observation(observation)
 
-    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_ALIGNED, 180)
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.Event.ALIGNED, 180)
 
 
 def test_master_transport_hook_keeps_search_velocity_output() -> None:
@@ -1640,8 +1657,8 @@ def test_master_transport_hook_keeps_search_velocity_output() -> None:
     hook.handle_control_line(
         search_hook_control_line(
             module,
-            state=int(module.STATE_SEARCH_OBJECT),
-            arg=int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+            state=int(module.State.SEARCH_OBJECT),
+            arg=int(module.Task.TRANSPORT),
         )
     )
 
@@ -1676,8 +1693,8 @@ def test_master_transport_hook_keeps_search_velocity_output() -> None:
 
     frame = module.decode_frame(uart.writes[0])
     assert frame is not None
-    assert frame["mode"] == module.MODE_UDP
-    assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+    assert frame["mode"] == module.Mode.UDP
+    assert frame["topic"] == module.Topic.LOCAL_VISION_VELOCITY
 
 
 def test_master_target_found_sends_stable_zero_before_event() -> None:
@@ -1696,7 +1713,7 @@ def test_master_target_found_sends_stable_zero_before_event() -> None:
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
     assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
-    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 1)
+    assert_master_event(module, uart.writes[2], 30, 7, module.Event.TARGET_FOUND, 1)
 
 
 def test_master_search_frame_uses_task_id_as_target_found_event_value() -> None:
@@ -1744,7 +1761,7 @@ def test_master_search_frame_uses_task_id_as_target_found_event_value() -> None:
     module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
     module.process_search_frame(uart, hook, img, IMAGE_WIDTH, IMAGE_HEIGHT)
 
-    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 2)
+    assert_master_event(module, uart.writes[2], 30, 7, module.Event.TARGET_FOUND, 2)
 
 
 def test_master_pending_event_suppresses_velocity_between_retries() -> None:
@@ -1770,8 +1787,8 @@ def test_master_pending_event_suppresses_velocity_between_retries() -> None:
 
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
-    assert_master_event(module, uart.writes[1], 30, 7, module.EVENT_TARGET_FOUND, 1)
-    assert_master_event(module, uart.writes[2], 30, 7, module.EVENT_TARGET_FOUND, 1)
+    assert_master_event(module, uart.writes[1], 30, 7, module.Event.TARGET_FOUND, 1)
+    assert_master_event(module, uart.writes[2], 30, 7, module.Event.TARGET_FOUND, 1)
 
 
 def test_master_transport_finish_hook_does_not_arrive_on_yellow_contact_only() -> None:
@@ -1862,7 +1879,7 @@ def test_master_transport_finish_hook_emits_arrived_after_yellow_contact_then_cl
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
     assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
     assert_velocity_frame(module, uart.writes[2], 0.0, 0.0)
-    assert_master_event(module, uart.writes[3], 30, 7, module.EVENT_ARRIVED, 0)
+    assert_master_event(module, uart.writes[3], 30, 7, module.Event.ARRIVED, 0)
 
 
 def test_master_transport_finish_hook_does_not_arrive_when_yellow_ratio_is_not_enough() -> None:
@@ -1951,7 +1968,7 @@ def test_master_hook_throttles_pending_event_retries() -> None:
     now_ms[0] += 1
     fourth = hook.next_event_frame()
 
-    assert_master_event(module, first, 30, 7, module.EVENT_TARGET_FOUND, 180)
+    assert_master_event(module, first, 30, 7, module.Event.TARGET_FOUND, 180)
     assert second is None
     assert third is None
     assert fourth == first
@@ -1975,7 +1992,7 @@ def test_master_hook_default_event_retry_interval_is_low_frequency() -> None:
     now_ms[0] += 20
     second = hook.next_event_frame()
 
-    assert_master_event(module, first, 30, 7, module.EVENT_TARGET_FOUND, 180)
+    assert_master_event(module, first, 30, 7, module.Event.TARGET_FOUND, 180)
     assert second is None
 
 
@@ -2002,7 +2019,7 @@ def test_master_hook_repeats_event_until_matching_ack() -> None:
     third = hook.next_event_frame()
     hook.handle_control_line(master_event_ack_frame(30))
 
-    assert_master_event(module, first, 30, 7, module.EVENT_TARGET_FOUND, 180)
+    assert_master_event(module, first, 30, 7, module.Event.TARGET_FOUND, 180)
     assert second == first
     assert third == first
     assert hook.next_event_frame() is None
@@ -2029,7 +2046,7 @@ def test_master_hook_keeps_unacked_event_after_new_context_sync() -> None:
     second = hook.next_event_frame()
     hook.handle_control_line(master_event_ack_frame(30))
 
-    assert_master_event(module, first, 30, 7, module.EVENT_TARGET_FOUND, 180)
+    assert_master_event(module, first, 30, 7, module.Event.TARGET_FOUND, 180)
     assert second == first
     assert hook.next_event_frame() is None
 
@@ -2043,7 +2060,7 @@ def test_master_hook_creates_target_found_once_per_context() -> None:
     observation = centered_master_observation(module, hook, 180)
 
     hook.accept_observation(observation)
-    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 180)
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.Event.TARGET_FOUND, 180)
     hook.handle_control_line(master_event_ack_frame(30))
     hook.accept_observation(observation)
 
@@ -2341,7 +2358,7 @@ def test_master_target_found_uses_bbox_center_and_bottom_error() -> None:
     observation = centered_master_observation(module, hook, 150)
     hook.accept_observation(observation)
 
-    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 150)
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.Event.TARGET_FOUND, 150)
 
 
 def test_master_search_control_does_not_require_marker_span_or_min_corners() -> None:
@@ -2819,7 +2836,7 @@ def test_master_hook_event_uses_configured_target_y_not_blob_center_y() -> None:
     hook.accept_observation(observation)
 
     assert observation == (7, 0.0, 0.0, 4800.0)
-    assert_master_event(module, hook.next_event_frame(), 30, 7, module.EVENT_TARGET_FOUND, 4800)
+    assert_master_event(module, hook.next_event_frame(), 30, 7, module.Event.TARGET_FOUND, 4800)
 
 
 def test_master_candidate_selection_uses_configured_target_point() -> None:
@@ -2886,12 +2903,12 @@ def test_master_transport_alignment_keeps_original_candidate_selection() -> None
     hook.handle_control_line(
         search_hook_control_line(
             module,
-            state=int(module.STATE_SEARCH_OBJECT),
-            target=int(module.TARGET_OBJECT),
-            arg=int(module.MASTER_TRANSPORT_HOOK_CONFIG_ID),
+            state=int(module.State.SEARCH_OBJECT),
+            target=int(module.Target.OBJECT),
+            arg=int(module.Task.TRANSPORT),
         )
     )
-    target_x, target_y = master_target_point(module, module.MASTER_TRANSPORT_HOOK_CONFIG_ID)
+    target_x, target_y = master_target_point(module, module.Task.TRANSPORT)
 
     class FakeBlob:
         def rect(self):
@@ -2937,7 +2954,7 @@ def test_master_push_observation_accepts_x_outside_when_bottom_hits_target_windo
     hook.handle_control_line(finish_hook_control_line(module))
     target_x, target_y = master_target_point(
         module,
-        module.MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID,
+        module.Task.TRANSPORT_FINISH,
     )
 
     class FakeBlob:
@@ -2984,7 +3001,7 @@ def test_master_push_observation_prefers_largest_area_after_bottom_filter() -> N
     hook.handle_control_line(finish_hook_control_line(module))
     target_x, target_y = master_target_point(
         module,
-        module.MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID,
+        module.Task.TRANSPORT_FINISH,
     )
 
     class FakeBlob:
@@ -3034,7 +3051,7 @@ def test_master_push_observation_ignores_candidates_when_bottom_outside_target_w
     hook.handle_control_line(finish_hook_control_line(module))
     target_x, target_y = master_target_point(
         module,
-        module.MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID,
+        module.Task.TRANSPORT_FINISH,
     )
 
     class FakeBlob:
