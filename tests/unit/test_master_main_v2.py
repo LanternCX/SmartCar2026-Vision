@@ -27,6 +27,24 @@ def load_master_v2():
     return module
 
 
+def test_master_main_v2_default_configuration_reports_target_found_after_single_observation() -> None:
+    module = load_role_entry_module(
+        "master",
+        "main_v2.py",
+        "vision_master_v2_default_stable_frames_test_module",
+    )
+    module.reset_runtime_state()
+    module.state.yolo_net = "fake-net"
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.accept_observation(build_search_observation(module, 180.0), FakeImage())
+
+    assert latest_event(type("U", (), {"writes": [module.next_event_frame()]})()) == {
+        "context_id": 7,
+        "event": module.Event.TARGET_FOUND,
+        "value": 180,
+    }
+
+
 class FakeUART:
     def __init__(self):
         self.writes = []
