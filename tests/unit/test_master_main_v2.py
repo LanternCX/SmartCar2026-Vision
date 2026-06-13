@@ -529,6 +529,43 @@ def test_master_main_v2_search_velocity_clamps_vx_and_vy() -> None:
     assert negative == (-expected_positive_vx, -expected_positive_vy)
 
 
+def test_master_main_v2_reference_fps_keeps_search_velocity_unchanged() -> None:
+    module = load_master_v2()
+    module.CURRENT_FRAME_INTERVAL_MS = module.reference_frame_interval_ms()
+
+    velocity = module.build_search_velocity_from_observation(
+        (7, 100.0, -100.0, 300.0),
+        IMAGE_HEIGHT,
+    )
+
+    assert velocity == pytest.approx((5.0, 2.0833333333333335))
+
+
+def test_master_main_v2_reference_frame_interval_is_derived_from_fps() -> None:
+    module = load_master_v2()
+    module.VISION_REFERENCE_FPS = 25
+
+    assert module.reference_frame_interval_ms() == pytest.approx(40.0)
+
+
+def test_master_main_v2_slow_frame_interval_reduces_search_velocity() -> None:
+    module = load_master_v2()
+    module.CURRENT_FRAME_INTERVAL_MS = module.reference_frame_interval_ms()
+    reference_velocity = module.build_search_velocity_from_observation(
+        (7, 100.0, -100.0, 300.0),
+        IMAGE_HEIGHT,
+    )
+    module.CURRENT_FRAME_INTERVAL_MS = module.reference_frame_interval_ms() * 2
+    slow_velocity = module.build_search_velocity_from_observation(
+        (7, 100.0, -100.0, 300.0),
+        IMAGE_HEIGHT,
+    )
+
+    assert abs(slow_velocity[0]) < abs(reference_velocity[0])
+    assert abs(slow_velocity[1]) < abs(reference_velocity[1])
+    assert slow_velocity == pytest.approx((reference_velocity[0] * 0.5, reference_velocity[1] * 0.5))
+
+
 def test_master_main_v2_search_y_velocity_decreases_when_target_gets_closer() -> None:
     module = load_master_v2()
     far_velocity = module.build_search_velocity_from_observation((7, 0.0, -200.0, 1000.0), IMAGE_HEIGHT)

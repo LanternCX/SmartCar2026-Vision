@@ -39,6 +39,8 @@ YOLO_MIN_SCORE = 0.90
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
 # 调试模式打开后在屏幕上显示识别框和目标点.
 MASTER_DEBUG_DISPLAY_ENABLED = False
+# 旧版高帧率手感对应的参考帧率.
+VISION_REFERENCE_FPS = 18
 
 # OpenART 下发主车本地视觉速度的 topic 编号.
 TOPIC_LOCAL_VISION_VELOCITY = 0x01
@@ -220,6 +222,8 @@ YOLO_NET = None
 UART_DEVICE = None
 # 当前帧复用的 YOLO 候选缓存.
 CURRENT_YOLO_CANDIDATES = ()
+# 当前帧距离上一帧的实际间隔, 单位为毫秒.
+CURRENT_FRAME_INTERVAL_MS = 1000.0 / float(VISION_REFERENCE_FPS)
 
 
 def reset_runtime_state(next_event_seq=1):
@@ -239,6 +243,7 @@ def reset_runtime_state(next_event_seq=1):
     global YOLO_NET
     global UART_DEVICE
     global CURRENT_YOLO_CANDIDATES
+    global CURRENT_FRAME_INTERVAL_MS
 
     CURRENT_TASK = None
     LAST_TASK_CONTEXT_ID = None
@@ -254,6 +259,7 @@ def reset_runtime_state(next_event_seq=1):
     YOLO_NET = None
     UART_DEVICE = None
     CURRENT_YOLO_CANDIDATES = ()
+    CURRENT_FRAME_INTERVAL_MS = reference_frame_interval_ms()
 
 
 def _require_u8(value):
@@ -911,28 +917,48 @@ def _apply_min_speed(value, limit, min_speed):
     return value
 
 
+def current_frame_time_scale():
+    frame_interval_ms = float(CURRENT_FRAME_INTERVAL_MS)
+    if frame_interval_ms <= 0.0:
+        frame_interval_ms = reference_frame_interval_ms()
+    return reference_frame_interval_ms() / frame_interval_ms
+
+
 def _axis_p_velocity(error, deadzone, kp, limit, min_speed):
     error = float(error)
     if abs(error) <= float(deadzone):
         return 0.0
     if float(kp) == 0.0:
         return 0.0
-    return _apply_min_speed(error * float(kp), limit, min_speed)
+    time_scale = current_frame_time_scale()
+    return _apply_min_speed(
+        error * float(kp) * time_scale,
+        float(limit) * time_scale,
+        float(min_speed) * time_scale,
+    )
+
+
+def reference_frame_interval_ms():
+    reference_fps = float(VISION_REFERENCE_FPS)
+    if reference_fps <= 0.0:
+        reference_fps = 1.0
+    return 1000.0 / reference_fps
 
 
 def _build_search_y_velocity(err_y, image_height):
     err_y = float(err_y)
     if abs(err_y) <= float(MASTER_SEARCH_DEADZONE_Y_PX):
         return 0.0
+    time_scale = current_frame_time_scale()
     scaled_error = err_y * (
         float(MASTER_SEARCH_MAX_VY)
         / abs(float(MASTER_SEARCH_KP_Y))
         / float(image_height)
     )
     return _apply_min_speed(
-        scaled_error * float(MASTER_SEARCH_KP_Y),
-        MASTER_SEARCH_MAX_VY,
-        MASTER_SEARCH_MIN_SPEED,
+        scaled_error * float(MASTER_SEARCH_KP_Y) * time_scale,
+        float(MASTER_SEARCH_MAX_VY) * time_scale,
+        float(MASTER_SEARCH_MIN_SPEED) * time_scale,
     )
 
 
@@ -958,15 +984,16 @@ def _build_orbit_y_velocity(err_y, image_height):
         return 0.0
     if float(MASTER_ORBIT_KP_Y) == 0.0:
         return 0.0
+    time_scale = current_frame_time_scale()
     scaled_error = err_y * (
         float(MASTER_ORBIT_MAX_VY)
         / abs(float(MASTER_ORBIT_KP_Y))
         / float(image_height)
     )
     return _apply_min_speed(
-        scaled_error * float(MASTER_ORBIT_KP_Y),
-        MASTER_ORBIT_MAX_VY,
-        MASTER_ORBIT_MIN_SPEED,
+        scaled_error * float(MASTER_ORBIT_KP_Y) * time_scale,
+        float(MASTER_ORBIT_MAX_VY) * time_scale,
+        float(MASTER_ORBIT_MIN_SPEED) * time_scale,
     )
 
 
@@ -1447,15 +1474,23 @@ def run():
     global RX_BUFFER
     global UART_DEVICE
     global CURRENT_YOLO_CANDIDATES
+    global CURRENT_FRAME_INTERVAL_MS
 
     reset_runtime_state()
     UART_DEVICE = init_uart()
     init_sensor()
     YOLO_NET = tf.load(YOLO_MODEL_PATH)
+    last_frame_ms = default_now_ms()
 
     while True:
         RX_BUFFER = process_uart_input(RX_BUFFER)
         img = sensor.snapshot()
+        now_ms = default_now_ms()
+        if now_ms >= last_frame_ms:
+            CURRENT_FRAME_INTERVAL_MS = now_ms - last_frame_ms
+        else:
+            CURRENT_FRAME_INTERVAL_MS = reference_frame_interval_ms()
+        last_frame_ms = now_ms
         img.lens_corr(strength=2.8, zoom=1.0)
         CURRENT_YOLO_CANDIDATES = tuple(yolo_detect(img))
         process_task_frame(img)
