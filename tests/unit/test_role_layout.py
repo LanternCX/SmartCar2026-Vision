@@ -24,11 +24,11 @@ def test_role_main_modules_expose_role_protocol_api() -> None:
     master_frame = master.decode_frame(master.format_search_velocity_frame(0, 0))
 
     assert assistant_frame is not None
-    assert assistant_frame["mode"] == assistant.MODE_UDP
-    assert assistant_frame["topic"] == assistant.TOPIC_LOCAL_VISION_VELOCITY
+    assert assistant_frame["mode"] == assistant.Mode.UDP
+    assert assistant_frame["topic"] == assistant.Topic.LOCAL_VISION_VELOCITY
     assert master_frame is not None
-    assert master_frame["mode"] == master.MODE_UDP
-    assert master_frame["topic"] == master.TOPIC_LOCAL_VISION_VELOCITY
+    assert master_frame["mode"] == master.Mode.UDP
+    assert master_frame["topic"] == master.Topic.LOCAL_VISION_VELOCITY
     assert not hasattr(master, "format_observation_frame")
 
 
@@ -113,3 +113,33 @@ def test_role_build_scripts_copy_yolo_model_when_requested(tmp_path) -> None:
             model_path.unlink()
         else:
             model_path.write_bytes(original_model)
+
+
+def test_role_build_v2_scripts_generate_and_upload_v2_entry(tmp_path) -> None:
+    """! @brief v2 构建脚本读取共享标定文件并上传对应 v2 入口"""
+
+    for role in ("assistant", "master"):
+        target_dir = tmp_path / (role + "-v2-device")
+        target_dir.mkdir()
+        script_path = ROOT / role / "build_v2.sh"
+        source = ROOT / role / "main_v2.py"
+        env = dict(os.environ)
+        env["TARGET_DIR"] = str(target_dir)
+
+        subprocess.run(
+            ["bash", str(script_path)],
+            cwd=str(ROOT),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        uploaded = target_dir / "main.py"
+        assert source.is_file()
+        assert uploaded.is_file()
+        source_text = source.read_text(encoding="utf-8")
+        uploaded_text = uploaded.read_text(encoding="utf-8")
+        assert source_text == uploaded_text
+        assert "threshold_index" not in source_text
+        assert "OBJECT_TASKS = (" in source_text

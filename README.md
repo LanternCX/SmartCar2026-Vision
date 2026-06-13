@@ -16,8 +16,8 @@
 
 ## 开发边界
 
-- 运行时代码按角色维护在 `assistant/main.py` 与 `master/main.py`。
-- 每个角色目录独立维护面向 OpenART 设备部署的 `build.sh`。
+- 运行时代码按角色维护在 `assistant/` 与 `master/` 目录。
+- 每个角色目录独立维护面向 OpenART 设备部署的构建脚本。
 - 本仓库不维护独立 `.agents/skills` 体系。
 - 本仓库不维护题面规则文档副本。
 - 文档、注释和规则入口通过 review 检查。
@@ -94,6 +94,7 @@
 
 ```bash
 ./assistant/build.sh
+./assistant/build_v2.sh
 ./master/build.sh
 ./master/build_v2.sh
 ```
@@ -102,6 +103,7 @@
 
 ```bash
 TARGET_DIR=/path/to/device ./assistant/build.sh
+TARGET_DIR=/path/to/device ./assistant/build_v2.sh
 TARGET_DIR=/path/to/device ./master/build.sh
 TARGET_DIR=/path/to/device ./master/build_v2.sh
 ```
@@ -110,6 +112,7 @@ TARGET_DIR=/path/to/device ./master/build_v2.sh
 
 ```bash
 ./assistant/build.sh yolo
+./assistant/build_v2.sh yolo
 ./master/build.sh yolo
 ./master/build_v2.sh yolo
 ```
