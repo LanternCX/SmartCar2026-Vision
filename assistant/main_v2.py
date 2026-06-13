@@ -65,7 +65,7 @@ FRAME_HEAD = 0xA5
 FRAME_SIZE = 13
 YOLO_MODEL_PATH = "/sd/yolo.tflite"
 YOLO_IMAGE_COPY_SCALE = 0.75
-YOLO_MIN_SCORE = 0.90
+YOLO_MIN_SCORE = 0.50
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
 VISION_REFERENCE_FPS = 18.0
 
@@ -121,6 +121,8 @@ RETURN_LINE_MIN_SPEED = 0.0
 RETURN_LINE_MAX_THICKNESS_PX = 30
 RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
 RETURN_LINE_MISSING_FINISH_FRAMES = 5
+PROTOCOL_IMAGE_WIDTH = 320
+PROTOCOL_IMAGE_HEIGHT = 240
 
 _I16_MIN = -32768
 _I16_MAX = 32767
@@ -266,7 +268,7 @@ def decode_assistant_vision_event_report_body(body):
     }
 
 
-def format_vision_frame(vx, vy):
+def format_search_velocity_frame(vx, vy):
     return encode_frame(
         Mode.UDP,
         Topic.LOCAL_VISION_VELOCITY,
@@ -288,7 +290,7 @@ def format_event_frame(reliable_seq, event, value):
     )
 
 
-def parse_sync_packet(frame_bytes):
+def parse_task_sync_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
@@ -303,7 +305,7 @@ def parse_sync_packet(frame_bytes):
     }
 
 
-def parse_ack_packet(frame_bytes):
+def parse_event_ack_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
@@ -323,6 +325,10 @@ def default_now_ms():
     if hasattr(time, "ticks_ms"):
         return int(time.ticks_ms())
     return int(time.time() * 1000)
+
+
+def reference_frame_interval_ms():
+    return 1000.0 / VISION_REFERENCE_FPS
 
 
 def should_resend(now_ms, last_sent_ms, interval_ms):
@@ -370,7 +376,7 @@ def current_frame_time_scale():
     frame_interval_ms = float(state.current_frame_interval_ms)
     if frame_interval_ms <= 0.0:
         return 1.0
-    reference_interval_ms = 1000.0 / VISION_REFERENCE_FPS
+    reference_interval_ms = reference_frame_interval_ms()
     return reference_interval_ms / frame_interval_ms
 
 
@@ -431,9 +437,10 @@ def blob_rect_to_bbox(rect):
     return float(left), float(top), float(left + width), float(top + height)
 
 
-def normalize_bbox_for_protocol(left, top, right, bottom, img_height):
-    normalized_top = float(img_height) - float(bottom)
-    normalized_bottom = float(img_height) - float(top)
+def normalize_bbox_for_protocol(left, top, right, bottom):
+    img_height = float(state.current_image_height)
+    normalized_top = img_height - float(bottom)
+    normalized_bottom = img_height - float(top)
     return float(left), normalized_top, float(right), normalized_bottom
 
 
@@ -580,17 +587,17 @@ def _copy_image_for_yolo(img):
     return img.copy(YOLO_IMAGE_COPY_SCALE, 1)
 
 
-def _label_name(label):
+def label_name(label):
     label = int(label)
     if 0 <= label < len(YOLO_LABELS):
         return YOLO_LABELS[label]
     return "unknown"
 
 
-def _build_yolo_object_candidates(img, yolo_net=None):
-    net = yolo_net
+def yolo_detect(img):
+    net = state.yolo_net
     if net is None:
-        net = load_yolo_model()
+        raise RuntimeError("yolo_net not loaded")
     detect_img = _copy_image_for_yolo(img)
     image_width = float(img.width())
     image_height = float(img.height())
@@ -600,7 +607,7 @@ def _build_yolo_object_candidates(img, yolo_net=None):
         x1, y1, x2, y2, label, score = detected
         if float(score) <= float(YOLO_MIN_SCORE):
             continue
-        task_name = _label_name(label)
+        task_name = label_name(label)
         if task_name not in allowed_task_names:
             continue
         left = float(x1) * image_width
@@ -615,7 +622,6 @@ def _build_yolo_object_candidates(img, yolo_net=None):
             top,
             right,
             bottom,
-            image_height,
         )
         candidates.append((task_name, blob.cx(), blob.cy(), protocol_bottom, blob.area(), blob))
     return candidates
@@ -698,8 +704,8 @@ def build_blob_candidates(img):
         )
         for blob in blobs:
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-            _, _, _, bottom = normalize_bbox_for_protocol(left, top, right, bottom, img_height)
-            marker_span = compute_marker_span(get_marker_corners(blob))
+            _, _, _, bottom = normalize_bbox_for_protocol(left, top, right, bottom)
+            marker_span = compute_marker_span(blob.min_corners())
             candidates.append((task_name, blob.cx(), blob.cy(), bottom, marker_span, blob))
     return candidates
 
@@ -743,19 +749,18 @@ def _build_blob_object_candidates(img):
             if int(max_side_length) > 0 and blob_max_side_length(blob) > float(max_side_length):
                 continue
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-            _, _, _, bottom = normalize_bbox_for_protocol(left, top, right, bottom, img_height)
+            _, _, _, bottom = normalize_bbox_for_protocol(left, top, right, bottom)
             candidates.append((task_name, blob.cx(), blob.cy(), bottom, blob_area(blob), blob))
     return candidates
 
 
-def build_object_candidates(img, yolo_net=None):
-    if getattr(img, "copy", None) is not None:
-        return _build_yolo_object_candidates(img, yolo_net)
-    return _build_blob_object_candidates(img)
-
-
-def build_object_blob_candidates(img, yolo_net=None):
-    return build_object_candidates(img, yolo_net)
+def build_object_candidates(img):
+    state.current_image = img
+    state.current_image_width = int(img.width())
+    state.current_image_height = int(img.height())
+    if state.yolo_net is None:
+        load_yolo_model()
+    return yolo_detect(img)
 
 
 def _pixel_to_lab(pixel):
@@ -780,7 +785,9 @@ def _pixel_matches_threshold(pixel, threshold):
     )
 
 
-def _return_line_pixel_matches(img, x, y, image_width, image_height):
+def _return_line_pixel_matches(img, x, y):
+    image_width = state.current_image_width
+    image_height = state.current_image_height
     max_x = int(image_width) - 1
     max_y = int(image_height) - 1
     return _pixel_matches_threshold(
@@ -789,19 +796,20 @@ def _return_line_pixel_matches(img, x, y, image_width, image_height):
     )
 
 
-def _return_line_has_horizontal_connected_at(img, x, y, image_width, image_height, required_connected):
-    if not _return_line_pixel_matches(img, x, y, image_width, image_height):
+def _return_line_has_horizontal_connected_at(img, x, y, required_connected):
+    image_width = state.current_image_width
+    if not _return_line_pixel_matches(img, x, y):
         return False
     connected = 0
     left = int(x) - 1
-    while left >= 0 and _return_line_pixel_matches(img, left, y, image_width, image_height):
+    while left >= 0 and _return_line_pixel_matches(img, left, y):
         connected += 1
         if connected >= int(required_connected):
             return True
         left -= 1
     right = int(x) + 1
     max_x = int(image_width) - 1
-    while right <= max_x and _return_line_pixel_matches(img, right, y, image_width, image_height):
+    while right <= max_x and _return_line_pixel_matches(img, right, y):
         connected += 1
         if connected >= int(required_connected):
             return True
@@ -816,11 +824,13 @@ def _return_line_sample_columns(center_x, half_width):
         yield int(center_x) + offset
 
 
-def _return_line_y_on_column(img, x, image_width, image_height):
+def _return_line_y_on_column(img, x):
+    image_width = state.current_image_width
+    image_height = state.current_image_height
     top = None
     bottom = None
     for y in range(0, int(image_height)):
-        if not _return_line_pixel_matches(img, x, y, image_width, image_height):
+        if not _return_line_pixel_matches(img, x, y):
             continue
         if top is None:
             top = int(y)
@@ -833,7 +843,9 @@ def _return_line_y_on_column(img, x, image_width, image_height):
     return (float(top) + float(bottom)) / 2.0
 
 
-def _build_return_line_y_from_pixels(img, image_width, image_height, previous_line_y=None):
+def _build_return_line_y_from_pixels(img, previous_line_y=None):
+    image_width = state.current_image_width
+    image_height = state.current_image_height
     get_pixel = getattr(img, "get_pixel", None)
     if get_pixel is None:
         return None
@@ -843,26 +855,19 @@ def _build_return_line_y_from_pixels(img, image_width, image_height, previous_li
     for x in _return_line_sample_columns(center_x, half_width):
         if x < 0 or x >= int(image_width):
             continue
-        line_y = _return_line_y_on_column(img, x, image_width, image_height)
+        line_y = _return_line_y_on_column(img, x)
         if line_y is None:
             continue
         saw_candidate = True
-        if _return_line_has_horizontal_connected_at(
-            img,
-            x,
-            int(round(line_y)),
-            image_width,
-            image_height,
-            RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX,
-        ):
+        if _return_line_has_horizontal_connected_at(img, x, int(round(line_y)), RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX):
             return line_y
     if saw_candidate:
         return previous_line_y
     return None
 
 
-def build_return_line_y_from_image(img, image_width, image_height, previous_line_y=None):
-    return _build_return_line_y_from_pixels(img, image_width, image_height, previous_line_y)
+def build_return_line_y_from_image(img, previous_line_y=None):
+    return _build_return_line_y_from_pixels(img, previous_line_y)
 
 
 def build_return_line_velocity_from_y(line_y):
@@ -908,6 +913,49 @@ def should_filter_candidates_by_target_window(vision_state):
     )
 
 
+def build_object_observation_and_candidates():
+    image_width = PROTOCOL_IMAGE_WIDTH
+    image_height = PROTOCOL_IMAGE_HEIGHT
+    current_yolo_candidates = state.current_yolo_candidates
+    if not current_yolo_candidates:
+        return build_object_observation(0, 0, 0, 0), None, None, None
+    candidates = list(current_yolo_candidates)
+    object_id = state.current_object_id()
+    if object_id > 0:
+        selected_task_name = object_task_name_from_id(object_id)
+        if selected_task_name is not None:
+            candidates = [candidate for candidate in candidates if candidate[0] == selected_task_name]
+    if not candidates:
+        return build_object_observation(0, 0, 0, 0), None, None, candidates
+    config_id = state.current_object_config_id()
+    target_x, target_y = build_object_target_point(config_id)
+    use_target_window_filter = should_filter_candidates_by_target_window(state)
+    if use_target_window_filter:
+        candidates = filter_candidates_in_target_window(
+            candidates,
+            target_x,
+            target_y,
+            OBJECT_X_TOLERANCE_PX,
+            OBJECT_Y_TOLERANCE_PX,
+        )
+    if not candidates:
+        return build_object_observation(0, 0, 0, 0), None, None, candidates
+    if use_target_window_filter:
+        task_name, center_x, _center_y, bottom_y, area, best_blob = choose_largest_area_candidate(candidates)
+    else:
+        task_name, center_x, _center_y, bottom_y, area, best_blob = choose_best_candidate(
+            candidates,
+            target_x,
+            target_y,
+        )
+    return (
+        build_object_observation(1, center_x, bottom_y, area),
+        best_blob,
+        task_name,
+        candidates,
+    )
+
+
 def _draw_debug_line(img, x0, y0, x1, y1):
     draw_line = getattr(img, "draw_line", None)
     if draw_line is None:
@@ -928,7 +976,9 @@ def _draw_debug_cross(img, x, y):
         draw_cross(int(x), int(y))
 
 
-def _draw_debug_protocol_point(img, image_width, image_height, x, y):
+def _draw_debug_protocol_point(img, x, y):
+    image_width = state.current_image_width
+    image_height = state.current_image_height
     draw_x = int(image_width) - 1 - int(x)
     draw_y = int(image_height) - 1 - int(y)
     _draw_debug_cross(img, draw_x, draw_y)
@@ -958,10 +1008,10 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     _draw_debug_text(img, int(pixel_x) + 4, int(pixel_y) - 10, "SELECT")
 
 
-def build_object_observation(valid, center_x, bottom_y, area, image_width, image_height, config_id=Task.SEARCH):
+def build_object_observation(valid, center_x, bottom_y, area):
     if int(valid) != 1:
         return 0.0, 0.0, 0.0
-    target_x, target_y = build_object_target_point(image_width, image_height, config_id)
+    target_x, target_y = build_object_target_point(current_task_config_id())
     return (
         float(center_x) - target_x,
         float(bottom_y) - target_y,
@@ -969,8 +1019,7 @@ def build_object_observation(valid, center_x, bottom_y, area, image_width, image
     )
 
 
-def build_object_target_point(image_width, image_height, config_id=Task.SEARCH):
-    _ = (image_width, image_height)
+def build_object_target_point(config_id=Task.SEARCH):
     target_x = float(OBJECT_APPROACH_TARGET_X_PX)
     if int(config_id) == int(Task.ORBIT):
         return float(OBJECT_ORBIT_TARGET_X_PX), float(OBJECT_ORBIT_TARGET_Y_PX)
@@ -979,10 +1028,27 @@ def build_object_target_point(image_width, image_height, config_id=Task.SEARCH):
     return target_x, float(OBJECT_APPROACH_TARGET_Y_PX)
 
 
-def _build_object_y_velocity(err_y, image_height):
+def build_search_target_point(config_id):
+    return build_object_target_point(config_id)
+
+
+def current_task_config_id():
+    return state.current_object_config_id()
+
+
+def build_observation(valid, center_x, bottom_y, area):
+    return build_object_observation(valid, center_x, bottom_y, area)
+
+
+def build_observation_and_candidates():
+    return build_object_observation_and_candidates()
+
+
+def _build_object_y_velocity(err_y):
     err_y = float(err_y)
     if abs(err_y) <= float(OBJECT_APPROACH_DEADZONE_Y_PX):
         return 0.0
+    image_height = float(state.current_image_height)
     scaled_error = err_y * (
         float(OBJECT_APPROACH_MAX_VY)
         / abs(float(OBJECT_APPROACH_KP_Y))
@@ -995,7 +1061,7 @@ def _build_object_y_velocity(err_y, image_height):
     )
 
 
-def build_object_approach_velocity_from_error(err_x, err_y, image_height):
+def build_object_approach_velocity_from_error(err_x, err_y):
     return (
         _axis_p_velocity(
             err_x,
@@ -1004,23 +1070,28 @@ def build_object_approach_velocity_from_error(err_x, err_y, image_height):
             OBJECT_APPROACH_MAX_VX,
             OBJECT_APPROACH_MIN_SPEED,
         ),
-        _build_object_y_velocity(err_y, image_height),
+        _build_object_y_velocity(err_y),
     )
 
 
-def build_object_approach_velocity_from_observation(observation, image_height):
+def build_object_approach_velocity_from_observation(observation):
     x, y, value = observation
     if float(value) <= 0.0:
         return float(OBJECT_MISSING_SEARCH_VX), float(OBJECT_MISSING_SEARCH_VY)
-    return build_object_approach_velocity_from_error(x, y, image_height)
+    return build_object_approach_velocity_from_error(x, y)
 
 
-def _build_object_orbit_y_velocity(err_y, image_height):
+def build_search_velocity_from_observation(observation):
+    return build_object_approach_velocity_from_observation(observation)
+
+
+def _build_object_orbit_y_velocity(err_y):
     err_y = float(err_y)
     if abs(err_y) <= float(OBJECT_ORBIT_DEADZONE_Y_PX):
         return 0.0
     if float(OBJECT_ORBIT_KP_Y) == 0.0:
         return 0.0
+    image_height = float(state.current_image_height)
     scaled_error = err_y * (
         float(OBJECT_ORBIT_MAX_VY)
         / abs(float(OBJECT_ORBIT_KP_Y))
@@ -1033,7 +1104,7 @@ def _build_object_orbit_y_velocity(err_y, image_height):
     )
 
 
-def build_object_orbit_velocity_from_observation(observation, image_height):
+def build_object_orbit_velocity_from_observation(observation):
     x, y, value = observation
     if float(value) <= 0.0:
         return 0.0, 0.0
@@ -1045,11 +1116,16 @@ def build_object_orbit_velocity_from_observation(observation, image_height):
             OBJECT_ORBIT_MAX_VX,
             OBJECT_ORBIT_MIN_SPEED,
         ),
-        _build_object_orbit_y_velocity(y, image_height),
+        _build_object_orbit_y_velocity(y),
     )
 
 
-class AssistantVisionState:
+def build_orbit_correction_velocity_from_observation(observation):
+    return build_object_orbit_velocity_from_observation(observation)
+
+
+# 当前辅车视觉运行态统一集中在单一状态对象里.
+class RuntimeState:
     def __init__(
         self,
         min_area=OBJECT_MIN_AREA,
@@ -1083,13 +1159,17 @@ class AssistantVisionState:
         self.yolo_net = None
         self.uart_device = None
         self.rx_buffer = b""
-        self.current_frame_interval_ms = 1000.0 / VISION_REFERENCE_FPS
+        self.current_yolo_candidates = ()
+        self.current_image = None
+        self.current_image_width = PROTOCOL_IMAGE_WIDTH
+        self.current_image_height = PROTOCOL_IMAGE_HEIGHT
+        self.current_frame_interval_ms = reference_frame_interval_ms()
 
     def handle_control_line(self, line):
-        sync_packet = parse_sync_packet(line)
+        sync_packet = parse_task_sync_packet(line)
         if sync_packet is not None:
             return self._handle_sync_packet(sync_packet)
-        ack_packet = parse_ack_packet(line)
+        ack_packet = parse_event_ack_packet(line)
         if ack_packet is not None:
             self._handle_ack_packet(ack_packet)
         return None
@@ -1249,25 +1329,70 @@ class AssistantVisionState:
         )
 
 
-state = AssistantVisionState()
+AssistantVisionState = RuntimeState
+
+
+state = RuntimeState()
 
 
 def reset_runtime_state():
     state.reset()
 
 
-def write_line(uart, line):
-    if not isinstance(line, bytes):
-        line = bytes(line)
-    remaining = line
+def current_event_type():
+    return state._current_event_id()
+
+
+def required_stable_frames():
+    return int(state.required_stable_frames)
+
+
+def resolve_event_value(observation_value, event_value=None):
+    _ = event_value
+    if current_event_type() == Event.RETURN_GARAGE_FINISHED:
+        return 0
+    return int(float(observation_value))
+
+
+def create_pending_event(reliable_seq, event, value):
+    state._create_event(reliable_seq, event, resolve_event_value(value))
+
+
+def next_event_frame():
+    return state.next_event_frame()
+
+
+def accept_observation(observation=None, line_y=None):
+    if state.mode == RunMode.RETURN_LINE:
+        state.accept_return_line_observation(line_y)
+        return
+    if observation is None:
+        observation = build_object_observation(0, 0, 0, 0, 0, 0)
+    state.accept_object_observation(observation)
+
+
+def _write_all(frame_bytes):
+    if not isinstance(frame_bytes, bytes):
+        frame_bytes = bytes(frame_bytes)
+    remaining = frame_bytes
+    uart_device = state.uart_device
     while remaining:
-        written = uart.write(remaining)
+        written = uart_device.write(remaining)
         if written is None:
             written = len(remaining)
         written = int(written)
         if written <= 0:
-            return
+            return False
         remaining = remaining[written:]
+    return True
+
+
+def write_data_line(frame_bytes):
+    _write_all(frame_bytes)
+
+
+def write_reliable_line(frame_bytes):
+    return _write_all(frame_bytes)
 
 
 def init_uart():
@@ -1302,26 +1427,25 @@ def _find_control_frame_start(rx_buffer):
     return -1
 
 
-def process_uart_input(uart, rx_buffer, vision_state):
-    any_fn = getattr(uart, "any", None)
-    if any_fn is None:
-        return rx_buffer
+def handle_control_frame(frame_bytes):
+    return state.handle_control_line(frame_bytes)
+
+
+def process_uart_input(rx_buffer):
+    uart = state.uart_device
     size = uart.any()
     if not size:
         return rx_buffer
-    try:
-        data = uart.read(size)
-        if data is None:
-            return rx_buffer
-        if isinstance(data, memoryview):
-            data = data.tobytes()
-        elif isinstance(data, bytearray):
-            data = bytes(data)
-        elif not isinstance(data, bytes):
-            return rx_buffer
-        rx_buffer += data
-    except Exception:
+    data = uart.read(size)
+    if data is None:
         return rx_buffer
+    if isinstance(data, memoryview):
+        data = data.tobytes()
+    elif isinstance(data, bytearray):
+        data = bytes(data)
+    elif not isinstance(data, bytes):
+        return rx_buffer
+    rx_buffer += data
     while len(rx_buffer) >= FRAME_SIZE:
         frame_start = _find_control_frame_start(rx_buffer)
         if frame_start < 0:
@@ -1332,17 +1456,23 @@ def process_uart_input(uart, rx_buffer, vision_state):
             return rx_buffer
         line = rx_buffer[:FRAME_SIZE]
         rx_buffer = rx_buffer[FRAME_SIZE:]
-        reply = vision_state.handle_control_line(line)
+        reply = handle_control_frame(line)
         if reply is not None:
-            write_line(uart, reply)
+            write_reliable_line(reply)
     return rx_buffer
 
 
-def process_follow_frame(uart, img, image_width, image_height):
+def _process_follow_frame(img):
+    image_width = state.current_image_width
+    image_height = state.current_image_height
     candidates = build_blob_candidates(img)
     if not candidates:
         follow_command = build_follow_command(valid=0, err_x=0, err_y=0)
-        write_line(uart, format_vision_frame(follow_command["command_vx"], follow_command["command_vy"]))
+        frame_bytes = format_search_velocity_frame(
+            follow_command["command_vx"],
+            follow_command["command_vy"],
+        )
+        write_data_line(frame_bytes)
         return
     cx_screen = float(image_width) / 2.0
     _, pixel_x, pixel_y, _, marker_span, best_blob = choose_best_candidate(
@@ -1354,74 +1484,48 @@ def process_follow_frame(uart, img, image_width, image_height):
     err_y = compute_vertical_error(marker_span=marker_span, target_span=FOLLOW_TARGET_Y)
     follow_command = build_follow_command(valid=1, err_x=err_x, err_y=err_y)
     draw_selected_marker(img, best_blob, pixel_x, pixel_y)
-    write_line(uart, format_vision_frame(follow_command["command_vx"], follow_command["command_vy"]))
-
-
-def process_object_frame(uart, vision_state, img, image_width, image_height, yolo_net=None):
-    candidates = build_object_candidates(img, yolo_net)
-    object_id = vision_state.current_object_id()
-    if object_id > 0:
-        selected_task_name = object_task_name_from_id(object_id)
-        if selected_task_name is not None:
-            candidates = [candidate for candidate in candidates if candidate[0] == selected_task_name]
-    if not candidates:
-        observation = build_object_observation(0, 0, 0, 0, image_width, image_height)
-    else:
-        config_id = vision_state.current_object_config_id()
-        target_x, target_y = build_object_target_point(image_width, image_height, config_id)
-        use_target_window_filter = should_filter_candidates_by_target_window(vision_state)
-        if use_target_window_filter:
-            candidates = filter_candidates_in_target_window(
-                candidates,
-                target_x,
-                target_y,
-                OBJECT_X_TOLERANCE_PX,
-                OBJECT_Y_TOLERANCE_PX,
-            )
-        if not candidates:
-            observation = build_object_observation(0, 0, 0, 0, image_width, image_height)
-        else:
-            if use_target_window_filter:
-                _, pixel_x, pixel_y, bottom_y, area, best_blob = choose_largest_area_candidate(candidates)
-            else:
-                _, pixel_x, pixel_y, bottom_y, area, best_blob = choose_best_candidate(
-                    candidates,
-                    target_x,
-                    target_y,
-                )
-            observation = build_object_observation(
-                1,
-                pixel_x,
-                bottom_y,
-                area,
-                image_width,
-                image_height,
-                config_id,
-            )
-            _draw_debug_protocol_point(img, image_width, image_height, target_x, target_y)
-            draw_selected_marker(img, best_blob, pixel_x, pixel_y)
-    if vision_state.mode == RunMode.ORBIT_OBJECT:
-        vx, vy = build_object_orbit_velocity_from_observation(observation, image_height)
-    else:
-        vx, vy = build_object_approach_velocity_from_observation(observation, image_height)
-    write_line(uart, format_vision_frame(vx, vy))
-    vision_state.accept_object_observation(observation)
-
-
-def process_return_line_frame(uart, vision_state, img, image_width, image_height):
-    line_y = build_return_line_y_from_image(
-        img,
-        image_width,
-        image_height,
-        vision_state.last_return_line_y(),
+    frame_bytes = format_search_velocity_frame(
+        follow_command["command_vx"],
+        follow_command["command_vy"],
     )
-    vision_state.remember_return_line_y(line_y)
+    write_data_line(frame_bytes)
+
+
+def _process_object_frame(img):
+    image_width = state.current_image_width
+    image_height = state.current_image_height
+    if not state.current_yolo_candidates:
+        state.current_yolo_candidates = tuple(build_object_candidates(img))
+    observation, best_blob, _task_name, candidates = build_object_observation_and_candidates()
+    if candidates:
+        config_id = state.current_object_config_id()
+        target_x, target_y = build_object_target_point(config_id)
+        _draw_debug_protocol_point(img, target_x, target_y)
+    if best_blob is not None:
+        draw_selected_marker(img, best_blob, best_blob.cx(), best_blob.cy())
+    if state.mode == RunMode.ORBIT_OBJECT:
+        vx, vy = build_orbit_correction_velocity_from_observation(observation)
+    else:
+        vx, vy = build_search_velocity_from_observation(observation)
+    frame_bytes = format_search_velocity_frame(vx, vy)
+    write_data_line(frame_bytes)
+    accept_observation(observation)
+
+
+def _process_return_line_frame(img):
+    image_width = state.current_image_width
+    image_height = state.current_image_height
+    line_y = build_return_line_y_from_image(img, state.last_return_line_y())
+    state.remember_return_line_y(line_y)
     vx, vy = build_return_line_velocity_from_y(line_y)
-    write_line(uart, format_vision_frame(vx, vy))
-    vision_state.accept_return_line_observation(line_y)
+    frame_bytes = format_search_velocity_frame(vx, vy)
+    write_data_line(frame_bytes)
+    accept_observation(line_y=line_y)
 
 
-def draw_assistant_return_line_debug(img, image_width, image_height, line_y, vx, vy):
+def draw_assistant_return_line_debug(img, line_y, vx, vy):
+    image_width = state.current_image_width
+    image_height = state.current_image_height
     center_x = int(float(image_width) / 2.0)
     half_width = int(RETURN_LINE_SAMPLE_HALF_WIDTH_PX)
     max_thickness = int(RETURN_LINE_MAX_THICKNESS_PX)
@@ -1462,52 +1566,52 @@ def run_assistant_return_line_debug():
     last_line_y = None
     while True:
         img = sensor.snapshot()
-        apply_lens_correction(img)
-        line_y = build_return_line_y_from_image(img, image_width, image_height, last_line_y)
+        img.lens_corr(strength=2.8, zoom=1.0)
+        state.current_image = img
+        state.current_image_width = int(img.width())
+        state.current_image_height = int(img.height())
+        line_y = build_return_line_y_from_image(last_line_y)
         if line_y is not None:
             last_line_y = line_y
         vx, vy = build_return_line_velocity_from_y(line_y)
-        draw_assistant_return_line_debug(img, image_width, image_height, line_y, vx, vy)
+        draw_assistant_return_line_debug(img, line_y, vx, vy)
 
 
-def process_frame(uart, vision_state, img, image_width, image_height, yolo_net=None):
-    if vision_state.has_pending_event():
-        event_frame = vision_state.next_event_frame()
+def process_task_frame(img):
+    if state.has_pending_event():
+        event_frame = next_event_frame()
         if event_frame is not None:
-            write_line(uart, event_frame)
+            write_reliable_line(event_frame)
         return
-    if vision_state.mode in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT):
-        process_object_frame(uart, vision_state, img, image_width, image_height, yolo_net)
-    elif vision_state.mode == RunMode.RETURN_LINE:
-        process_return_line_frame(uart, vision_state, img, image_width, image_height)
+    if state.mode in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT):
+        _process_object_frame(img)
+    elif state.mode == RunMode.RETURN_LINE:
+        _process_return_line_frame(img)
     else:
-        process_follow_frame(uart, img, image_width, image_height)
-
-
-def apply_lens_correction(img):
-    try:
-        img.lens_corr(strength=2.8, zoom=1.0)
-    except MemoryError:
-        pass
+        _process_follow_frame(img)
 
 
 def run():
     reset_runtime_state()
     state.uart_device = init_uart()
-    image_width, image_height = init_sensor()
+    init_sensor()
     state.yolo_net = load_yolo_model()
     last_frame_ms = default_now_ms()
     while True:
-        state.rx_buffer = process_uart_input(state.uart_device, state.rx_buffer, state)
+        state.rx_buffer = process_uart_input(state.rx_buffer)
         img = sensor.snapshot()
         now_ms = default_now_ms()
         if now_ms >= last_frame_ms:
             state.current_frame_interval_ms = now_ms - last_frame_ms
         else:
-            state.current_frame_interval_ms = 1000.0 / VISION_REFERENCE_FPS
+            state.current_frame_interval_ms = reference_frame_interval_ms()
         last_frame_ms = now_ms
-        apply_lens_correction(img)
-        process_frame(state.uart_device, state, img, image_width, image_height)
+        img.lens_corr(strength=2.8, zoom=1.0)
+        state.current_image = img
+        state.current_image_width = int(img.width())
+        state.current_image_height = int(img.height())
+        state.current_yolo_candidates = tuple(yolo_detect(img))
+        process_task_frame(img)
         gc.collect()
 
 

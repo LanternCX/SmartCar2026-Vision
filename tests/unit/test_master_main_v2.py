@@ -1,5 +1,6 @@
 """主车视觉 main_v2 行为测试."""
 
+import inspect
 import pytest
 
 from tests.test_support import (
@@ -27,6 +28,12 @@ def load_master_v2():
     return module
 
 
+def set_current_image(module, img):
+    module.state.current_image = img
+    module.state.current_image_width = img.width()
+    module.state.current_image_height = img.height()
+
+
 def test_master_main_v2_default_configuration_reports_target_found_after_single_observation() -> None:
     module = load_role_entry_module(
         "master",
@@ -36,13 +43,70 @@ def test_master_main_v2_default_configuration_reports_target_found_after_single_
     module.reset_runtime_state()
     module.state.yolo_net = "fake-net"
     module.handle_control_frame(task_sync_frame(module, context_id=7))
-    module.accept_observation(build_search_observation(module, 180.0), FakeImage())
+    img = FakeImage()
+    set_current_image(module, img)
+    module.accept_observation(build_search_observation(module, 180.0), img)
 
     assert latest_event(type("U", (), {"writes": [module.next_event_frame()]})()) == {
         "context_id": 7,
         "event": module.Event.TARGET_FOUND,
         "value": 180,
     }
+
+
+def test_master_main_v2_process_task_and_velocity_helpers_drop_frame_size_parameters() -> None:
+    module = load_master_v2()
+
+    assert tuple(inspect.signature(module.process_task_frame).parameters) == ("img",)
+    assert tuple(inspect.signature(module.yolo_detect).parameters) == ("img",)
+    assert tuple(inspect.signature(module.normalize_bbox_for_protocol).parameters) == (
+        "left",
+        "top",
+        "right",
+        "bottom",
+    )
+    assert tuple(inspect.signature(module.build_search_velocity_from_observation).parameters) == (
+        "observation",
+    )
+    assert tuple(
+        inspect.signature(module.build_orbit_correction_velocity_from_observation).parameters
+    ) == ("observation",)
+    assert tuple(inspect.signature(module.build_return_line_y_from_image).parameters) == (
+        "img",
+        "previous_line_y",
+    )
+    assert tuple(inspect.signature(module.build_finish_task_ring_rois).parameters) == ("blob", "img")
+    assert tuple(inspect.signature(module.build_finish_task_yellow_ratio_percent).parameters) == ("img", "blob")
+    assert tuple(inspect.signature(module.draw_protocol_target_point_debug).parameters) == (
+        "img",
+        "target_x",
+        "target_y",
+    )
+    assert tuple(inspect.signature(module.draw_return_line_debug).parameters) == (
+        "img",
+        "line_y",
+        "velocity",
+    )
+    assert tuple(inspect.signature(module.draw_search_preview_debug).parameters) == ("img", "candidates")
+    assert tuple(inspect.signature(module._return_line_pixel_matches).parameters) == ("img", "x", "y")
+    assert tuple(inspect.signature(module._return_line_has_horizontal_connected_at).parameters) == (
+        "img",
+        "x",
+        "y",
+        "required_connected",
+    )
+    assert tuple(inspect.signature(module._return_line_y_on_column).parameters) == ("img", "x")
+    assert tuple(inspect.signature(module._count_yellow_pixels_in_roi).parameters) == ("img", "roi")
+    assert tuple(inspect.signature(module.build_task_event_value).parameters) == (
+        "img",
+        "best_blob",
+        "task_name",
+    )
+    assert tuple(inspect.signature(module.accept_observation).parameters) == (
+        "observation",
+        "img",
+        "event_value",
+    )
 
 
 class FakeUART:
@@ -246,6 +310,9 @@ def build_search_observation(module, area, err_x=0.0, err_y=0.0):
 def cache_yolo_candidates(module, img=None):
     if img is None:
         img = FakeImage()
+    module.state.current_image = img
+    module.state.current_image_width = img.width()
+    module.state.current_image_height = img.height()
     module.state.current_yolo_candidates = tuple(module.yolo_detect(img))
     return img
 
@@ -344,9 +411,11 @@ def test_master_main_v2_repeated_task_sync_replies_ack_without_reapplying() -> N
     module.OBJECT_STABLE_FRAMES = 2
 
     reply = module.handle_control_frame(task_sync_frame(module))
-    module.accept_observation(build_search_observation(module, 180.0), FakeImage())
+    img = FakeImage()
+    set_current_image(module, img)
+    module.accept_observation(build_search_observation(module, 180.0), img)
     repeated_reply = module.handle_control_frame(task_sync_frame(module))
-    module.accept_observation(build_search_observation(module, 180.0), FakeImage())
+    module.accept_observation(build_search_observation(module, 180.0), img)
 
     assert decode_frame(reply)["seq"] == 12
     assert decode_frame(repeated_reply)["seq"] == 12
@@ -378,7 +447,9 @@ def test_master_main_v2_wrong_ack_does_not_clear_pending_event() -> None:
     module.default_now_ms = lambda: now_ms[0]
     module.RELIABLE_RESEND_INTERVAL_MS = 20
     module.handle_control_frame(task_sync_frame(module, context_id=7))
-    module.accept_observation(build_search_observation(module, 180.0), FakeImage())
+    img = FakeImage()
+    set_current_image(module, img)
+    module.accept_observation(build_search_observation(module, 180.0), img)
 
     first = module.next_event_frame()
     module.handle_control_frame(event_ack_frame(module, 12))
@@ -395,7 +466,9 @@ def test_master_main_v2_repeats_event_until_matching_ack() -> None:
     module.default_now_ms = lambda: now_ms[0]
     module.RELIABLE_RESEND_INTERVAL_MS = 20
     module.handle_control_frame(task_sync_frame(module, context_id=7))
-    module.accept_observation(build_search_observation(module, 180.0), FakeImage())
+    img = FakeImage()
+    set_current_image(module, img)
+    module.accept_observation(build_search_observation(module, 180.0), img)
 
     first = module.next_event_frame()
     module.handle_control_frame(event_ack_frame(module, 0))
@@ -410,10 +483,12 @@ def test_master_main_v2_repeats_event_until_matching_ack() -> None:
 def test_master_main_v2_creates_target_found_once_per_context() -> None:
     module = load_master_v2()
     module.handle_control_frame(task_sync_frame(module, context_id=7))
-    module.accept_observation(build_search_observation(module, 180.0), FakeImage())
+    img = FakeImage()
+    set_current_image(module, img)
+    module.accept_observation(build_search_observation(module, 180.0), img)
     first = module.next_event_frame()
     module.handle_control_frame(event_ack_frame(module, 1))
-    module.accept_observation(build_search_observation(module, 180.0), FakeImage())
+    module.accept_observation(build_search_observation(module, 180.0), img)
 
     assert first is not None
     assert module.next_event_frame() is None
@@ -507,7 +582,8 @@ def test_master_main_v2_build_observation_and_candidates_uses_cached_candidates_
 
 def test_master_main_v2_missing_target_outputs_configured_search_velocity() -> None:
     module = load_master_v2()
-    velocity = module.build_search_velocity_from_observation((7, 0.0, 0.0, 0.0), IMAGE_HEIGHT)
+    module.state.current_image_height = IMAGE_HEIGHT
+    velocity = module.build_search_velocity_from_observation((7, 0.0, 0.0, 0.0))
 
     assert velocity == (module.MASTER_MISSING_SEARCH_VX, module.MASTER_MISSING_SEARCH_VY)
 
@@ -521,21 +597,22 @@ def test_master_main_v2_search_velocity_deadzone_zeroes_each_axis() -> None:
         err_y=float(module.MASTER_SEARCH_DEADZONE_Y_PX),
     )
 
-    velocity = module.build_search_velocity_from_observation(observation, IMAGE_HEIGHT)
+    module.state.current_image_height = IMAGE_HEIGHT
+    velocity = module.build_search_velocity_from_observation(observation)
 
     assert velocity == (0.0, 0.0)
 
 
 def test_master_main_v2_search_velocity_applies_min_speed_outside_deadzone() -> None:
     module = load_master_v2()
+    module.state.current_image_height = IMAGE_HEIGHT
     positive = module.build_search_velocity_from_observation(
         build_search_observation(
             module,
             150.0,
             err_x=float(module.MASTER_SEARCH_DEADZONE_X_PX) + 0.1,
             err_y=float(module.MASTER_SEARCH_DEADZONE_Y_PX) + 0.1,
-        ),
-        IMAGE_HEIGHT,
+        )
     )
     negative = module.build_search_velocity_from_observation(
         build_search_observation(
@@ -543,8 +620,7 @@ def test_master_main_v2_search_velocity_applies_min_speed_outside_deadzone() -> 
             150.0,
             err_x=-(float(module.MASTER_SEARCH_DEADZONE_X_PX) + 0.1),
             err_y=-(float(module.MASTER_SEARCH_DEADZONE_Y_PX) + 0.1),
-        ),
-        IMAGE_HEIGHT,
+        )
     )
 
     assert positive == (
@@ -559,8 +635,9 @@ def test_master_main_v2_search_velocity_applies_min_speed_outside_deadzone() -> 
 
 def test_master_main_v2_search_velocity_clamps_vx_and_vy() -> None:
     module = load_master_v2()
-    positive = module.build_search_velocity_from_observation((7, 999.0, 999.0, 300.0), IMAGE_HEIGHT)
-    negative = module.build_search_velocity_from_observation((7, -999.0, -999.0, 300.0), IMAGE_HEIGHT)
+    module.state.current_image_height = IMAGE_HEIGHT
+    positive = module.build_search_velocity_from_observation((7, 999.0, 999.0, 300.0))
+    negative = module.build_search_velocity_from_observation((7, -999.0, -999.0, 300.0))
 
     expected_positive_vx = (
         module.MASTER_SEARCH_MAX_VX
@@ -581,10 +658,8 @@ def test_master_main_v2_reference_fps_keeps_search_velocity_unchanged() -> None:
     module = load_master_v2()
     module.state.current_frame_interval_ms = module.reference_frame_interval_ms()
 
-    velocity = module.build_search_velocity_from_observation(
-        (7, 100.0, -100.0, 300.0),
-        IMAGE_HEIGHT,
-    )
+    module.state.current_image_height = IMAGE_HEIGHT
+    velocity = module.build_search_velocity_from_observation((7, 100.0, -100.0, 300.0))
 
     assert velocity == pytest.approx((5.0, 2.0833333333333335))
 
@@ -599,15 +674,10 @@ def test_master_main_v2_reference_frame_interval_is_derived_from_fps() -> None:
 def test_master_main_v2_slow_frame_interval_reduces_search_velocity() -> None:
     module = load_master_v2()
     module.state.current_frame_interval_ms = module.reference_frame_interval_ms()
-    reference_velocity = module.build_search_velocity_from_observation(
-        (7, 100.0, -100.0, 300.0),
-        IMAGE_HEIGHT,
-    )
+    module.state.current_image_height = IMAGE_HEIGHT
+    reference_velocity = module.build_search_velocity_from_observation((7, 100.0, -100.0, 300.0))
     module.state.current_frame_interval_ms = module.reference_frame_interval_ms() * 2
-    slow_velocity = module.build_search_velocity_from_observation(
-        (7, 100.0, -100.0, 300.0),
-        IMAGE_HEIGHT,
-    )
+    slow_velocity = module.build_search_velocity_from_observation((7, 100.0, -100.0, 300.0))
 
     assert abs(slow_velocity[0]) < abs(reference_velocity[0])
     assert abs(slow_velocity[1]) < abs(reference_velocity[1])
@@ -616,8 +686,9 @@ def test_master_main_v2_slow_frame_interval_reduces_search_velocity() -> None:
 
 def test_master_main_v2_search_y_velocity_decreases_when_target_gets_closer() -> None:
     module = load_master_v2()
-    far_velocity = module.build_search_velocity_from_observation((7, 0.0, -200.0, 1000.0), IMAGE_HEIGHT)
-    close_velocity = module.build_search_velocity_from_observation((7, 0.0, -100.0, 1000.0), IMAGE_HEIGHT)
+    module.state.current_image_height = IMAGE_HEIGHT
+    far_velocity = module.build_search_velocity_from_observation((7, 0.0, -200.0, 1000.0))
+    close_velocity = module.build_search_velocity_from_observation((7, 0.0, -100.0, 1000.0))
 
     assert close_velocity[1] < far_velocity[1]
 
@@ -828,8 +899,9 @@ def test_master_main_v2_finish_uses_target_window_and_reports_arrived_after_cont
     )
     uart = FakeUART()
     module.state.uart_device = uart
+    set_current_image(module, FakeImage())
     blob = module.YoloDetectionBlob(145.0, 0.0, 175.0, 20.0, 1, 0.96)
-    rois, _ = module.build_finish_task_ring_rois(blob, IMAGE_WIDTH, IMAGE_HEIGHT)
+    rois, _ = module.build_finish_task_ring_rois(blob, module.state.current_image)
     touch_areas = {tuple(roi): max(1, int(roi[2]) * int(roi[3])) for roi in rois}
 
     run_frame(module, FakeImage(yellow_area_by_roi=touch_areas))
@@ -872,12 +944,12 @@ def test_master_main_v2_return_retreat_reports_line_aligned() -> None:
 
 def test_master_main_v2_return_line_y_uses_center_columns_bounds_average() -> None:
     module = load_master_v2()
+    img = FakeImage(pixels=build_return_line_band_pixels(180, 200))
+    module.state.current_image = img
+    module.state.current_image_width = IMAGE_WIDTH
+    module.state.current_image_height = IMAGE_HEIGHT
 
-    line_y = module.build_return_line_y_from_image(
-        FakeImage(pixels=build_return_line_band_pixels(180, 200)),
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-    )
+    line_y = module.build_return_line_y_from_image(img)
 
     assert line_y == pytest.approx(190.0)
 
@@ -899,12 +971,12 @@ def test_master_main_v2_return_line_velocity_uses_y_target_only() -> None:
 def test_master_main_v2_return_line_limits_wide_yellow_to_lower_30px() -> None:
     module = load_master_v2()
     module.RETURN_GARAGE_LINE_MAX_THICKNESS_PX = 30
+    img = FakeImage(pixels=build_return_line_band_pixels(80, 200))
+    module.state.current_image = img
+    module.state.current_image_width = IMAGE_WIDTH
+    module.state.current_image_height = IMAGE_HEIGHT
 
-    line_y = module.build_return_line_y_from_image(
-        FakeImage(pixels=build_return_line_band_pixels(80, 200)),
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-    )
+    line_y = module.build_return_line_y_from_image(img)
 
     assert line_y == pytest.approx(185.0)
 
@@ -912,13 +984,12 @@ def test_master_main_v2_return_line_limits_wide_yellow_to_lower_30px() -> None:
 def test_master_main_v2_return_line_keeps_previous_when_horizontal_connected_is_too_short() -> None:
     module = load_master_v2()
     module.RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
+    img = FakeImage(pixels=build_return_line_band_pixels(180, 200, left=150, right=170))
+    module.state.current_image = img
+    module.state.current_image_width = IMAGE_WIDTH
+    module.state.current_image_height = IMAGE_HEIGHT
 
-    line_y = module.build_return_line_y_from_image(
-        FakeImage(pixels=build_return_line_band_pixels(180, 200, left=150, right=170)),
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-        188.0,
-    )
+    line_y = module.build_return_line_y_from_image(img, 188.0)
 
     assert line_y == pytest.approx(188.0)
 
@@ -1031,6 +1102,7 @@ def test_master_main_v2_run_applies_lens_correction_and_uses_yolo_detect_before_
 
     def stop_after_frame(current_img):
         assert current_img is image
+        assert module.state.current_image is image
         assert call_log == ["snapshot", "yolo_detect"]
         assert tuple(module.state.current_yolo_candidates) == (("red", 160.0, 210.0, 300.0, None),)
         raise StopLoop()

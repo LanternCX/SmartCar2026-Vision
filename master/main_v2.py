@@ -73,7 +73,7 @@ YOLO_MODEL_PATH = "/sd/yolo.tflite"
 # YOLO 推理前复制图像时使用的缩放比例.
 YOLO_IMAGE_COPY_SCALE = 0.75
 # 低于该置信度的检测框直接丢弃.
-YOLO_MIN_SCORE = 0.90
+YOLO_MIN_SCORE = 0.50
 # YOLO 标签编号到任务名的稳定映射.
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
 # 调试模式打开后在屏幕上显示识别框和目标点.
@@ -169,6 +169,8 @@ RETURN_LINE_FINISH_ROW_Y_PX = 160
 RETURN_LINE_FINISH_COLUMN_X_PX = 270
 # 回库完成判定所需的连续满足帧数.
 RETURN_LINE_MISSING_FINISH_FRAMES = 5
+PROTOCOL_IMAGE_WIDTH = 320
+PROTOCOL_IMAGE_HEIGHT = 240
 
 # 可靠序号环空间总长度.
 SEQ_RING_SIZE = 256
@@ -205,6 +207,9 @@ class RuntimeState:
         self.yolo_net = None
         self.uart_device = None
         self.current_yolo_candidates = ()
+        self.current_image = None
+        self.current_image_width = PROTOCOL_IMAGE_WIDTH
+        self.current_image_height = PROTOCOL_IMAGE_HEIGHT
         self.current_frame_interval_ms = 0.0
 
     def reset(self, next_event_seq=1):
@@ -222,6 +227,9 @@ class RuntimeState:
         self.yolo_net = None
         self.uart_device = None
         self.current_yolo_candidates = ()
+        self.current_image = None
+        self.current_image_width = PROTOCOL_IMAGE_WIDTH
+        self.current_image_height = PROTOCOL_IMAGE_HEIGHT
         self.current_frame_interval_ms = reference_frame_interval_ms()
 
 
@@ -495,7 +503,8 @@ def blob_rect_to_bbox(rect):
     return left, top, left + width, top + height
 
 
-def normalize_bbox_for_protocol(left, top, right, bottom, image_height):
+def normalize_bbox_for_protocol(left, top, right, bottom):
+    image_height = state.current_image_height
     normalized_top = image_height - bottom
     normalized_bottom = image_height - top
     return left, normalized_top, right, normalized_bottom
@@ -547,7 +556,6 @@ def yolo_detect(img):
             top,
             right,
             bottom,
-            image_height,
         )
         candidates.append((task_name, blob.cx(), protocol_bottom, blob.area(), blob))
     return candidates
@@ -698,7 +706,9 @@ def build_observation_and_candidates():
     )
 
 
-def build_finish_task_ring_rois(blob, image_width, image_height):
+def build_finish_task_ring_rois(blob, img):
+    image_width = int(img.width())
+    image_height = int(img.height())
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     expand = int(FINISH_HOOK_RING_EXPAND_PX)
     outer_left = max(0, int(left) - expand)
@@ -749,9 +759,7 @@ def _count_yellow_pixels_in_roi(img, roi):
 def build_finish_task_yellow_ratio_percent(img, blob):
     if blob is None:
         return 0.0
-    image_width = int(img.width())
-    image_height = int(img.height())
-    rois, ring_area = build_finish_task_ring_rois(blob, image_width, image_height)
+    rois, ring_area = build_finish_task_ring_rois(blob, img)
     if ring_area <= 0:
         return 0.0
     yellow_pixels = 0
@@ -801,7 +809,7 @@ def draw_finish_task_debug(img, blob, yellow_ratio):
     if blob is None:
         img.draw_string(2, 50, "finish ratio=0.0", color=(255, 255, 255), scale=1, mono_space=False)
         return
-    rois, _ = build_finish_task_ring_rois(blob, int(img.width()), int(img.height()))
+    rois, _ = build_finish_task_ring_rois(blob, img)
     for roi in rois:
         img.draw_rectangle(roi, color=(255, 255, 0), thickness=1)
     img.draw_string(
@@ -924,11 +932,12 @@ def reference_frame_interval_ms():
     return 1000.0 / reference_fps
 
 
-def _build_search_y_velocity(err_y, image_height):
+def _build_search_y_velocity(err_y):
     err_y = float(err_y)
     if abs(err_y) <= float(MASTER_SEARCH_DEADZONE_Y_PX):
         return 0.0
     time_scale = current_frame_time_scale()
+    image_height = float(state.current_image_height)
     scaled_error = err_y * (
         float(MASTER_SEARCH_MAX_VY)
         / abs(float(MASTER_SEARCH_KP_Y))
@@ -941,7 +950,7 @@ def _build_search_y_velocity(err_y, image_height):
     )
 
 
-def build_search_velocity_from_observation(observation, image_height):
+def build_search_velocity_from_observation(observation):
     _, x, y, value = observation
     if float(value) <= 0.0:
         return float(MASTER_MISSING_SEARCH_VX), float(MASTER_MISSING_SEARCH_VY)
@@ -953,17 +962,18 @@ def build_search_velocity_from_observation(observation, image_height):
             MASTER_SEARCH_MAX_VX,
             MASTER_SEARCH_MIN_SPEED,
         ),
-        _build_search_y_velocity(y, image_height),
+        _build_search_y_velocity(y),
     )
 
 
-def _build_orbit_y_velocity(err_y, image_height):
+def _build_orbit_y_velocity(err_y):
     err_y = float(err_y)
     if abs(err_y) <= float(MASTER_ORBIT_DEADZONE_Y_PX):
         return 0.0
     if float(MASTER_ORBIT_KP_Y) == 0.0:
         return 0.0
     time_scale = current_frame_time_scale()
+    image_height = float(state.current_image_height)
     scaled_error = err_y * (
         float(MASTER_ORBIT_MAX_VY)
         / abs(float(MASTER_ORBIT_KP_Y))
@@ -976,7 +986,7 @@ def _build_orbit_y_velocity(err_y, image_height):
     )
 
 
-def build_orbit_correction_velocity_from_observation(observation, image_height):
+def build_orbit_correction_velocity_from_observation(observation):
     _, x, y, value = observation
     if float(value) <= 0.0:
         return 0.0, 0.0
@@ -988,7 +998,7 @@ def build_orbit_correction_velocity_from_observation(observation, image_height):
             MASTER_ORBIT_MAX_VX,
             MASTER_ORBIT_MIN_SPEED,
         ),
-        _build_orbit_y_velocity(y, image_height),
+        _build_orbit_y_velocity(y),
     )
 
 
@@ -1001,7 +1011,9 @@ def _pixel_matches_threshold(pixel, threshold):
     )
 
 
-def _return_line_pixel_matches(img, x, y, image_width, image_height):
+def _return_line_pixel_matches(img, x, y):
+    image_width = int(img.width())
+    image_height = int(img.height())
     max_x = int(image_width) - 1
     max_y = int(image_height) - 1
     return _pixel_matches_threshold(
@@ -1010,19 +1022,20 @@ def _return_line_pixel_matches(img, x, y, image_width, image_height):
     )
 
 
-def _return_line_has_horizontal_connected_at(img, x, y, image_width, image_height, required_connected):
-    if not _return_line_pixel_matches(img, x, y, image_width, image_height):
+def _return_line_has_horizontal_connected_at(img, x, y, required_connected):
+    image_width = int(img.width())
+    if not _return_line_pixel_matches(img, x, y):
         return False
     connected = 0
     left = int(x) - 1
-    while left >= 0 and _return_line_pixel_matches(img, left, y, image_width, image_height):
+    while left >= 0 and _return_line_pixel_matches(img, left, y):
         connected += 1
         if connected >= int(required_connected):
             return True
         left -= 1
     right = int(x) + 1
     max_x = int(image_width) - 1
-    while right <= max_x and _return_line_pixel_matches(img, right, y, image_width, image_height):
+    while right <= max_x and _return_line_pixel_matches(img, right, y):
         connected += 1
         if connected >= int(required_connected):
             return True
@@ -1037,11 +1050,12 @@ def _return_line_sample_columns(center_x, half_width):
         yield int(center_x) + offset
 
 
-def _return_line_y_on_column(img, x, image_width, image_height):
+def _return_line_y_on_column(img, x):
+    image_height = int(img.height())
     top = None
     bottom = None
     for y in range(0, int(image_height)):
-        if not _return_line_pixel_matches(img, x, y, image_width, image_height):
+        if not _return_line_pixel_matches(img, x, y):
             continue
         if top is None:
             top = int(y)
@@ -1054,25 +1068,20 @@ def _return_line_y_on_column(img, x, image_width, image_height):
     return (float(top) + float(bottom)) / 2.0
 
 
-def build_return_line_y_from_image(img, image_width, image_height, previous_line_y=None):
+def build_return_line_y_from_image(img, previous_line_y=None):
+    image_width = int(img.width())
+    image_height = int(img.height())
     center_x = int(int(image_width) / 2)
     half_width = int(RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX)
     saw_candidate = False
     for x in _return_line_sample_columns(center_x, half_width):
         if x < 0 or x >= int(image_width):
             continue
-        line_y = _return_line_y_on_column(img, x, image_width, image_height)
+        line_y = _return_line_y_on_column(img, x)
         if line_y is None:
             continue
         saw_candidate = True
-        if _return_line_has_horizontal_connected_at(
-            img,
-            x,
-            int(round(line_y)),
-            image_width,
-            image_height,
-            RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX,
-        ):
+        if _return_line_has_horizontal_connected_at(img, x, int(round(line_y)), RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX):
             return line_y
     if saw_candidate:
         return previous_line_y
@@ -1213,24 +1222,23 @@ def _accept_finish_task_observation(context_id, observation_value, yellow_ratio,
         )
 
 
-def _return_line_row_has_yellow(img, image_width, image_height):
+def _return_line_row_has_yellow(img):
+    image_width = int(img.width())
     for x in range(0, int(image_width)):
-        if _return_line_pixel_matches(img, x, RETURN_LINE_FINISH_ROW_Y_PX, image_width, image_height):
+        if _return_line_pixel_matches(img, x, RETURN_LINE_FINISH_ROW_Y_PX):
             return True
     return False
 
 
-def _return_line_column_has_yellow(img, image_width, image_height):
+def _return_line_column_has_yellow(img):
+    image_height = int(img.height())
     for y in range(0, int(image_height)):
-        if _return_line_pixel_matches(img, RETURN_LINE_FINISH_COLUMN_X_PX, y, image_width, image_height):
+        if _return_line_pixel_matches(img, RETURN_LINE_FINISH_COLUMN_X_PX, y):
             return True
     return False
 
 
 def _accept_return_line_observation(context_id, observation_value, img, event_type):
-    image_width = int(img.width())
-    image_height = int(img.height())
-
     if event_type == Event.RETURN_LINE_ALIGNED:
         if float(observation_value) > 0.0 and float(observation_value) <= float(RETURN_GARAGE_LINE_TARGET_Y_PX):
             state.stable_frame_count += 1
@@ -1245,11 +1253,7 @@ def _accept_return_line_observation(context_id, observation_value, img, event_ty
         return
 
     state.stable_frame_count = 0
-    if _return_line_row_has_yellow(img, image_width, image_height) and not _return_line_column_has_yellow(
-        img,
-        image_width,
-        image_height,
-    ):
+    if _return_line_row_has_yellow(img) and not _return_line_column_has_yellow(img):
         state.return_line_finish_missing_count += 1
     else:
         state.return_line_finish_missing_count = 0
@@ -1362,22 +1366,12 @@ def process_uart_input(rx_buffer):
 
 
 def _process_return_line_frame(img):
-    image_width = int(img.width())
-    image_height = int(img.height())
-    line_y = build_return_line_y_from_image(
-        img,
-        image_width,
-        image_height,
-        state.last_return_line_y,
-    )
+    line_y = build_return_line_y_from_image(img, state.last_return_line_y)
     if line_y is not None:
         state.last_return_line_y = float(line_y)
     velocity = build_return_line_velocity_from_y(line_y)
     write_data_line(format_search_velocity_frame(*velocity))
-    accept_observation(
-        build_return_line_observation(line_y),
-        img,
-    )
+    accept_observation(build_return_line_observation(line_y), img)
     if MASTER_DEBUG_DISPLAY_ENABLED:
         draw_return_line_debug(img, line_y, velocity)
         img.flush()
@@ -1397,12 +1391,11 @@ def process_task_frame(img):
     if is_return_line_task_context():
         _process_return_line_frame(img)
         return
-    image_height = int(img.height())
     observation, best_blob, task_name, _candidates = build_observation_and_candidates()
     if is_orbit_task_context():
-        velocity = build_orbit_correction_velocity_from_observation(observation, image_height)
+        velocity = build_orbit_correction_velocity_from_observation(observation)
     else:
-        velocity = build_search_velocity_from_observation(observation, image_height)
+        velocity = build_search_velocity_from_observation(observation)
     write_data_line(format_search_velocity_frame(*velocity))
     event_value = build_task_event_value(img, best_blob, task_name)
     accept_observation(
@@ -1455,6 +1448,9 @@ def run():
             state.current_frame_interval_ms = reference_frame_interval_ms()
         last_frame_ms = now_ms
         img.lens_corr(strength=2.8, zoom=1.0)
+        state.current_image = img
+        state.current_image_width = int(img.width())
+        state.current_image_height = int(img.height())
         state.current_yolo_candidates = tuple(yolo_detect(img))
         process_task_frame(img)
         gc.collect()
