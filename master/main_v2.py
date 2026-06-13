@@ -194,72 +194,49 @@ _I16_MAX = 32767
 _SCALE = 1000
 
 
-# 当前生效的主车本地视觉任务.
-CURRENT_TASK = None
-# 最近一次应用的任务上下文编号.
-LAST_TASK_CONTEXT_ID = None
-# 当前任务稳定命中已累计的连续帧数.
-STABLE_FRAME_COUNT = 0
-# 下一次可靠事件回报将使用的序号.
-NEXT_EVENT_SEQ = 1
-# 当前等待 ACK 的可靠事件内容.
-PENDING_EVENT = None
-# 当前等待 ACK 的可靠事件上次发送时间, 单位为毫秒.
-PENDING_EVENT_LAST_SENT_MS = None
-# 当前上下文已经成功回报过事件时记录的上下文编号.
-LAST_EVENT_CONTEXT_ID = None
-# 搬运收尾是否已经观察到黄色接触.
-FINISH_CONTACT_SEEN = False
-# 最近一次有效回库黄线中心 Y.
-LAST_RETURN_LINE_Y = None
-# 回库完成判定已累计的连续满足帧数.
-RETURN_LINE_FINISH_MISSING_COUNT = 0
-# 串口输入残片缓冲区.
-RX_BUFFER = b""
-# 启动后复用的 YOLO 网络对象.
-YOLO_NET = None
-# 主车视觉脚本运行时唯一使用的串口对象.
-UART_DEVICE = None
-# 当前帧复用的 YOLO 候选缓存.
-CURRENT_YOLO_CANDIDATES = ()
-# 当前帧距离上一帧的实际间隔, 单位为毫秒.
-CURRENT_FRAME_INTERVAL_MS = 1000.0 / float(VISION_REFERENCE_FPS)
+# 当前主车视觉运行态统一集中在单一状态对象里.
+class RuntimeState:
+    def __init__(self):
+        self.current_task = None
+        self.last_task_context_id = None
+        self.stable_frame_count = 0
+        self.next_event_seq = 1
+        self.pending_event = None
+        self.pending_event_last_sent_ms = None
+        self.last_event_context_id = None
+        self.finish_contact_seen = False
+        self.last_return_line_y = None
+        self.return_line_finish_missing_count = 0
+        self.rx_buffer = b""
+        self.yolo_net = None
+        self.uart_device = None
+        self.current_yolo_candidates = ()
+        self.current_frame_interval_ms = 0.0
+
+    def reset(self, next_event_seq=1):
+        self.current_task = None
+        self.last_task_context_id = None
+        self.stable_frame_count = 0
+        self.next_event_seq = int(next_event_seq) % SEQ_RING_SIZE
+        self.pending_event = None
+        self.pending_event_last_sent_ms = None
+        self.last_event_context_id = None
+        self.finish_contact_seen = False
+        self.last_return_line_y = None
+        self.return_line_finish_missing_count = 0
+        self.rx_buffer = b""
+        self.yolo_net = None
+        self.uart_device = None
+        self.current_yolo_candidates = ()
+        self.current_frame_interval_ms = reference_frame_interval_ms()
+
+
+state = RuntimeState()
 
 
 def reset_runtime_state(next_event_seq=1):
     """重置主车视觉运行态."""
-
-    global CURRENT_TASK
-    global LAST_TASK_CONTEXT_ID
-    global STABLE_FRAME_COUNT
-    global NEXT_EVENT_SEQ
-    global PENDING_EVENT
-    global PENDING_EVENT_LAST_SENT_MS
-    global LAST_EVENT_CONTEXT_ID
-    global FINISH_CONTACT_SEEN
-    global LAST_RETURN_LINE_Y
-    global RETURN_LINE_FINISH_MISSING_COUNT
-    global RX_BUFFER
-    global YOLO_NET
-    global UART_DEVICE
-    global CURRENT_YOLO_CANDIDATES
-    global CURRENT_FRAME_INTERVAL_MS
-
-    CURRENT_TASK = None
-    LAST_TASK_CONTEXT_ID = None
-    STABLE_FRAME_COUNT = 0
-    NEXT_EVENT_SEQ = int(next_event_seq) % SEQ_RING_SIZE
-    PENDING_EVENT = None
-    PENDING_EVENT_LAST_SENT_MS = None
-    LAST_EVENT_CONTEXT_ID = None
-    FINISH_CONTACT_SEEN = False
-    LAST_RETURN_LINE_Y = None
-    RETURN_LINE_FINISH_MISSING_COUNT = 0
-    RX_BUFFER = b""
-    YOLO_NET = None
-    UART_DEVICE = None
-    CURRENT_YOLO_CANDIDATES = ()
-    CURRENT_FRAME_INTERVAL_MS = reference_frame_interval_ms()
+    state.reset(next_event_seq)
 
 
 def _require_u8(value):
@@ -463,8 +440,9 @@ def _write_all(frame_bytes):
     if not isinstance(frame_bytes, bytes):
         frame_bytes = bytes(frame_bytes)
     remaining = frame_bytes
+    uart_device = state.uart_device
     while remaining:
-        written = UART_DEVICE.write(remaining)
+        written = uart_device.write(remaining)
         if written is None:
             written = len(remaining)
         written = int(written)
@@ -548,9 +526,9 @@ def label_name(label):
 
 
 def yolo_detect(img):
-    net = YOLO_NET
+    net = state.yolo_net
     if net is None:
-        raise RuntimeError("YOLO_NET not loaded")
+        raise RuntimeError("yolo_net not loaded")
     detect_img = img.copy(YOLO_IMAGE_COPY_SCALE, 1)
     image_width = float(img.width())
     image_height = float(img.height())
@@ -627,35 +605,39 @@ def build_search_target_point(config_id):
 
 
 def current_task_config_id():
-    if CURRENT_TASK is None:
+    current_task = state.current_task
+    if current_task is None:
         return MASTER_SEARCH_TASK_CONFIG_ID
-    return int(CURRENT_TASK["arg"])
+    return int(current_task["arg"])
 
 
 def is_finish_task_context():
+    current_task = state.current_task
     return (
-        CURRENT_TASK is not None
-        and int(CURRENT_TASK["state"]) == int(STATE_TRANSPORT_OBJECT)
-        and int(CURRENT_TASK["target"]) == int(TARGET_EDGE_LINE)
-        and int(CURRENT_TASK["arg"]) == int(MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID)
+        current_task is not None
+        and int(current_task["state"]) == int(STATE_TRANSPORT_OBJECT)
+        and int(current_task["target"]) == int(TARGET_EDGE_LINE)
+        and int(current_task["arg"]) == int(MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID)
     )
 
 
 def is_orbit_task_context():
+    current_task = state.current_task
     return (
-        CURRENT_TASK is not None
-        and int(CURRENT_TASK["state"]) == int(STATE_ORBITING)
-        and int(CURRENT_TASK["target"]) == int(TARGET_OBJECT)
-        and int(CURRENT_TASK["arg"]) == int(MASTER_ORBIT_TASK_CONFIG_ID)
+        current_task is not None
+        and int(current_task["state"]) == int(STATE_ORBITING)
+        and int(current_task["target"]) == int(TARGET_OBJECT)
+        and int(current_task["arg"]) == int(MASTER_ORBIT_TASK_CONFIG_ID)
     )
 
 
 def is_return_line_task_context():
+    current_task = state.current_task
     return (
-        CURRENT_TASK is not None
-        and int(CURRENT_TASK["target"]) == int(TARGET_EDGE_LINE)
-        and int(CURRENT_TASK["arg"]) == int(MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID)
-        and int(CURRENT_TASK["state"]) in (
+        current_task is not None
+        and int(current_task["target"]) == int(TARGET_EDGE_LINE)
+        and int(current_task["arg"]) == int(MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID)
+        and int(current_task["state"]) in (
             int(STATE_RETURN_GARAGE_RETREAT),
             int(STATE_RETURN_GARAGE_LINE),
         )
@@ -664,8 +646,9 @@ def is_return_line_task_context():
 
 def build_observation(valid, center_x, bottom_y, area):
     context_id = 0
-    if CURRENT_TASK is not None:
-        context_id = int(CURRENT_TASK["context_id"])
+    current_task = state.current_task
+    if current_task is not None:
+        context_id = int(current_task["context_id"])
     if int(valid) != 1:
         return context_id, 0.0, 0.0, 0.0
     target_x, target_y = build_search_target_point(current_task_config_id())
@@ -679,8 +662,9 @@ def build_observation(valid, center_x, bottom_y, area):
 
 def build_return_line_observation(line_y):
     context_id = 0
-    if CURRENT_TASK is not None:
-        context_id = int(CURRENT_TASK["context_id"])
+    current_task = state.current_task
+    if current_task is not None:
+        context_id = int(current_task["context_id"])
     if line_y is None:
         return context_id, 0.0, 0.0, 0.0
     return (
@@ -692,9 +676,10 @@ def build_return_line_observation(line_y):
 
 
 def build_observation_and_candidates():
-    if not CURRENT_YOLO_CANDIDATES:
-        return build_observation(0, 0, 0, 0), None, None, CURRENT_YOLO_CANDIDATES
-    candidates = CURRENT_YOLO_CANDIDATES
+    current_yolo_candidates = state.current_yolo_candidates
+    if not current_yolo_candidates:
+        return build_observation(0, 0, 0, 0), None, None, current_yolo_candidates
+    candidates = current_yolo_candidates
     target_x, target_y = build_search_target_point(current_task_config_id())
     if is_finish_task_context():
         candidates = filter_candidates_in_target_window(
@@ -918,7 +903,7 @@ def _apply_min_speed(value, limit, min_speed):
 
 
 def current_frame_time_scale():
-    frame_interval_ms = float(CURRENT_FRAME_INTERVAL_MS)
+    frame_interval_ms = float(state.current_frame_interval_ms)
     if frame_interval_ms <= 0.0:
         frame_interval_ms = reference_frame_interval_ms()
     return reference_frame_interval_ms() / frame_interval_ms
@@ -1119,11 +1104,12 @@ def build_return_line_velocity_from_y(line_y):
 def build_task_event_value(img, best_blob, task_name=None):
     if is_finish_task_context():
         return build_finish_task_yellow_ratio_percent(img, best_blob)
+    current_task = state.current_task
     if (
-        CURRENT_TASK is not None
-        and int(CURRENT_TASK["state"]) == int(STATE_SEARCH_OBJECT)
-        and int(CURRENT_TASK["target"]) == int(TARGET_OBJECT)
-        and int(CURRENT_TASK["arg"]) == int(MASTER_SEARCH_TASK_CONFIG_ID)
+        current_task is not None
+        and int(current_task["state"]) == int(STATE_SEARCH_OBJECT)
+        and int(current_task["target"]) == int(TARGET_OBJECT)
+        and int(current_task["arg"]) == int(MASTER_SEARCH_TASK_CONFIG_ID)
         and task_name is not None
     ):
         return object_task_id(task_name)
@@ -1131,20 +1117,21 @@ def build_task_event_value(img, best_blob, task_name=None):
 
 
 def current_event_type():
-    if CURRENT_TASK is None:
+    current_task = state.current_task
+    if current_task is None:
         return None
-    state = int(CURRENT_TASK["state"])
-    target = int(CURRENT_TASK["target"])
-    arg = int(CURRENT_TASK["arg"])
-    if state == STATE_SEARCH_OBJECT and target == TARGET_OBJECT and arg == MASTER_SEARCH_TASK_CONFIG_ID:
+    task_state = int(current_task["state"])
+    target = int(current_task["target"])
+    arg = int(current_task["arg"])
+    if task_state == STATE_SEARCH_OBJECT and target == TARGET_OBJECT and arg == MASTER_SEARCH_TASK_CONFIG_ID:
         return EVENT_TARGET_FOUND
-    if state == STATE_SEARCH_OBJECT and target == TARGET_OBJECT and arg == MASTER_TRANSPORT_TASK_CONFIG_ID:
+    if task_state == STATE_SEARCH_OBJECT and target == TARGET_OBJECT and arg == MASTER_TRANSPORT_TASK_CONFIG_ID:
         return EVENT_ALIGNED
-    if state == STATE_TRANSPORT_OBJECT and target == TARGET_EDGE_LINE and arg == MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID:
+    if task_state == STATE_TRANSPORT_OBJECT and target == TARGET_EDGE_LINE and arg == MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID:
         return EVENT_ARRIVED
-    if state == STATE_RETURN_GARAGE_RETREAT and target == TARGET_EDGE_LINE and arg == MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID:
+    if task_state == STATE_RETURN_GARAGE_RETREAT and target == TARGET_EDGE_LINE and arg == MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID:
         return EVENT_RETURN_LINE_ALIGNED
-    if state == STATE_RETURN_GARAGE_LINE and target == TARGET_EDGE_LINE and arg == MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID:
+    if task_state == STATE_RETURN_GARAGE_LINE and target == TARGET_EDGE_LINE and arg == MASTER_RETURN_GARAGE_LINE_TASK_CONFIG_ID:
         return EVENT_RETURN_GARAGE_FINISHED
     return None
 
@@ -1162,11 +1149,12 @@ def resolve_event_value(observation_value, event_value):
         if current_event_type() == EVENT_RETURN_GARAGE_FINISHED:
             return 0
         return int(float(observation_value))
+    current_task = state.current_task
     if (
-        CURRENT_TASK is not None
-        and int(CURRENT_TASK["state"]) == int(STATE_SEARCH_OBJECT)
-        and int(CURRENT_TASK["target"]) == int(TARGET_OBJECT)
-        and int(CURRENT_TASK["arg"]) == int(MASTER_SEARCH_TASK_CONFIG_ID)
+        current_task is not None
+        and int(current_task["state"]) == int(STATE_SEARCH_OBJECT)
+        and int(current_task["target"]) == int(TARGET_OBJECT)
+        and int(current_task["arg"]) == int(MASTER_SEARCH_TASK_CONFIG_ID)
         and event_value is not None
     ):
         return int(event_value)
@@ -1174,61 +1162,56 @@ def resolve_event_value(observation_value, event_value):
 
 
 def allocate_event_seq():
-    global NEXT_EVENT_SEQ
-    reliable_seq = NEXT_EVENT_SEQ
-    NEXT_EVENT_SEQ = (NEXT_EVENT_SEQ + 1) % SEQ_RING_SIZE
+    reliable_seq = state.next_event_seq
+    state.next_event_seq = (reliable_seq + 1) % SEQ_RING_SIZE
     return reliable_seq
 
 
 def create_pending_event(context_id, event, value):
-    global PENDING_EVENT
-    global PENDING_EVENT_LAST_SENT_MS
-    global LAST_EVENT_CONTEXT_ID
-
-    PENDING_EVENT = {
+    state.pending_event = {
         "reliable_seq": allocate_event_seq(),
         "context_id": int(context_id),
         "event": int(event),
         "value": int(value),
     }
-    PENDING_EVENT_LAST_SENT_MS = None
-    LAST_EVENT_CONTEXT_ID = int(context_id)
+    state.pending_event_last_sent_ms = None
+    state.last_event_context_id = int(context_id)
 
 
 def next_event_frame():
-    global PENDING_EVENT_LAST_SENT_MS
-
-    if PENDING_EVENT is None:
+    pending_event = state.pending_event
+    if pending_event is None:
         return None
     now_ms = default_now_ms()
-    if not should_resend(now_ms, PENDING_EVENT_LAST_SENT_MS, RELIABLE_RESEND_INTERVAL_MS):
+    if not should_resend(
+        now_ms,
+        state.pending_event_last_sent_ms,
+        RELIABLE_RESEND_INTERVAL_MS,
+    ):
         return None
-    PENDING_EVENT_LAST_SENT_MS = now_ms
+    state.pending_event_last_sent_ms = now_ms
     return format_event_frame(
-        PENDING_EVENT["reliable_seq"],
-        PENDING_EVENT["context_id"],
-        PENDING_EVENT["event"],
-        PENDING_EVENT["value"],
+        pending_event["reliable_seq"],
+        pending_event["context_id"],
+        pending_event["event"],
+        pending_event["value"],
     )
 
 
 def _accept_finish_task_observation(context_id, observation_value, yellow_ratio, event_type):
-    global STABLE_FRAME_COUNT
-    global FINISH_CONTACT_SEEN
-
     if float(observation_value) <= 0.0:
-        STABLE_FRAME_COUNT = 0
+        state.stable_frame_count = 0
         return
-    if not FINISH_CONTACT_SEEN:
+    if not state.finish_contact_seen:
         if float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0:
-            FINISH_CONTACT_SEEN = True
-        STABLE_FRAME_COUNT = 0
+            state.finish_contact_seen = True
+        state.stable_frame_count = 0
         return
     if float(yellow_ratio) > 0.0:
-        STABLE_FRAME_COUNT = 0
+        state.stable_frame_count = 0
         return
-    STABLE_FRAME_COUNT += 1
-    if STABLE_FRAME_COUNT >= required_stable_frames():
+    state.stable_frame_count += 1
+    if state.stable_frame_count >= required_stable_frames():
         create_pending_event(
             context_id,
             event_type,
@@ -1251,52 +1234,52 @@ def _return_line_column_has_yellow(img, image_width, image_height):
 
 
 def _accept_return_line_observation(context_id, observation_value, img, event_type):
-    global STABLE_FRAME_COUNT
-    global RETURN_LINE_FINISH_MISSING_COUNT
     image_width = int(img.width())
     image_height = int(img.height())
 
     if event_type == EVENT_RETURN_LINE_ALIGNED:
         if float(observation_value) > 0.0 and float(observation_value) <= float(RETURN_GARAGE_LINE_TARGET_Y_PX):
-            STABLE_FRAME_COUNT += 1
-            if STABLE_FRAME_COUNT >= required_stable_frames():
+            state.stable_frame_count += 1
+            if state.stable_frame_count >= required_stable_frames():
                 create_pending_event(
                     context_id,
                     event_type,
                     resolve_event_value(observation_value, None),
                 )
             return
-        STABLE_FRAME_COUNT = 0
+        state.stable_frame_count = 0
         return
 
-    STABLE_FRAME_COUNT = 0
+    state.stable_frame_count = 0
     if _return_line_row_has_yellow(img, image_width, image_height) and not _return_line_column_has_yellow(
         img,
         image_width,
         image_height,
     ):
-        RETURN_LINE_FINISH_MISSING_COUNT += 1
+        state.return_line_finish_missing_count += 1
     else:
-        RETURN_LINE_FINISH_MISSING_COUNT = 0
+        state.return_line_finish_missing_count = 0
         return
-    if RETURN_LINE_FINISH_MISSING_COUNT >= int(RETURN_LINE_MISSING_FINISH_FRAMES):
+    if state.return_line_finish_missing_count >= int(RETURN_LINE_MISSING_FINISH_FRAMES):
         create_pending_event(context_id, event_type, 0)
 
 
 def accept_observation(observation, img, event_value=None):
-    global STABLE_FRAME_COUNT
-
-    if CURRENT_TASK is None:
+    current_task = state.current_task
+    if current_task is None:
         return
-    context_id = int(CURRENT_TASK["context_id"])
+    context_id = int(current_task["context_id"])
     observed_context_id, error_x, error_y, observation_value = observation
     if int(observed_context_id) != context_id:
         return
     event_type = current_event_type()
     if event_type is None:
-        STABLE_FRAME_COUNT = 0
+        state.stable_frame_count = 0
         return
-    if PENDING_EVENT is not None or LAST_EVENT_CONTEXT_ID == context_id:
+    if (
+        state.pending_event is not None
+        or state.last_event_context_id == context_id
+    ):
         return
     if is_finish_task_context():
         _accept_finish_task_observation(context_id, observation_value, event_value, event_type)
@@ -1314,11 +1297,11 @@ def accept_observation(observation, img, event_value=None):
         and abs(float(error_x)) <= float(OBJECT_X_TOLERANCE_PX)
         and abs(float(error_y)) <= float(OBJECT_Y_TOLERANCE_PX)
     ):
-        STABLE_FRAME_COUNT += 1
+        state.stable_frame_count += 1
     else:
-        STABLE_FRAME_COUNT = 0
+        state.stable_frame_count = 0
         return
-    if STABLE_FRAME_COUNT >= required_stable_frames():
+    if state.stable_frame_count >= required_stable_frames():
         create_pending_event(
             context_id,
             event_type,
@@ -1327,45 +1310,38 @@ def accept_observation(observation, img, event_value=None):
 
 
 def handle_control_frame(frame_bytes):
-    global CURRENT_TASK
-    global LAST_TASK_CONTEXT_ID
-    global STABLE_FRAME_COUNT
-    global FINISH_CONTACT_SEEN
-    global LAST_RETURN_LINE_Y
-    global RETURN_LINE_FINISH_MISSING_COUNT
-    global PENDING_EVENT
-    global PENDING_EVENT_LAST_SENT_MS
-
     packet = parse_task_sync_packet(frame_bytes)
     if packet is not None:
         context_id = int(packet["context_id"])
-        if is_newer_seq(context_id, LAST_TASK_CONTEXT_ID):
-            CURRENT_TASK = {
+        if is_newer_seq(context_id, state.last_task_context_id):
+            state.current_task = {
                 "context_id": context_id,
                 "state": int(packet["state"]),
                 "target": int(packet["target"]),
                 "arg": int(packet["arg"]),
             }
-            LAST_TASK_CONTEXT_ID = context_id
-            STABLE_FRAME_COUNT = 0
-            FINISH_CONTACT_SEEN = False
-            LAST_RETURN_LINE_Y = None
-            RETURN_LINE_FINISH_MISSING_COUNT = 0
+            state.last_task_context_id = context_id
+            state.stable_frame_count = 0
+            state.finish_contact_seen = False
+            state.last_return_line_y = None
+            state.return_line_finish_missing_count = 0
         return format_ack_frame(packet["reliable_seq"])
 
     packet = parse_event_ack_packet(frame_bytes)
-    if packet is not None and PENDING_EVENT is not None:
-        if int(packet["reliable_seq"]) == int(PENDING_EVENT["reliable_seq"]):
-            PENDING_EVENT = None
-            PENDING_EVENT_LAST_SENT_MS = None
+    pending_event = state.pending_event
+    if packet is not None and pending_event is not None:
+        if int(packet["reliable_seq"]) == int(pending_event["reliable_seq"]):
+            state.pending_event = None
+            state.pending_event_last_sent_ms = None
     return None
 
 
 def process_uart_input(rx_buffer):
-    size = UART_DEVICE.any()
+    uart_device = state.uart_device
+    size = uart_device.any()
     if not size:
         return rx_buffer
-    data = UART_DEVICE.read(size)
+    data = uart_device.read(size)
     if data is None:
         return rx_buffer
     if isinstance(data, memoryview):
@@ -1392,17 +1368,16 @@ def process_uart_input(rx_buffer):
 
 
 def _process_return_line_frame(img):
-    global LAST_RETURN_LINE_Y
     image_width = int(img.width())
     image_height = int(img.height())
     line_y = build_return_line_y_from_image(
         img,
         image_width,
         image_height,
-        LAST_RETURN_LINE_Y,
+        state.last_return_line_y,
     )
     if line_y is not None:
-        LAST_RETURN_LINE_Y = float(line_y)
+        state.last_return_line_y = float(line_y)
     velocity = build_return_line_velocity_from_y(line_y)
     write_data_line(format_search_velocity_frame(*velocity))
     accept_observation(
@@ -1415,15 +1390,15 @@ def _process_return_line_frame(img):
 
 
 def process_task_frame(img):
-    if PENDING_EVENT is not None:
+    if state.pending_event is not None:
         event_frame = next_event_frame()
         if event_frame is not None:
             write_reliable_line(event_frame)
         if not is_return_line_task_context():
             return
-    if CURRENT_TASK is None:
+    if state.current_task is None:
         if MASTER_DEBUG_DISPLAY_ENABLED:
-            draw_search_preview_debug(img, CURRENT_YOLO_CANDIDATES)
+            draw_search_preview_debug(img, state.current_yolo_candidates)
         return
     if is_return_line_task_context():
         _process_return_line_frame(img)
@@ -1470,29 +1445,23 @@ def init_sensor():
 
 
 def run():
-    global YOLO_NET
-    global RX_BUFFER
-    global UART_DEVICE
-    global CURRENT_YOLO_CANDIDATES
-    global CURRENT_FRAME_INTERVAL_MS
-
     reset_runtime_state()
-    UART_DEVICE = init_uart()
+    state.uart_device = init_uart()
     init_sensor()
-    YOLO_NET = tf.load(YOLO_MODEL_PATH)
+    state.yolo_net = tf.load(YOLO_MODEL_PATH)
     last_frame_ms = default_now_ms()
 
     while True:
-        RX_BUFFER = process_uart_input(RX_BUFFER)
+        state.rx_buffer = process_uart_input(state.rx_buffer)
         img = sensor.snapshot()
         now_ms = default_now_ms()
         if now_ms >= last_frame_ms:
-            CURRENT_FRAME_INTERVAL_MS = now_ms - last_frame_ms
+            state.current_frame_interval_ms = now_ms - last_frame_ms
         else:
-            CURRENT_FRAME_INTERVAL_MS = reference_frame_interval_ms()
+            state.current_frame_interval_ms = reference_frame_interval_ms()
         last_frame_ms = now_ms
         img.lens_corr(strength=2.8, zoom=1.0)
-        CURRENT_YOLO_CANDIDATES = tuple(yolo_detect(img))
+        state.current_yolo_candidates = tuple(yolo_detect(img))
         process_task_frame(img)
         gc.collect()
 

@@ -23,7 +23,7 @@ def load_master_v2():
     module = load_role_entry_module("master", "main_v2.py", "vision_master_v2_test_module")
     module.reset_runtime_state()
     module.OBJECT_STABLE_FRAMES = 1
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     return module
 
 
@@ -228,7 +228,7 @@ def build_search_observation(module, area, err_x=0.0, err_y=0.0):
 def cache_yolo_candidates(module, img=None):
     if img is None:
         img = FakeImage()
-    module.CURRENT_YOLO_CANDIDATES = tuple(module.yolo_detect(img))
+    module.state.current_yolo_candidates = tuple(module.yolo_detect(img))
     return img
 
 
@@ -248,14 +248,25 @@ def test_master_main_v2_replies_task_sync_ack_and_records_task() -> None:
         "seq": 12,
         "body": b"\x00" * 8,
     }
-    assert module.CURRENT_TASK["context_id"] == 7
-    assert module.CURRENT_TASK["arg"] == module.MASTER_SEARCH_TASK_CONFIG_ID
+    assert module.state.current_task["context_id"] == 7
+    assert module.state.current_task["arg"] == module.MASTER_SEARCH_TASK_CONFIG_ID
+
+
+def test_master_main_v2_runtime_state_uses_state_object() -> None:
+    module = load_master_v2()
+
+    assert hasattr(module, "state")
+    module.reset_runtime_state(next_event_seq=9)
+
+    assert module.state.current_task is None
+    assert module.state.next_event_seq == 9
+    assert not hasattr(module, "CURRENT_TASK")
 
 
 def test_master_main_v2_process_uart_input_replies_ack_for_task_sync_frame() -> None:
     module = load_master_v2()
     uart = ReadWriteUART(task_sync_frame(module))
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
 
     rx_buffer = module.process_uart_input(b"")
 
@@ -266,29 +277,29 @@ def test_master_main_v2_process_uart_input_replies_ack_for_task_sync_frame() -> 
         "seq": 12,
         "body": b"\x00" * 8,
     }
-    assert module.CURRENT_TASK is not None
+    assert module.state.current_task is not None
 
 
 def test_master_main_v2_process_uart_input_resyncs_before_task_sync_frame() -> None:
     module = load_master_v2()
     uart = ReadWriteUART(b"\x02" + task_sync_frame(module))
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
 
     rx_buffer = module.process_uart_input(b"")
 
     assert rx_buffer == b""
     assert decode_frame(uart.writes[0])["topic"] == module.TOPIC_MASTER_VISION_TASK_SYNC
-    assert module.CURRENT_TASK is not None
+    assert module.state.current_task is not None
 
 
 def test_master_main_v2_process_uart_input_ignores_bad_decode() -> None:
     module = load_master_v2()
-    module.UART_DEVICE = BadReadUART()
+    module.state.uart_device = BadReadUART()
 
     rx_buffer = module.process_uart_input(b"partial")
 
     assert rx_buffer == b"partial\xff"
-    assert module.CURRENT_TASK is None
+    assert module.state.current_task is None
 
 
 def test_master_main_v2_repeated_task_sync_replies_ack_without_reapplying() -> None:
@@ -302,8 +313,8 @@ def test_master_main_v2_repeated_task_sync_replies_ack_without_reapplying() -> N
 
     assert decode_frame(reply)["seq"] == 12
     assert decode_frame(repeated_reply)["seq"] == 12
-    assert module.STABLE_FRAME_COUNT == 2
-    assert module.PENDING_EVENT is not None
+    assert module.state.stable_frame_count == 2
+    assert module.state.pending_event is not None
 
 
 def test_master_main_v2_non_new_context_does_not_override_active_task() -> None:
@@ -315,7 +326,7 @@ def test_master_main_v2_non_new_context_does_not_override_active_task() -> None:
 
     observation = build_search_observation(module, 180.0)
 
-    assert module.CURRENT_TASK == {
+    assert module.state.current_task == {
         "context_id": 7,
         "state": module.STATE_SEARCH_OBJECT,
         "target": module.TARGET_OBJECT,
@@ -376,7 +387,7 @@ def test_master_main_v2_search_uses_yolo_candidates_for_velocity_and_target_foun
     module.tf.detect = lambda net, img: [search_aligned_detection()]
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     uart = FakeUART()
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
     img = FakeImage(detections=[search_aligned_detection()])
 
     run_frame(module, img)
@@ -403,11 +414,11 @@ def test_master_main_v2_search_uses_yolo_candidates_for_velocity_and_target_foun
 def test_master_main_v2_debug_display_draws_detected_box_and_flushes() -> None:
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     module.tf.detect = lambda net, img: [search_aligned_detection()]
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     uart = FakeUART()
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
     img = FakeImage()
 
     run_frame(module, img)
@@ -423,7 +434,7 @@ def test_master_main_v2_debug_display_shows_preview_without_task_sync() -> None:
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
     module.tf.detect = lambda net, img: [search_aligned_detection()]
     uart = FakeUART()
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
     img = FakeImage()
 
     run_frame(module, img)
@@ -447,7 +458,7 @@ def test_master_main_v2_build_observation_and_candidates_uses_cached_candidates_
         1,
         0.95,
     )
-    module.CURRENT_YOLO_CANDIDATES = (("red", target_x, target_y, 400.0, blob),)
+    module.state.current_yolo_candidates = (("red", target_x, target_y, 400.0, blob),)
 
     observation, best_blob, task_name, candidates = module.build_observation_and_candidates()
 
@@ -531,7 +542,7 @@ def test_master_main_v2_search_velocity_clamps_vx_and_vy() -> None:
 
 def test_master_main_v2_reference_fps_keeps_search_velocity_unchanged() -> None:
     module = load_master_v2()
-    module.CURRENT_FRAME_INTERVAL_MS = module.reference_frame_interval_ms()
+    module.state.current_frame_interval_ms = module.reference_frame_interval_ms()
 
     velocity = module.build_search_velocity_from_observation(
         (7, 100.0, -100.0, 300.0),
@@ -550,12 +561,12 @@ def test_master_main_v2_reference_frame_interval_is_derived_from_fps() -> None:
 
 def test_master_main_v2_slow_frame_interval_reduces_search_velocity() -> None:
     module = load_master_v2()
-    module.CURRENT_FRAME_INTERVAL_MS = module.reference_frame_interval_ms()
+    module.state.current_frame_interval_ms = module.reference_frame_interval_ms()
     reference_velocity = module.build_search_velocity_from_observation(
         (7, 100.0, -100.0, 300.0),
         IMAGE_HEIGHT,
     )
-    module.CURRENT_FRAME_INTERVAL_MS = module.reference_frame_interval_ms() * 2
+    module.state.current_frame_interval_ms = module.reference_frame_interval_ms() * 2
     slow_velocity = module.build_search_velocity_from_observation(
         (7, 100.0, -100.0, 300.0),
         IMAGE_HEIGHT,
@@ -576,7 +587,7 @@ def test_master_main_v2_search_y_velocity_decreases_when_target_gets_closer() ->
 
 def test_master_main_v2_orbit_outputs_only_velocity_correction_without_event() -> None:
     module = load_master_v2()
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     module.MASTER_ORBIT_KP_X = 0.2
     module.MASTER_ORBIT_KP_Y = -0.3
     module.MASTER_ORBIT_MIN_SPEED = 0.0
@@ -589,7 +600,7 @@ def test_master_main_v2_orbit_outputs_only_velocity_correction_without_event() -
         )
     )
     uart = FakeUART()
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
     img = FakeImage()
 
     run_frame(module, img)
@@ -612,7 +623,7 @@ def test_master_main_v2_transport_alignment_reports_aligned_event() -> None:
         )
     )
     uart = FakeUART()
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
     img = FakeImage()
 
     run_frame(module, img)
@@ -627,7 +638,7 @@ def test_master_main_v2_transport_alignment_reports_aligned_event() -> None:
 
 def test_master_main_v2_candidate_selection_uses_configured_target_point() -> None:
     module = load_master_v2()
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     target_x, target_y = module.build_search_target_point(module.MASTER_SEARCH_TASK_CONFIG_ID)
     module.tf.detect = lambda net, img: [
         pixel_detection(target_x - 40, IMAGE_HEIGHT - target_y, target_x + 40, IMAGE_HEIGHT - target_y + 20),
@@ -649,7 +660,7 @@ def test_master_main_v2_candidate_selection_uses_configured_target_point() -> No
 
 def test_master_main_v2_transport_alignment_keeps_candidate_selection() -> None:
     module = load_master_v2()
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     target_x, target_y = module.build_search_target_point(module.MASTER_TRANSPORT_TASK_CONFIG_ID)
     module.tf.detect = lambda net, img: [
         pixel_detection(
@@ -677,7 +688,7 @@ def test_master_main_v2_transport_alignment_keeps_candidate_selection() -> None:
 
 def test_master_main_v2_finish_accepts_x_outside_when_bottom_hits_target_window() -> None:
     module = load_master_v2()
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     target_x, target_y = module.build_search_target_point(module.MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID)
     module.tf.detect = lambda net, img: [
         pixel_detection(
@@ -705,7 +716,7 @@ def test_master_main_v2_finish_accepts_x_outside_when_bottom_hits_target_window(
 
 def test_master_main_v2_finish_prefers_largest_area_after_bottom_filter() -> None:
     module = load_master_v2()
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     target_x, target_y = module.build_search_target_point(module.MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID)
     module.tf.detect = lambda net, img: [
         pixel_detection(target_x - 10.0, IMAGE_HEIGHT - target_y, target_x + 10.0, IMAGE_HEIGHT - target_y + 20),
@@ -735,7 +746,7 @@ def test_master_main_v2_finish_prefers_largest_area_after_bottom_filter() -> Non
 
 def test_master_main_v2_finish_ignores_candidates_when_bottom_outside_target_window() -> None:
     module = load_master_v2()
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     target_x, target_y = module.build_search_target_point(module.MASTER_TRANSPORT_FINISH_TASK_CONFIG_ID)
     module.tf.detect = lambda net, img: [
         pixel_detection(
@@ -763,7 +774,7 @@ def test_master_main_v2_finish_ignores_candidates_when_bottom_outside_target_win
 
 def test_master_main_v2_finish_uses_target_window_and_reports_arrived_after_contact_release() -> None:
     module = load_master_v2()
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     module.FINISH_HOOK_STABLE_FRAMES = 1
     module.tf.detect = lambda net, img: [
         (145.0 / 320.0, 0.0, 175.0 / 320.0, 20.0 / 240.0, 1, 0.96),
@@ -779,7 +790,7 @@ def test_master_main_v2_finish_uses_target_window_and_reports_arrived_after_cont
         )
     )
     uart = FakeUART()
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
     blob = module.YoloDetectionBlob(145.0, 0.0, 175.0, 20.0, 1, 0.96)
     rois, _ = module.build_finish_task_ring_rois(blob, IMAGE_WIDTH, IMAGE_HEIGHT)
     touch_areas = {tuple(roi): max(1, int(roi[2]) * int(roi[3])) for roi in rois}
@@ -797,7 +808,7 @@ def test_master_main_v2_finish_uses_target_window_and_reports_arrived_after_cont
 
 def test_master_main_v2_return_retreat_reports_line_aligned() -> None:
     module = load_master_v2()
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     module.handle_control_frame(
         task_sync_frame(
             module,
@@ -808,7 +819,7 @@ def test_master_main_v2_return_retreat_reports_line_aligned() -> None:
         )
     )
     uart = FakeUART()
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
     img = FakeImage(pixels=build_return_line_pixels(160))
 
     run_frame(module, img)
@@ -887,7 +898,7 @@ def test_master_main_v2_return_line_runtime_does_not_use_blob_detection() -> Non
         )
     )
     uart = FakeUART()
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
 
     class RawPixelForbiddenImage(FakeImage):
         def find_blobs(self, *args, **kwargs):
@@ -900,7 +911,7 @@ def test_master_main_v2_return_line_runtime_does_not_use_blob_detection() -> Non
 
 def test_master_main_v2_return_line_reports_finished_after_x270_missing_for_five_frames() -> None:
     module = load_master_v2()
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     module.RETURN_LINE_MISSING_FINISH_FRAMES = 5
     module.handle_control_frame(
         task_sync_frame(
@@ -912,7 +923,7 @@ def test_master_main_v2_return_line_reports_finished_after_x270_missing_for_five
         )
     )
     uart = FakeUART()
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
     img = FakeImage(pixels=build_return_line_pixels(160))
 
     for _ in range(7):
@@ -927,11 +938,11 @@ def test_master_main_v2_return_line_reports_finished_after_x270_missing_for_five
 
 def test_master_main_v2_pending_event_blocks_non_return_velocity_until_ack() -> None:
     module = load_master_v2()
-    module.YOLO_NET = "fake-net"
+    module.state.yolo_net = "fake-net"
     module.tf.detect = lambda net, img: [search_aligned_detection()]
     module.handle_control_frame(task_sync_frame(module, context_id=21))
     uart = FakeUART()
-    module.UART_DEVICE = uart
+    module.state.uart_device = uart
     img = FakeImage()
 
     run_frame(module, img)
@@ -984,7 +995,7 @@ def test_master_main_v2_run_applies_lens_correction_and_uses_yolo_detect_before_
     def stop_after_frame(current_img):
         assert current_img is image
         assert call_log == ["snapshot", "yolo_detect"]
-        assert tuple(module.CURRENT_YOLO_CANDIDATES) == (("red", 160.0, 210.0, 300.0, None),)
+        assert tuple(module.state.current_yolo_candidates) == (("red", 160.0, 210.0, 300.0, None),)
         raise StopLoop()
 
     module.yolo_detect = fake_yolo_detect
