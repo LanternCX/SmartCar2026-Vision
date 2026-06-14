@@ -312,6 +312,74 @@ def test_assistant_main_v2_run_applies_lens_correction_and_uses_yolo_detect_befo
         module.run()
 
 
+def test_assistant_main_v2_run_applies_lens_correction_and_uses_yolo_preview_without_task_sync() -> None:
+    """辅车调试模式下即使没有任务同步也应先跑预览识别."""
+
+    module = load_assistant_v2()
+    module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
+    logs = []
+    module.print = lambda *args: logs.append(" ".join(str(arg) for arg in args))
+
+    class StopLoop(Exception):
+        pass
+
+    class SnapshotImage:
+        def __init__(self):
+            self.lens_corr_called = False
+
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def lens_corr(self, strength, zoom):
+            _ = strength, zoom
+            self.lens_corr_called = True
+            return self
+
+    image = SnapshotImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    class FakeBlob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+    module.sensor = Sensor()
+    module.init_uart = lambda: legacy_tests.FakeUART()
+    module.init_sensor = lambda: (legacy_tests.IMAGE_WIDTH, legacy_tests.IMAGE_HEIGHT)
+    module.process_uart_input = lambda rx_buffer: rx_buffer
+
+    def fake_yolo_detect(img):
+        assert img is image
+        return [("red", 160.0, 30.0, 220.0, 400.0, FakeBlob())]
+
+    def stop_after_frame(current_img):
+        assert current_img is image
+        assert module.state.current_sync is None
+        assert module.state.current_image is image
+        assert image.lens_corr_called is True
+        assert tuple(candidate[:5] for candidate in module.state.current_yolo_candidates) == (
+            ("red", 160.0, 30.0, 220.0, 400.0),
+        )
+        assert module.state.current_detection_source == "yolo"
+        raise StopLoop()
+
+    module.yolo_detect = fake_yolo_detect
+    module.process_task_frame = stop_after_frame
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+    assert module.state.current_second_total_frames == 1
+    assert module.state.current_second_yolo_frames == 1
+    assert any("[assistant_v2][boot]" in line for line in logs)
+    assert any("debug=1" in line for line in logs)
+
+
 def test_assistant_main_v2_run_skips_yolo_in_return_line_mode() -> None:
     """辅车回库黄线模式不应进入物体 YOLO 链路."""
 
@@ -709,6 +777,196 @@ def test_assistant_main_v2_run_skips_yolo_when_blob_tracking_is_active() -> None
 
     module.yolo_detect = fake_yolo_detect
     module.write_data_line = stop_after_write
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+    assert tuple(module.state.current_yolo_candidates) == ()
+    assert tuple(module.state.current_object_candidates) == (
+        ("red", 160.0, 30.0, 220.0, 400.0, module.state.current_object_candidates[0][5]),
+    )
+    assert module.state.current_detection_source == "roi"
+    assert yolo_call_count == 0
+
+
+def test_assistant_main_v2_debug_preview_uses_blob_tracking_over_cached_yolo_without_task_sync() -> None:
+    module = load_assistant_v2()
+    module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
+
+    class PreviewBlob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def cy(self):
+            return 30.0
+
+        def area(self):
+            return 400.0
+
+    class SnapshotImage:
+        def __init__(self):
+            self.flush_count = 0
+
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=0):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
+            return [PreviewBlob()]
+
+        def draw_cross(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_rectangle(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_string(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def flush(self):
+            self.flush_count += 1
+
+    image = SnapshotImage()
+    module.state.uart_device = legacy_tests.FakeUART()
+    module.state.current_image = image
+    module.state.current_image_width = image.width()
+    module.state.current_image_height = image.height()
+    _seed_assistant_short_track(module)
+    yolo_blob = module.YoloDetectionBlob(150.0, 20.0, 170.0, 40.0, 1, 0.95)
+    module.state.current_detection_source = "yolo"
+    module.state.current_yolo_candidates = (("red", 160.0, 30.0, 220.0, 400.0, yolo_blob),)
+    module.state.current_object_candidates = tuple(module.build_object_candidates(image, ()))
+
+    module.process_task_frame(image)
+
+    assert tuple(module.state.current_yolo_candidates[:1])[0][:5] == ("red", 160.0, 30.0, 220.0, 400.0)
+    assert tuple(module.state.current_object_candidates[:1])[0][:5] == ("red", 160.0, 30.0, 220.0, 400.0)
+    assert module.state.current_detection_source == "roi"
+    assert module.state.track_source == "roi"
+    assert image.flush_count == 1
+    assert module.state.uart_device.writes == []
+
+
+def test_assistant_main_v2_debug_preview_handles_empty_candidates_without_crashing() -> None:
+    module = load_assistant_v2()
+    module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
+    logs = []
+    module.print = lambda *args: logs.append(" ".join(str(arg) for arg in args))
+
+    class SnapshotImage:
+        def __init__(self):
+            self.flush_count = 0
+
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def draw_cross(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_rectangle(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_string(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def flush(self):
+            self.flush_count += 1
+
+    image = SnapshotImage()
+    module.state.uart_device = legacy_tests.FakeUART()
+    module.state.current_sync = None
+    module.state.current_image = image
+    module.state.current_image_width = image.width()
+    module.state.current_image_height = image.height()
+    module.state.current_detection_source = "miss"
+    module.state.current_object_candidates = ()
+
+    module.process_task_frame(image)
+
+    assert image.flush_count == 1
+    assert any("[assistant_v2][preview]" in line for line in logs)
+    assert any("cand=0" in line for line in logs)
+
+
+def test_assistant_main_v2_run_skips_yolo_in_debug_preview_when_blob_tracking_is_active() -> None:
+    module = load_assistant_v2()
+    module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
+
+    class StopLoop(Exception):
+        pass
+
+    class PreviewBlob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def cy(self):
+            return 30.0
+
+        def area(self):
+            return 400.0
+
+    class SnapshotImage:
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=0):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
+            return [PreviewBlob()]
+
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def lens_corr(self, strength, zoom):
+            _ = (strength, zoom)
+            return self
+
+        def draw_cross(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_rectangle(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_string(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def flush(self):
+            raise StopLoop()
+
+    image = SnapshotImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    def prime_preview_tracking(rx_buffer):
+        _seed_assistant_short_track(module)
+        return rx_buffer
+
+    module.sensor = Sensor()
+    module.init_uart = lambda: legacy_tests.FakeUART()
+    module.init_sensor = lambda: (legacy_tests.IMAGE_WIDTH, legacy_tests.IMAGE_HEIGHT)
+    module.process_uart_input = prime_preview_tracking
+    yolo_call_count = 0
+
+    def fake_yolo_detect(img):
+        nonlocal yolo_call_count
+        assert img is image
+        yolo_call_count += 1
+        return []
+
+    module.yolo_detect = fake_yolo_detect
 
     with pytest.raises(StopLoop):
         module.run()

@@ -1065,7 +1065,7 @@ def build_object_observation_and_candidates():
     image_height = PROTOCOL_IMAGE_HEIGHT
     current_object_candidates = state.current_object_candidates
     if not current_object_candidates:
-        return build_object_observation(0, 0, 0, 0), None, None, None
+        return build_object_observation(0, 0, 0, 0), None, None, current_object_candidates
     candidates = list(current_object_candidates)
     object_id = state.current_object_id()
     if object_id > 0:
@@ -1191,6 +1191,12 @@ def tracking_failure_debug_name(reason):
     if int(reason) == int(TrackFailureReason.POOR_SEPARATION):
         return "SEP"
     return "NONE"
+
+
+def debug_log(tag, text):
+    if not ASSISTANT_DEBUG_DISPLAY_ENABLED:
+        return
+    print("[assistant_v2][%s] %s" % (str(tag), str(text)))
 
 
 def draw_object_tracking_debug(img):
@@ -1919,7 +1925,10 @@ def _prefer_tracked_yolo_candidates(candidates):
 
 
 def should_use_blob_tracking():
-    if state.mode not in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT):
+    if (
+        state.mode not in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT)
+        and not (state.current_sync is None and ASSISTANT_DEBUG_DISPLAY_ENABLED)
+    ):
         return False
     if state.track_task_name is None or state.track_rect is None:
         return False
@@ -1933,7 +1942,10 @@ def should_use_blob_tracking():
 def should_run_yolo_for_current_frame():
     if state.has_pending_event():
         return False
-    if state.mode not in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT):
+    if (
+        state.mode not in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT)
+        and not (state.current_sync is None and ASSISTANT_DEBUG_DISPLAY_ENABLED)
+    ):
         return False
     return not should_use_blob_tracking()
 
@@ -2209,6 +2221,43 @@ def process_task_frame(img):
         if event_frame is not None:
             write_reliable_line(event_frame)
         return
+    if state.current_sync is None and ASSISTANT_DEBUG_DISPLAY_ENABLED:
+        observation, best_blob, task_name, candidates = build_object_observation_and_candidates()
+        debug_log(
+            "preview",
+            "src=%s cand=%d best=%s conf=%d fail=%s" % (
+                tracking_source_debug_name(state.current_detection_source).lower(),
+                len(candidates),
+                task_name if task_name is not None else "none",
+                int(state.track_confidence),
+                tracking_failure_debug_name(state.track_failure_reason),
+            ),
+        )
+        if candidates:
+            target_x, target_y = build_object_target_point(Task.SEARCH)
+            _draw_debug_protocol_point(img, target_x, target_y)
+        if best_blob is not None and state.current_detection_source != "predict":
+            task_name, center_x, center_y, bottom_y, area = _candidate_values_for_blob(
+                candidates,
+                best_blob,
+            )
+            draw_selected_marker(img, best_blob, center_x, center_y)
+            remember_object_tracking(
+                task_name,
+                best_blob,
+                center_x,
+                center_y,
+                bottom_y,
+                area,
+                state.current_detection_source,
+            )
+        elif state.current_detection_source == "yolo":
+            state.clear_track()
+        draw_object_tracking_debug(img)
+        flush = getattr(img, "flush", None)
+        if flush is not None:
+            flush()
+        return
     if state.mode in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT):
         _process_object_frame(img)
     elif state.mode == RunMode.RETURN_LINE:
@@ -2222,6 +2271,7 @@ def run():
     state.uart_device = init_uart()
     init_sensor()
     state.yolo_net = load_yolo_model()
+    debug_log("boot", "debug=%d yolo=%d" % (1 if ASSISTANT_DEBUG_DISPLAY_ENABLED else 0, 1))
     last_frame_ms = default_now_ms()
     while True:
         state.rx_buffer = process_uart_input(state.rx_buffer)
@@ -2237,7 +2287,18 @@ def run():
         state.current_image_width = int(img.width())
         state.current_image_height = int(img.height())
         state.current_detection_source = "miss"
-        if state.mode in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT) and not state.has_pending_event():
+        if state.has_pending_event():
+            state.current_yolo_candidates = ()
+            state.current_object_candidates = ()
+            debug_log("skip", "reason=pending_event")
+        elif state.mode == RunMode.RETURN_LINE:
+            state.current_yolo_candidates = ()
+            state.current_object_candidates = ()
+            debug_log("skip", "reason=return_line")
+        elif (
+            state.mode in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT)
+            or (state.current_sync is None and ASSISTANT_DEBUG_DISPLAY_ENABLED)
+        ):
             need_yolo = should_run_yolo_for_current_frame()
             if not need_yolo:
                 state.current_yolo_candidates = ()
@@ -2252,9 +2313,11 @@ def run():
         else:
             state.current_yolo_candidates = ()
             state.current_object_candidates = ()
-        state.record_frame_source(state.current_detection_source)
-        process_task_frame(img)
-        gc.collect()
+        try:
+            process_task_frame(img)
+        finally:
+            state.record_frame_source(state.current_detection_source)
+            gc.collect()
 
 
 if __name__ == "__main__":
