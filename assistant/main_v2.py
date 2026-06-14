@@ -58,6 +58,16 @@ class Event:
     RETURN_GARAGE_FINISHED = 12
 
 
+# ROI 跟踪失败原因编号分组.
+class TrackFailureReason:
+    NONE = 0
+    NO_CANDIDATE = 1
+    OUT_OF_WINDOW = 2
+    AREA_JUMP = 3
+    EDGE_TOUCH = 4
+    POOR_SEPARATION = 5
+
+
 SEQ_RING_SIZE = 256
 SEQ_HALF_RING = 128
 FRAME_BODY_SIZE = 8
@@ -111,6 +121,11 @@ OBJECT_MIN_AREA = 50.0
 OBJECT_X_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_X_PX
 OBJECT_Y_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_Y_PX
 OBJECT_STABLE_FRAMES = 3
+# 允许在两次 YOLO 之间连续使用 ROI 的最大帧数。
+ROI_TRACKING_MAX_FRAMES = 3
+# ROI 连续失手达到该值后立即回退到 YOLO。
+ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 1
+ASSISTANT_DEBUG_DISPLAY_ENABLED = False
 
 RETURN_LINE_SAMPLE_HALF_WIDTH_PX = 5
 RETURN_LINE_TARGET_Y_PX = 220.0
@@ -514,6 +529,30 @@ class YoloDetectionBlob:
         )
 
 
+class PredictedBlob:
+    def __init__(self, left, top, right, bottom):
+        self._left = float(left)
+        self._top = float(top)
+        self._right = float(right)
+        self._bottom = float(bottom)
+
+    def rect(self):
+        left = int(round(self._left))
+        top = int(round(self._top))
+        right = int(round(self._right))
+        bottom = int(round(self._bottom))
+        return left, top, right - left, bottom - top
+
+    def cx(self):
+        return (self._left + self._right) / 2.0
+
+    def cy(self):
+        return (self._top + self._bottom) / 2.0
+
+    def area(self):
+        return max(0.0, self._right - self._left) * max(0.0, self._bottom - self._top)
+
+
 def blob_max_side_length(blob):
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     return max(float(right - left), float(bottom - top))
@@ -577,6 +616,20 @@ def object_task_name_from_id(object_id):
     return OBJECT_TASKS[index][0]
 
 
+def object_task_id(task_name):
+    for index, task in enumerate(OBJECT_TASKS, 1):
+        if task[0] == task_name:
+            return index
+    return 0
+
+
+def object_thresholds_for_task_name(task_name):
+    for task in OBJECT_TASKS:
+        if task[0] == task_name:
+            return task_thresholds(task[1])
+    return ()
+
+
 def load_yolo_model():
     if state.yolo_net is None:
         state.yolo_net = tf.load(YOLO_MODEL_PATH)
@@ -617,6 +670,8 @@ def yolo_detect(img):
         if right <= left or bottom <= top:
             continue
         blob = YoloDetectionBlob(left, top, right, bottom, label, score)
+        if blob.area() < float(OBJECT_MIN_AREA):
+            continue
         _, _, _, protocol_bottom = normalize_bbox_for_protocol(
             left,
             top,
@@ -760,7 +815,36 @@ def build_object_candidates(img):
     state.current_image_height = int(img.height())
     if state.yolo_net is None:
         load_yolo_model()
-    return yolo_detect(img)
+    if should_use_blob_tracking():
+        candidates = _build_tracked_blob_object_candidates(img)
+        if candidates:
+            state.record_roi_attempt(True)
+            state.current_detection_source = "roi"
+            return candidates
+        state.record_roi_attempt(False)
+        state.track_roi_failure_frames += 1
+        if state.track_roi_failure_frames < int(ROI_TRACKING_FAILURE_TO_YOLO_FRAMES):
+            state.current_detection_source = "predict"
+            state.track_confidence = max(0, int(state.track_confidence) - 20)
+            return _build_predicted_object_candidates()
+        state.record_roi_fallback()
+    state.current_detection_source = "yolo"
+    candidates = yolo_detect(img)
+    if state.track_rect is None:
+        state.track_failure_reason = TrackFailureReason.NONE
+        return candidates
+    tracked_candidates = _prefer_tracked_yolo_candidates(candidates)
+    if tracked_candidates is not None:
+        state.track_failure_reason = TrackFailureReason.NONE
+        return tracked_candidates
+    if state.track_task_name is not None:
+        same_task_candidates = [candidate for candidate in candidates if candidate[0] == state.track_task_name]
+        if same_task_candidates:
+            best = min(same_task_candidates, key=_tracked_candidate_sort_key)
+            state.track_failure_reason = TrackFailureReason.OUT_OF_WINDOW
+            return (_filter_candidate_by_track(best),)
+    state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+    return candidates
 
 
 def _pixel_to_lab(pixel):
@@ -783,6 +867,71 @@ def _pixel_matches_threshold(pixel, threshold):
         and float(threshold[2]) <= float(lab[1]) <= float(threshold[3])
         and float(threshold[4]) <= float(lab[2]) <= float(threshold[5])
     )
+
+
+def _pixel_matches_any_threshold(pixel, thresholds):
+    for threshold in thresholds:
+        if _pixel_matches_threshold(pixel, threshold):
+            return True
+    return False
+
+
+def _sample_roi_positions(start, end, sample_count):
+    start = int(start)
+    end = int(end)
+    count = max(1, int(sample_count))
+    span = max(1, end - start)
+    for index in range(count):
+        yield start + (span * (index * 2 + 1)) // (count * 2)
+
+
+def _sample_threshold_match_ratio(img, rois, thresholds):
+    get_pixel = getattr(img, "get_pixel", None)
+    if get_pixel is None:
+        return None
+    samples = 0
+    matches = 0
+    for left, top, right, bottom in rois:
+        if right <= left or bottom <= top:
+            continue
+        for y in _sample_roi_positions(top, bottom, 3):
+            for x in _sample_roi_positions(left, right, 3):
+                samples += 1
+                if _pixel_matches_any_threshold(get_pixel(int(x), int(y)), thresholds):
+                    matches += 1
+    if samples <= 0:
+        return None
+    return float(matches) / float(samples)
+
+
+def _blob_background_ring_rois(blob):
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    expand_x = max(1, int((right - left) / 2))
+    expand_y = max(1, int((bottom - top) / 2))
+    outer_left = max(0, int(left) - expand_x)
+    outer_top = max(0, int(top) - expand_y)
+    outer_right = min(int(state.current_image_width), int(right) + expand_x)
+    outer_bottom = min(int(state.current_image_height), int(bottom) + expand_y)
+    return (
+        (outer_left, outer_top, outer_right, int(top)),
+        (outer_left, int(bottom), outer_right, outer_bottom),
+        (outer_left, int(top), int(left), int(bottom)),
+        (int(right), int(top), outer_right, int(bottom)),
+    )
+
+
+def _blob_is_separable_from_background(img, task_name, blob):
+    thresholds = object_thresholds_for_task_name(task_name)
+    if not thresholds:
+        return True
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    inner_ratio = _sample_threshold_match_ratio(img, ((left, top, right, bottom),), thresholds)
+    ring_ratio = _sample_threshold_match_ratio(img, _blob_background_ring_rois(blob), thresholds)
+    if inner_ratio is None or ring_ratio is None:
+        return True
+    if inner_ratio <= 0.0:
+        return True
+    return ring_ratio < max(0.5, inner_ratio * 0.8)
 
 
 def _return_line_pixel_matches(img, x, y):
@@ -994,6 +1143,20 @@ def _draw_debug_text(img, x, y, text):
         draw_string(int(x), int(y), str(text))
 
 
+def _draw_debug_rect(img, left, top, right, bottom, color=(0, 255, 255), thickness=1):
+    draw_rectangle = getattr(img, "draw_rectangle", None)
+    if draw_rectangle is None:
+        return
+    width = int(right) - int(left)
+    height = int(bottom) - int(top)
+    if width <= 0 or height <= 0:
+        return
+    try:
+        draw_rectangle((int(left), int(top), width, height), color=color, thickness=thickness)
+    except TypeError:
+        draw_rectangle((int(left), int(top), width, height))
+
+
 def draw_selected_marker(img, blob, pixel_x, pixel_y):
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     width = int(right) - int(left)
@@ -1006,6 +1169,79 @@ def draw_selected_marker(img, blob, pixel_x, pixel_y):
     except TypeError:
         draw_rectangle((int(left), int(top), int(width), int(height)))
     _draw_debug_text(img, int(pixel_x) + 4, int(pixel_y) - 10, "SELECT")
+
+
+def tracking_source_debug_name(source):
+    if source == "yolo":
+        return "YOLO"
+    if source == "roi":
+        return "ROI"
+    if source == "predict":
+        return "PRED"
+    return "MISS"
+
+
+def tracking_failure_debug_name(reason):
+    if int(reason) == int(TrackFailureReason.NO_CANDIDATE):
+        return "NO_CAND"
+    if int(reason) == int(TrackFailureReason.OUT_OF_WINDOW):
+        return "OUT_WIN"
+    if int(reason) == int(TrackFailureReason.AREA_JUMP):
+        return "AREA"
+    if int(reason) == int(TrackFailureReason.EDGE_TOUCH):
+        return "EDGE"
+    if int(reason) == int(TrackFailureReason.POOR_SEPARATION):
+        return "SEP"
+    return "NONE"
+
+
+def draw_object_tracking_debug(img):
+    predicted_roi = state.track_predicted_roi
+    if predicted_roi is not None:
+        _draw_debug_rect(img, predicted_roi[0], predicted_roi[1], predicted_roi[2], predicted_roi[3])
+    if state.track_predicted_center_x is not None and state.track_predicted_bottom_y is not None:
+        _draw_debug_protocol_point(img, state.track_predicted_center_x, state.track_predicted_bottom_y)
+    _draw_debug_text(
+        img,
+        2,
+        2,
+        "src=%s conf=%d gap=%d" % (
+            tracking_source_debug_name(state.current_detection_source),
+            int(state.track_confidence),
+            int(state.track_frames_since_yolo),
+        ),
+    )
+    _draw_debug_text(
+        img,
+        2,
+        14,
+        "fail=%s rf=%d id=%d" % (
+            tracking_failure_debug_name(state.track_failure_reason),
+            int(state.track_roi_failure_frames),
+            int(state.track_object_id),
+        ),
+    )
+    _draw_debug_text(
+        img,
+        2,
+        26,
+        "fps t=%d y=%d r=%d p=%d fb=%d" % (
+            int(state.last_second_total_frames),
+            int(state.last_second_yolo_frames),
+            int(state.last_second_roi_frames),
+            int(state.last_second_predict_frames),
+            int(state.last_second_roi_fallbacks),
+        ),
+    )
+    _draw_debug_text(
+        img,
+        2,
+        38,
+        "roi ok=%d/%d" % (
+            int(state.last_second_roi_success_frames),
+            int(state.last_second_roi_attempt_frames),
+        ),
+    )
 
 
 def build_object_observation(valid, center_x, bottom_y, area):
@@ -1164,6 +1400,97 @@ class RuntimeState:
         self.current_image_width = PROTOCOL_IMAGE_WIDTH
         self.current_image_height = PROTOCOL_IMAGE_HEIGHT
         self.current_frame_interval_ms = reference_frame_interval_ms()
+        self.current_detection_source = "miss"
+        self.clear_track()
+
+    def clear_track(self):
+        self.track_task_name = None
+        self.track_object_id = 0
+        self.track_center_x = None
+        self.track_center_y = None
+        self.track_bottom_y = None
+        self.track_area = None
+        self.track_rect = None
+        self.track_velocity_x = 0.0
+        self.track_velocity_bottom_y = 0.0
+        self.track_source = None
+        self.track_roi_success_frames = 0
+        self.track_roi_failure_frames = 0
+        self.track_frames_since_yolo = 0
+        self.track_confidence = 0
+        self.track_failure_reason = TrackFailureReason.NONE
+        self.track_predicted_center_x = None
+        self.track_predicted_bottom_y = None
+        self.track_predicted_roi = None
+        self.current_second_total_frames = 0
+        self.current_second_yolo_frames = 0
+        self.current_second_roi_frames = 0
+        self.current_second_predict_frames = 0
+        self.current_second_miss_frames = 0
+        self.current_second_roi_fallbacks = 0
+        self.current_second_roi_attempt_frames = 0
+        self.current_second_roi_success_frames = 0
+        self.last_second_total_frames = 0
+        self.last_second_yolo_frames = 0
+        self.last_second_roi_frames = 0
+        self.last_second_predict_frames = 0
+        self.last_second_miss_frames = 0
+        self.last_second_roi_fallbacks = 0
+        self.last_second_roi_attempt_frames = 0
+        self.last_second_roi_success_frames = 0
+        self.frame_stats_window_start_ms = None
+
+    def _roll_frame_stats(self, now_ms):
+        if self.frame_stats_window_start_ms is None:
+            self.frame_stats_window_start_ms = int(now_ms)
+            return
+        if int(now_ms) - int(self.frame_stats_window_start_ms) < 1000:
+            return
+        self.last_second_total_frames = int(self.current_second_total_frames)
+        self.last_second_yolo_frames = int(self.current_second_yolo_frames)
+        self.last_second_roi_frames = int(self.current_second_roi_frames)
+        self.last_second_predict_frames = int(self.current_second_predict_frames)
+        self.last_second_miss_frames = int(self.current_second_miss_frames)
+        self.last_second_roi_fallbacks = int(self.current_second_roi_fallbacks)
+        self.last_second_roi_attempt_frames = int(self.current_second_roi_attempt_frames)
+        self.last_second_roi_success_frames = int(self.current_second_roi_success_frames)
+        self.current_second_total_frames = 0
+        self.current_second_yolo_frames = 0
+        self.current_second_roi_frames = 0
+        self.current_second_predict_frames = 0
+        self.current_second_miss_frames = 0
+        self.current_second_roi_fallbacks = 0
+        self.current_second_roi_attempt_frames = 0
+        self.current_second_roi_success_frames = 0
+        self.frame_stats_window_start_ms = int(now_ms)
+
+    def record_frame_source(self, source, now_ms=None):
+        if now_ms is None:
+            now_ms = default_now_ms()
+        self._roll_frame_stats(now_ms)
+        self.current_second_total_frames += 1
+        if source == "yolo":
+            self.current_second_yolo_frames += 1
+        elif source == "roi":
+            self.current_second_roi_frames += 1
+        elif source == "predict":
+            self.current_second_predict_frames += 1
+        else:
+            self.current_second_miss_frames += 1
+
+    def record_roi_fallback(self, now_ms=None):
+        if now_ms is None:
+            now_ms = default_now_ms()
+        self._roll_frame_stats(now_ms)
+        self.current_second_roi_fallbacks += 1
+
+    def record_roi_attempt(self, success, now_ms=None):
+        if now_ms is None:
+            now_ms = default_now_ms()
+        self._roll_frame_stats(now_ms)
+        self.current_second_roi_attempt_frames += 1
+        if success:
+            self.current_second_roi_success_frames += 1
 
     def handle_control_line(self, line):
         sync_packet = parse_task_sync_packet(line)
@@ -1187,6 +1514,7 @@ class RuntimeState:
             self.mode = self._mode_from_sync(self.current_sync)
             self._stable_count = 0
             self._last_return_line_y = None
+            self.clear_track()
         return format_ack_frame(reliable_seq)
 
     def _should_apply_sync(self, reliable_seq):
@@ -1314,6 +1642,7 @@ class RuntimeState:
         }
         self._pending_event_last_sent_ms = None
         self._completed_event_sync_seq = int(reliable_seq)
+        self.clear_track()
 
     def next_event_frame(self):
         if self._pending_event is None:
@@ -1367,8 +1696,282 @@ def accept_observation(observation=None, line_y=None):
         state.accept_return_line_observation(line_y)
         return
     if observation is None:
-        observation = build_object_observation(0, 0, 0, 0, 0, 0)
+        observation = build_object_observation(0, 0, 0, 0)
+    if state.current_detection_source == "predict":
+        state.accept_object_observation(build_object_observation(0, 0, 0, 0))
+        return
     state.accept_object_observation(observation)
+
+
+def blob_center_y(blob):
+    cy_fn = getattr(blob, "cy", None)
+    if cy_fn is not None:
+        return float(cy_fn())
+    _left, top, _right, bottom = blob_rect_to_bbox(blob.rect())
+    return (float(top) + float(bottom)) / 2.0
+
+
+def _tracked_rect():
+    rect = state.track_rect
+    if rect is None:
+        return None
+    left, top, right, bottom = rect
+    return float(left), float(top), float(right), float(bottom)
+
+
+def _tracked_target_window():
+    rect = _tracked_rect()
+    if rect is None:
+        return None
+    left, top, right, bottom = rect
+    width = max(1.0, float(right) - float(left))
+    height = max(1.0, float(bottom) - float(top))
+    predicted_center_x = float(state.track_center_x) + float(state.track_velocity_x)
+    predicted_bottom_y = float(state.track_bottom_y) + float(state.track_velocity_bottom_y)
+    tolerance_x = max(float(OBJECT_X_TOLERANCE_PX) * 2.0, width)
+    tolerance_y = max(float(OBJECT_Y_TOLERANCE_PX) * 2.0, height)
+    roi_left = predicted_center_x - width * 1.5
+    roi_right = predicted_center_x + width * 1.5
+    roi_top = float(state.current_image_height) - predicted_bottom_y - height * 1.5
+    roi_bottom = roi_top + height * 3.0
+    state.track_predicted_center_x = predicted_center_x
+    state.track_predicted_bottom_y = predicted_bottom_y
+    state.track_predicted_roi = (roi_left, roi_top, roi_right, roi_bottom)
+    return (
+        predicted_center_x,
+        predicted_bottom_y,
+        tolerance_x,
+        tolerance_y,
+        roi_left,
+        roi_top,
+        roi_right,
+        roi_bottom,
+    )
+
+
+def _candidate_tracking_failure_reason(candidate):
+    window = _tracked_target_window()
+    if window is None:
+        return TrackFailureReason.OUT_OF_WINDOW
+    (
+        predicted_center_x,
+        predicted_bottom_y,
+        tolerance_x,
+        tolerance_y,
+        roi_left,
+        roi_top,
+        roi_right,
+        roi_bottom,
+    ) = window
+    _task_name, center_x, _center_y, bottom_y, area, blob = candidate
+    if abs(float(center_x) - predicted_center_x) > tolerance_x:
+        return TrackFailureReason.OUT_OF_WINDOW
+    if abs(float(bottom_y) - predicted_bottom_y) > tolerance_y:
+        return TrackFailureReason.OUT_OF_WINDOW
+    if float(state.track_area) > 0.0:
+        area_ratio = float(area) / float(state.track_area)
+        if area_ratio < 0.5 or area_ratio > 2.0:
+            return TrackFailureReason.AREA_JUMP
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    if (
+        float(left) <= roi_left
+        or float(right) >= roi_right
+        or float(top) <= roi_top
+        or float(bottom) >= roi_bottom
+    ):
+        return TrackFailureReason.EDGE_TOUCH
+    return TrackFailureReason.NONE
+
+
+def _candidate_hits_roi_window(candidate):
+    return _candidate_tracking_failure_reason(candidate) == TrackFailureReason.NONE
+
+
+def _tracked_candidate_sort_key(candidate):
+    predicted_center_x, predicted_bottom_y, _, _, _, _, _, _ = _tracked_target_window()
+    _task_name, center_x, _center_y, bottom_y, area, _blob = candidate
+    return (
+        abs(float(center_x) - predicted_center_x) + abs(float(bottom_y) - predicted_bottom_y),
+        abs(float(area) - float(state.track_area)),
+    )
+
+
+def _clamp_tracking_value(value, previous_value, max_delta):
+    value = float(value)
+    previous_value = float(previous_value)
+    max_delta = abs(float(max_delta))
+    if value > previous_value + max_delta:
+        return previous_value + max_delta
+    if value < previous_value - max_delta:
+        return previous_value - max_delta
+    return value
+
+
+def _filter_candidate_by_track(candidate):
+    if state.track_rect is None:
+        return candidate
+    task_name, center_x, _center_y, bottom_y, area, blob = candidate
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    width = max(1.0, float(right) - float(left))
+    height = max(1.0, float(bottom) - float(top))
+    filtered_center_x = _clamp_tracking_value(
+        center_x,
+        state.track_center_x,
+        max(float(OBJECT_X_TOLERANCE_PX) * 2.0, width),
+    )
+    filtered_bottom_y = _clamp_tracking_value(
+        bottom_y,
+        state.track_bottom_y,
+        max(float(OBJECT_Y_TOLERANCE_PX) * 2.0, height),
+    )
+    filtered_area = float(area)
+    if state.track_area is not None and float(state.track_area) > 0.0:
+        min_area = float(state.track_area) * 0.5
+        max_area = float(state.track_area) * 2.0
+        if filtered_area < min_area:
+            filtered_area = min_area
+        if filtered_area > max_area:
+            filtered_area = max_area
+    filtered_top = float(state.current_image_height) - filtered_bottom_y
+    filtered_left = filtered_center_x - width / 2.0
+    filtered_blob = PredictedBlob(
+        filtered_left,
+        filtered_top,
+        filtered_left + width,
+        filtered_top + height,
+    )
+    return (
+        task_name,
+        filtered_center_x,
+        filtered_top + height / 2.0,
+        filtered_bottom_y,
+        filtered_area,
+        filtered_blob,
+    )
+
+
+def _build_tracked_blob_object_candidates(img):
+    candidates = _build_blob_object_candidates(img)
+    if state.track_task_name is not None:
+        candidates = [candidate for candidate in candidates if candidate[0] == state.track_task_name]
+    if not candidates:
+        state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+        return ()
+    filtered_candidates = []
+    failure_reason = TrackFailureReason.NO_CANDIDATE
+    for candidate in candidates:
+        reason = _candidate_tracking_failure_reason(candidate)
+        if reason == TrackFailureReason.NONE:
+            if not _blob_is_separable_from_background(img, candidate[0], candidate[5]):
+                if failure_reason == TrackFailureReason.NO_CANDIDATE:
+                    failure_reason = TrackFailureReason.POOR_SEPARATION
+                continue
+            filtered_candidates.append(candidate)
+            continue
+        if failure_reason == TrackFailureReason.NO_CANDIDATE:
+            failure_reason = reason
+    candidates = filtered_candidates
+    if not candidates:
+        state.track_failure_reason = failure_reason
+        return ()
+    best = min(candidates, key=_tracked_candidate_sort_key)
+    state.track_failure_reason = TrackFailureReason.NONE
+    return (_filter_candidate_by_track(best),)
+
+
+def _build_predicted_object_candidates():
+    rect = _tracked_rect()
+    if rect is None or state.track_task_name is None:
+        return ()
+    left, top, right, bottom = rect
+    width = float(right) - float(left)
+    height = float(bottom) - float(top)
+    predicted_center_x = float(state.track_center_x) + float(state.track_velocity_x)
+    predicted_center_y = float(state.track_center_y) + float(state.track_velocity_bottom_y)
+    predicted_bottom_y = float(state.track_bottom_y) + float(state.track_velocity_bottom_y)
+    predicted_left = predicted_center_x - width / 2.0
+    predicted_top = predicted_center_y - height / 2.0
+    state.track_frames_since_yolo += 1
+    return (
+        (
+            state.track_task_name,
+            predicted_center_x,
+            predicted_center_y,
+            predicted_bottom_y,
+            float(state.track_area),
+            PredictedBlob(
+                predicted_left,
+                predicted_top,
+                predicted_left + width,
+                predicted_top + height,
+            ),
+        ),
+    )
+
+
+def _prefer_tracked_yolo_candidates(candidates):
+    if state.track_task_name is not None:
+        candidates = [candidate for candidate in candidates if candidate[0] == state.track_task_name]
+    tracked_candidates = [candidate for candidate in candidates if _candidate_hits_roi_window(candidate)]
+    if not tracked_candidates:
+        return None
+    best = min(tracked_candidates, key=_tracked_candidate_sort_key)
+    return (_filter_candidate_by_track(best),)
+
+
+def should_use_blob_tracking():
+    if state.mode not in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT):
+        return False
+    if state.track_task_name is None or state.track_rect is None:
+        return False
+    if state.track_frames_since_yolo >= int(ROI_TRACKING_MAX_FRAMES):
+        return False
+    if state.track_roi_failure_frames >= int(ROI_TRACKING_FAILURE_TO_YOLO_FRAMES):
+        return False
+    return True
+
+
+def remember_object_tracking(task_name, blob, center_x, center_y, bottom_y, area, source):
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    previous_center_x = state.track_center_x
+    previous_bottom_y = state.track_bottom_y
+    state.track_task_name = task_name
+    state.track_object_id = object_task_id(task_name)
+    state.track_center_x = float(center_x)
+    state.track_center_y = float(center_y)
+    state.track_bottom_y = float(bottom_y)
+    state.track_area = float(area)
+    state.track_rect = (float(left), float(top), float(right), float(bottom))
+    if previous_center_x is None:
+        state.track_velocity_x = 0.0
+    else:
+        state.track_velocity_x = float(center_x) - float(previous_center_x)
+    if previous_bottom_y is None:
+        state.track_velocity_bottom_y = 0.0
+    else:
+        state.track_velocity_bottom_y = float(bottom_y) - float(previous_bottom_y)
+    state.track_source = str(source)
+    if source == "yolo":
+        state.track_frames_since_yolo = 0
+    else:
+        state.track_frames_since_yolo += 1
+    state.track_roi_failure_frames = 0
+    if source == "roi":
+        state.track_roi_success_frames += 1
+    else:
+        state.track_roi_success_frames = 0
+    if source == "yolo":
+        state.track_confidence = 80
+    elif source == "roi":
+        state.track_confidence = min(100, max(int(state.track_confidence), 60) + 10)
+    state.track_failure_reason = TrackFailureReason.NONE
+
+
+def _candidate_values_for_blob(candidates, best_blob):
+    for task_name, center_x, center_y, bottom_y, area, blob in candidates:
+        if blob is best_blob:
+            return task_name, center_x, center_y, bottom_y, area
+    return None, best_blob.cx(), blob_center_y(best_blob), 0.0, blob_area(best_blob)
 
 
 def _write_all(frame_bytes):
@@ -1492,17 +2095,30 @@ def _process_follow_frame(img):
 
 
 def _process_object_frame(img):
-    image_width = state.current_image_width
-    image_height = state.current_image_height
-    if not state.current_yolo_candidates:
+    if not state.current_yolo_candidates and state.current_detection_source == "miss":
         state.current_yolo_candidates = tuple(build_object_candidates(img))
     observation, best_blob, _task_name, candidates = build_object_observation_and_candidates()
     if candidates:
         config_id = state.current_object_config_id()
         target_x, target_y = build_object_target_point(config_id)
         _draw_debug_protocol_point(img, target_x, target_y)
-    if best_blob is not None:
-        draw_selected_marker(img, best_blob, best_blob.cx(), best_blob.cy())
+    if best_blob is not None and state.current_detection_source != "predict":
+        task_name, center_x, center_y, bottom_y, area = _candidate_values_for_blob(
+            candidates,
+            best_blob,
+        )
+        draw_selected_marker(img, best_blob, center_x, center_y)
+        remember_object_tracking(
+            task_name,
+            best_blob,
+            center_x,
+            center_y,
+            bottom_y,
+            area,
+            state.current_detection_source,
+        )
+    elif state.current_detection_source == "yolo":
+        state.clear_track()
     if state.mode == RunMode.ORBIT_OBJECT:
         vx, vy = build_orbit_correction_velocity_from_observation(observation)
     else:
@@ -1510,6 +2126,11 @@ def _process_object_frame(img):
     frame_bytes = format_search_velocity_frame(vx, vy)
     write_data_line(frame_bytes)
     accept_observation(observation)
+    if ASSISTANT_DEBUG_DISPLAY_ENABLED:
+        draw_object_tracking_debug(img)
+        flush = getattr(img, "flush", None)
+        if flush is not None:
+            flush()
 
 
 def _process_return_line_frame(img):
@@ -1610,7 +2231,12 @@ def run():
         state.current_image = img
         state.current_image_width = int(img.width())
         state.current_image_height = int(img.height())
-        state.current_yolo_candidates = tuple(yolo_detect(img))
+        state.current_detection_source = "miss"
+        if state.mode in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT) and not state.has_pending_event():
+            state.current_yolo_candidates = tuple(build_object_candidates(img))
+        else:
+            state.current_yolo_candidates = ()
+        state.record_frame_source(state.current_detection_source)
         process_task_frame(img)
         gc.collect()
 
