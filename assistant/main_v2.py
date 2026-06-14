@@ -809,12 +809,10 @@ def _build_blob_object_candidates(img):
     return candidates
 
 
-def build_object_candidates(img):
+def build_object_candidates(img, yolo_candidates):
     state.current_image = img
     state.current_image_width = int(img.width())
     state.current_image_height = int(img.height())
-    if state.yolo_net is None:
-        load_yolo_model()
     if should_use_blob_tracking():
         candidates = _build_tracked_blob_object_candidates(img)
         if candidates:
@@ -829,7 +827,7 @@ def build_object_candidates(img):
             return _build_predicted_object_candidates()
         state.record_roi_fallback()
     state.current_detection_source = "yolo"
-    candidates = yolo_detect(img)
+    candidates = tuple(yolo_candidates)
     if state.track_rect is None:
         state.track_failure_reason = TrackFailureReason.NONE
         return candidates
@@ -1065,10 +1063,10 @@ def should_filter_candidates_by_target_window(vision_state):
 def build_object_observation_and_candidates():
     image_width = PROTOCOL_IMAGE_WIDTH
     image_height = PROTOCOL_IMAGE_HEIGHT
-    current_yolo_candidates = state.current_yolo_candidates
-    if not current_yolo_candidates:
+    current_object_candidates = state.current_object_candidates
+    if not current_object_candidates:
         return build_object_observation(0, 0, 0, 0), None, None, None
-    candidates = list(current_yolo_candidates)
+    candidates = list(current_object_candidates)
     object_id = state.current_object_id()
     if object_id > 0:
         selected_task_name = object_task_name_from_id(object_id)
@@ -1396,6 +1394,7 @@ class RuntimeState:
         self.uart_device = None
         self.rx_buffer = b""
         self.current_yolo_candidates = ()
+        self.current_object_candidates = ()
         self.current_image = None
         self.current_image_width = PROTOCOL_IMAGE_WIDTH
         self.current_image_height = PROTOCOL_IMAGE_HEIGHT
@@ -1931,6 +1930,14 @@ def should_use_blob_tracking():
     return True
 
 
+def should_run_yolo_for_current_frame():
+    if state.has_pending_event():
+        return False
+    if state.mode not in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT):
+        return False
+    return not should_use_blob_tracking()
+
+
 def remember_object_tracking(task_name, blob, center_x, center_y, bottom_y, area, source):
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     previous_center_x = state.track_center_x
@@ -2095,8 +2102,6 @@ def _process_follow_frame(img):
 
 
 def _process_object_frame(img):
-    if not state.current_yolo_candidates and state.current_detection_source == "miss":
-        state.current_yolo_candidates = tuple(build_object_candidates(img))
     observation, best_blob, _task_name, candidates = build_object_observation_and_candidates()
     if candidates:
         config_id = state.current_object_config_id()
@@ -2233,9 +2238,20 @@ def run():
         state.current_image_height = int(img.height())
         state.current_detection_source = "miss"
         if state.mode in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT) and not state.has_pending_event():
-            state.current_yolo_candidates = tuple(build_object_candidates(img))
+            need_yolo = should_run_yolo_for_current_frame()
+            if not need_yolo:
+                state.current_yolo_candidates = ()
+                state.current_object_candidates = tuple(build_object_candidates(img, ()))
+                need_yolo = state.current_detection_source == "yolo"
+            if need_yolo:
+                raw_yolo_candidates = tuple(yolo_detect(img))
+                if raw_yolo_candidates:
+                    state.current_detection_source = "yolo"
+                state.current_yolo_candidates = raw_yolo_candidates
+                state.current_object_candidates = tuple(build_object_candidates(img, raw_yolo_candidates))
         else:
             state.current_yolo_candidates = ()
+            state.current_object_candidates = ()
         state.record_frame_source(state.current_detection_source)
         process_task_frame(img)
         gc.collect()

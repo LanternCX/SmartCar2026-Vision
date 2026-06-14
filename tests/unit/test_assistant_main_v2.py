@@ -68,7 +68,9 @@ def test_assistant_main_v2_object_candidates_use_yolo_by_default() -> None:
     module.state.current_image_width = img.width()
     module.state.current_image_height = img.height()
 
-    candidates = module.build_object_candidates(img)
+    module.load_yolo_model()
+    raw_yolo_candidates = module.yolo_detect(img)
+    candidates = module.build_object_candidates(img, raw_yolo_candidates)
 
     assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
     assert module.tf.detect_calls == [("fake-yolo-net", "detect-image")]
@@ -129,6 +131,7 @@ def test_assistant_main_v2_exposes_master_style_runtime_api() -> None:
     assert callable(module.process_task_frame)
     assert callable(module.write_data_line)
     assert callable(module.write_reliable_line)
+    assert hasattr(module.state, "current_object_candidates")
     assert tuple(inspect.signature(module.process_task_frame).parameters) == ("img",)
     assert tuple(inspect.signature(module.yolo_detect).parameters) == ("img",)
     assert tuple(inspect.signature(module.normalize_bbox_for_protocol).parameters) == (
@@ -147,7 +150,7 @@ def test_assistant_main_v2_exposes_master_style_runtime_api() -> None:
         "img",
         "previous_line_y",
     )
-    assert tuple(inspect.signature(module.build_object_candidates).parameters) == ("img",)
+    assert tuple(inspect.signature(module.build_object_candidates).parameters) == ("img", "yolo_candidates")
     assert tuple(inspect.signature(module._return_line_pixel_matches).parameters) == ("img", "x", "y")
     assert tuple(inspect.signature(module._return_line_has_horizontal_connected_at).parameters) == (
         "img",
@@ -198,12 +201,12 @@ def test_assistant_main_v2_exposes_master_style_runtime_api() -> None:
 
 
 def test_assistant_main_v2_build_object_candidates_matches_master_style_signature() -> None:
-    """辅车 main_v2 的找物体候选入口应和主车一样只接受图像参数."""
+    """辅车 main_v2 的找物体候选入口应显式接收模型候选."""
 
     module = load_assistant_v2()
 
     with pytest.raises(TypeError):
-        module.build_object_candidates(object(), "fake-yolo-net")
+        module.build_object_candidates(object())
 
 
 def test_assistant_main_v2_process_uart_input_matches_master_style_signature() -> None:
@@ -447,7 +450,7 @@ def test_assistant_main_v2_build_object_candidates_prefers_blob_tracking_between
     )
     img = FakeImage()
 
-    candidates = module.build_object_candidates(img)
+    candidates = module.build_object_candidates(img, ())
 
     assert len(candidates) == 1
     assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 400.0)
@@ -489,7 +492,7 @@ def test_assistant_main_v2_build_object_candidates_falls_back_to_yolo_after_roi_
     module.yolo_detect = lambda img: [("red", 160.0, 30.0, 220.0, 400.0, yolo_blob)]
     img = FakeImage()
 
-    candidates = module.build_object_candidates(img)
+    candidates = module.build_object_candidates(img, [("red", 160.0, 30.0, 220.0, 400.0, yolo_blob)])
 
     assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 400.0)
     assert candidates[0][5].rect() == (150, 20, 20, 20)
@@ -527,7 +530,7 @@ def test_assistant_main_v2_build_object_candidates_keeps_predicted_target_before
     )
     img = FakeImage()
 
-    candidates = module.build_object_candidates(img)
+    candidates = module.build_object_candidates(img, ())
 
     assert module.state.current_detection_source == "predict"
     assert module.state.track_roi_failure_frames == 1
@@ -578,7 +581,8 @@ def test_assistant_main_v2_predict_frame_does_not_create_event() -> None:
             _ = (args, kwargs)
 
     module.state.current_detection_source = "predict"
-    module.state.current_yolo_candidates = (
+    module.state.current_yolo_candidates = ()
+    module.state.current_object_candidates = (
         ("red", 160.0, 30.0, 220.0, 400.0, FakeBlob()),
     )
     module.state.uart_device = legacy_tests.FakeUART()
@@ -590,6 +594,131 @@ def test_assistant_main_v2_predict_frame_does_not_create_event() -> None:
     module.process_task_frame(img)
 
     assert module.state.has_pending_event() is False
+
+
+def test_assistant_main_v2_build_object_observation_and_candidates_uses_current_object_candidates() -> None:
+    module = load_assistant_v2()
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
+        )
+    )
+    target_x, target_y = assistant_v2_target_point(module)
+    blob = module.YoloDetectionBlob(
+        target_x - 10.0,
+        legacy_tests.IMAGE_HEIGHT - target_y,
+        target_x + 10.0,
+        legacy_tests.IMAGE_HEIGHT - target_y + 20.0,
+        1,
+        0.95,
+    )
+    module.state.current_yolo_candidates = ()
+    module.state.current_object_candidates = (("red", target_x, 30.0, target_y, 400.0, blob),)
+
+    observation, best_blob, task_name, candidates = module.build_object_observation_and_candidates()
+
+    assert observation == (0.0, 0.0, 400.0)
+    assert best_blob is blob
+    assert task_name == "red"
+    assert candidates == [("red", target_x, 30.0, target_y, 400.0, blob)]
+
+
+def test_assistant_main_v2_run_skips_yolo_when_blob_tracking_is_active() -> None:
+    module = load_assistant_v2()
+    module.ROI_TRACKING_MAX_FRAMES = 3
+
+    class StopLoop(Exception):
+        pass
+
+    class FakeBlob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def cy(self):
+            return 30.0
+
+        def area(self):
+            return 400.0
+
+    class SnapshotImage:
+        def __init__(self):
+            self.lens_corr_called = False
+
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def lens_corr(self, strength, zoom):
+            _ = strength, zoom
+            self.lens_corr_called = True
+            return self
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=0):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
+            return [FakeBlob()]
+
+        def draw_cross(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_rectangle(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_string(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+    image = SnapshotImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    def prime_object_tracking(rx_buffer):
+        module.state.current_sync = {
+            "reliable_seq": 12,
+            "state": module.State.APPROACH_OBJECT,
+            "target": module.Target.OBJECT,
+            "arg": legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
+        }
+        module.state.mode = module.RunMode.APPROACH_OBJECT
+        _seed_assistant_short_track(module)
+        return rx_buffer
+
+    module.sensor = Sensor()
+    module.init_uart = lambda: legacy_tests.FakeUART()
+    module.init_sensor = lambda: (legacy_tests.IMAGE_WIDTH, legacy_tests.IMAGE_HEIGHT)
+    module.process_uart_input = prime_object_tracking
+    yolo_call_count = 0
+
+    def fake_yolo_detect(img):
+        nonlocal yolo_call_count
+        assert img is image
+        yolo_call_count += 1
+        return []
+
+    def stop_after_write(frame_bytes):
+        _ = frame_bytes
+        raise StopLoop()
+
+    module.yolo_detect = fake_yolo_detect
+    module.write_data_line = stop_after_write
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+    assert tuple(module.state.current_yolo_candidates) == ()
+    assert tuple(module.state.current_object_candidates) == (
+        ("red", 160.0, 30.0, 220.0, 400.0, module.state.current_object_candidates[0][5]),
+    )
+    assert module.state.current_detection_source == "roi"
+    assert yolo_call_count == 0
 
 
 def test_assistant_main_v2_yolo_relocation_prefers_candidate_near_tracked_target() -> None:
@@ -627,13 +756,14 @@ def test_assistant_main_v2_yolo_relocation_prefers_candidate_near_tracked_target
         def rect(self):
             return self._rect
 
-    module.yolo_detect = lambda img: [
-        ("red", 160.0, 30.0, 220.0, 400.0, FakeBlob(150, 20, 20, 20)),
-        ("red", 100.0, 30.0, 220.0, 400.0, FakeBlob(90, 20, 20, 20)),
-    ]
     img = FakeImage()
-
-    candidates = module.build_object_candidates(img)
+    candidates = module.build_object_candidates(
+        img,
+        [
+            ("red", 160.0, 30.0, 220.0, 400.0, FakeBlob(150, 20, 20, 20)),
+            ("red", 100.0, 30.0, 220.0, 400.0, FakeBlob(90, 20, 20, 20)),
+        ],
+    )
 
     assert candidates[0][:5] == ("red", 100.0, 30.0, 220.0, 400.0)
 
@@ -671,12 +801,8 @@ def test_assistant_main_v2_yolo_relocation_limits_large_position_jump() -> None:
         def rect(self):
             return (220, 20, 20, 20)
 
-    module.yolo_detect = lambda img: [
-        ("red", 230.0, 30.0, 220.0, 400.0, FakeBlob()),
-    ]
     img = FakeImage()
-
-    candidates = module.build_object_candidates(img)
+    candidates = module.build_object_candidates(img, [("red", 230.0, 30.0, 220.0, 400.0, FakeBlob())])
 
     assert candidates[0][:5] == ("red", 130.0, 30.0, 220.0, 400.0)
 
@@ -712,12 +838,8 @@ def test_assistant_main_v2_yolo_relocation_limits_large_area_jump() -> None:
         def rect(self):
             return (140, 10, 40, 40)
 
-    module.yolo_detect = lambda img: [
-        ("red", 160.0, 30.0, 220.0, 1600.0, FakeBlob()),
-    ]
     img = FakeImage()
-
-    candidates = module.build_object_candidates(img)
+    candidates = module.build_object_candidates(img, [("red", 160.0, 30.0, 220.0, 1600.0, FakeBlob())])
 
     assert candidates[0][:5] == ("red", 160.0, 40.0, 220.0, 800.0)
 
@@ -805,7 +927,7 @@ def test_assistant_main_v2_rejects_blob_candidate_outside_tracking_window() -> N
     )
     img = FakeImage()
 
-    candidates = module.build_object_candidates(img)
+    candidates = module.build_object_candidates(img, ())
 
     assert module.state.current_detection_source == "predict"
     assert module.state.track_roi_failure_frames == 1
@@ -858,7 +980,7 @@ def test_assistant_main_v2_rejects_blob_candidate_with_large_area_jump() -> None
     )
     img = FakeImage()
 
-    candidates = module.build_object_candidates(img)
+    candidates = module.build_object_candidates(img, ())
 
     assert module.state.current_detection_source == "predict"
     assert module.state.track_roi_failure_frames == 1
@@ -916,7 +1038,7 @@ def test_assistant_main_v2_rejects_blob_candidate_with_poor_separation() -> None
     )
     img = FakeImage()
 
-    candidates = module.build_object_candidates(img)
+    candidates = module.build_object_candidates(img, ())
 
     assert module.state.current_detection_source == "predict"
     assert module.state.track_failure_reason == module.TrackFailureReason.POOR_SEPARATION
@@ -970,6 +1092,7 @@ def test_assistant_main_v2_process_task_frame_uses_cached_yolo_candidates() -> N
     state.current_yolo_candidates = (
         ("red", target_x, legacy_tests.IMAGE_HEIGHT - target_y + 10, target_y, 300.0, FakeBlob()),
     )
+    state.current_object_candidates = tuple(state.current_yolo_candidates)
 
     def fail_build_object_candidates(current_img):
         raise AssertionError("process_task_frame 不应再次自己做候选检测")
@@ -1104,6 +1227,7 @@ def test_assistant_main_v2_process_task_frame_uses_global_object_pipeline() -> N
     module.state.current_yolo_candidates = (
         ("red", target_x, legacy_tests.IMAGE_HEIGHT - target_y + 10, target_y, 300.0, FakeBlob()),
     )
+    module.state.current_object_candidates = tuple(module.state.current_yolo_candidates)
 
     img = FakeImage()
     module.state.current_image = img
@@ -1162,6 +1286,7 @@ def test_assistant_main_v2_process_task_frame_calls_master_style_velocity_wrappe
     module.state.current_yolo_candidates = (
         ("red", target_x, legacy_tests.IMAGE_HEIGHT - target_y + 10, target_y, 300.0, FakeBlob()),
     )
+    module.state.current_object_candidates = tuple(module.state.current_yolo_candidates)
     call_log = []
 
     def fake_build_search_velocity_from_observation(observation):
@@ -1247,6 +1372,7 @@ def test_assistant_main_v2_debug_display_draws_tracking_state() -> None:
     module.state.current_yolo_candidates = (
         ("red", 160.0, 30.0, 220.0, 400.0, FakeBlob()),
     )
+    module.state.current_object_candidates = tuple(module.state.current_yolo_candidates)
     module.state.uart_device = legacy_tests.FakeUART()
 
     def fake_build_search_velocity_from_observation(observation):
