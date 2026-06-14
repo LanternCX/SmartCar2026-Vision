@@ -34,7 +34,7 @@ def set_current_image(module, img):
     module.state.current_image_height = img.height()
 
 
-def test_master_main_v2_default_configuration_reports_target_found_after_single_observation() -> None:
+def test_master_main_v2_default_configuration_reports_target_found_after_configured_observations() -> None:
     module = load_role_entry_module(
         "master",
         "main_v2.py",
@@ -45,6 +45,10 @@ def test_master_main_v2_default_configuration_reports_target_found_after_single_
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     img = FakeImage()
     set_current_image(module, img)
+    for _ in range(int(module.OBJECT_STABLE_FRAMES) - 1):
+        module.accept_observation(build_search_observation(module, 180.0), img)
+        assert module.next_event_frame() is None
+
     module.accept_observation(build_search_observation(module, 180.0), img)
 
     assert latest_event(type("U", (), {"writes": [module.next_event_frame()]})()) == {

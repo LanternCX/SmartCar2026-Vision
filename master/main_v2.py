@@ -87,9 +87,9 @@ YOLO_MIN_SCORE = 0.50
 # YOLO 标签编号到任务名的稳定映射.
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
 # 调试模式打开后在屏幕上显示识别框和目标点.
-MASTER_DEBUG_DISPLAY_ENABLED = True
+MASTER_DEBUG_DISPLAY_ENABLED = False
 # 旧版高帧率手感对应的参考帧率.
-VISION_REFERENCE_FPS = 18
+VISION_REFERENCE_FPS = 30
 
 # 候选框被认为有效目标的最小面积阈值.
 OBJECT_MIN_AREA = 50.0
@@ -112,10 +112,10 @@ OBJECT_X_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_X_PX
 # 事件判定使用的纵向容差, 直接复用搜索纵向死区.
 OBJECT_Y_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_Y_PX
 # 连续满足目标窗口和面积条件的稳定帧数.
-OBJECT_STABLE_FRAMES = 1
+OBJECT_STABLE_FRAMES = 3
 
 # 允许在两次 YOLO 之间连续使用 ROI 的最大帧数。
-ROI_TRACKING_MAX_FRAMES = 3
+ROI_TRACKING_MAX_FRAMES = 15
 # ROI 连续失手达到该值后立即回退到 YOLO。
 ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 1
 # 搜索阶段横向速度限幅.
