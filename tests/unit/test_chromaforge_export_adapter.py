@@ -347,6 +347,31 @@ def test_role_build_v2_script_generates_master_v2_output_from_shared_rules(tmp_p
     assert "threshold_index" not in uploaded
 
 
+def test_role_build_v2_script_copies_master_v2_source_without_rewriting_calibration(tmp_path) -> None:
+    target_dir = tmp_path / "master-v2-copy-only-device"
+    target_dir.mkdir()
+    root_dir = DEFAULT_RULES_PATH.parent.parent
+    source_path = root_dir / "master" / "main_v2.py"
+    original_text = source_path.read_text(encoding="utf-8")
+    modified_text = original_text.replace(
+        "OBJECT_TASKS = (",
+        "OBJECT_TASKS = (\n    ('runtime_only_marker', 1, 2, 3, 4, False),",
+        1,
+    )
+    source_path.write_text(modified_text, encoding="utf-8")
+    try:
+        _run_role_build_script_preserving_sources(
+            "master/build_v2.sh",
+            target_dir,
+            preserved_sources=("master/main_v2.py",),
+        )
+        uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+        assert uploaded == modified_text
+        assert "runtime_only_marker" in uploaded
+    finally:
+        source_path.write_text(original_text, encoding="utf-8")
+
+
 def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path) -> None:
     target_dir = tmp_path / "assistant-device"
     target_dir.mkdir()
@@ -362,3 +387,28 @@ def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path
     assert "'yellow'" not in uploaded
     if yellow_threshold is not None:
         assert "RETURN_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
+
+
+def test_role_build_v2_script_copies_assistant_v2_source_without_rewriting_calibration(tmp_path) -> None:
+    target_dir = tmp_path / "assistant-v2-copy-only-device"
+    target_dir.mkdir()
+    root_dir = DEFAULT_RULES_PATH.parent.parent
+    source_path = root_dir / "assistant" / "main_v2.py"
+    original_text = source_path.read_text(encoding="utf-8")
+    modified_text = original_text.replace(
+        "OBJECT_TASKS = (",
+        "OBJECT_TASKS = (\n    ('runtime_only_marker', 1, 2, 3, 4, False),",
+        1,
+    )
+    source_path.write_text(modified_text, encoding="utf-8")
+    try:
+        _run_role_build_script_preserving_sources(
+            "assistant/build_v2.sh",
+            target_dir,
+            preserved_sources=("assistant/main_v2.py",),
+        )
+        uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+        assert uploaded == modified_text
+        assert "runtime_only_marker" in uploaded
+    finally:
+        source_path.write_text(original_text, encoding="utf-8")

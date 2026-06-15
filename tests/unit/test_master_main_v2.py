@@ -129,6 +129,23 @@ def test_master_main_v2_run_skips_yolo_gate_when_short_tracking_is_active() -> N
     assert module.should_run_yolo_for_current_frame() is False
 
 
+def test_master_main_v2_object_task_config_keeps_only_filter_parameters() -> None:
+    module = load_master_v2()
+
+    assert module._object_task_config("tennis") == ("tennis", 3, 30, 70, 90, True)
+    assert module._object_task_config("red") == ("red", 3, 30, 70, 90, True)
+    assert module._object_task_config("blue") == ("blue", 3, 30, 70, 90, True)
+    assert module._object_task_config("brown") == ("brown", 3, 30, 70, 90, True)
+    assert module._object_task_config("white") == ("white", 3, 30, 70, 90, True)
+
+
+def test_master_main_v2_object_task_config_accepts_legacy_threshold_layout() -> None:
+    module = load_master_v2()
+    module.OBJECT_TASKS = (("red", ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),)
+
+    assert module._object_task_config("red") == ("red", 3, 30, 70, 90, True)
+
+
 class FakeUART:
     def __init__(self):
         self.writes = []
@@ -211,6 +228,62 @@ class FakeImage:
 
     def get_pixel(self, x, y):
         return self.pixels.get((x, y), (0, 0, 0))
+
+
+class DynamicThresholdCalibrationImage:
+    def __init__(self, bbox, foreground, background, fragment=None):
+        self.left, self.top, self.right, self.bottom = bbox
+        self.foreground = foreground
+        self.background = background
+        self.fragment = fragment
+
+    def width(self):
+        return IMAGE_WIDTH
+
+    def height(self):
+        return IMAGE_HEIGHT
+
+    def get_pixel(self, x, y):
+        if self.fragment is not None:
+            frag_left, frag_top, frag_right, frag_bottom, frag_color = self.fragment
+            if frag_left <= x < frag_right and frag_top <= y < frag_bottom:
+                return frag_color
+        inner_left = self.left + 5
+        inner_top = self.top + 5
+        inner_right = self.right - 5
+        inner_bottom = self.bottom - 5
+        if inner_left <= x < inner_right and inner_top <= y < inner_bottom:
+            return self.foreground
+        return self.background
+
+
+class DynamicThresholdRoiImage:
+    def __init__(self, expected_threshold, blobs):
+        self.expected_threshold = tuple(expected_threshold)
+        self.blobs = list(blobs)
+        self.find_blobs_calls = []
+
+    def width(self):
+        return IMAGE_WIDTH
+
+    def height(self):
+        return IMAGE_HEIGHT
+
+    def find_blobs(
+        self,
+        thresholds,
+        pixels_threshold,
+        area_threshold,
+        merge,
+        roi=None,
+        margin=None,
+    ):
+        _ = (pixels_threshold, area_threshold, merge, margin)
+        key = tuple(thresholds[0])
+        self.find_blobs_calls.append((key, roi))
+        if len(thresholds) == 1 and key == self.expected_threshold:
+            return list(self.blobs)
+        return []
 
 
 def task_sync_frame(module, seq=12, context_id=7, state=None, target=None, arg=None):
@@ -367,6 +440,8 @@ def _seed_master_short_track(
     module.state.track_roi_success_frames = 0
     module.state.track_roi_failure_frames = int(roi_failures)
     module.state.track_frames_since_yolo = int(frames_since_yolo)
+    module.state.track_dynamic_threshold = (16, 51, 21, 84, -11, 52)
+    module.state.track_dynamic_threshold_rect = tuple(rect)
 
 
 def test_master_main_v2_replies_task_sync_ack_and_records_task() -> None:
@@ -1840,7 +1915,7 @@ def test_master_main_v2_rejects_blob_candidate_with_large_area_jump() -> None:
     assert candidates[0][:4] == ("red", 160.0, 210.0, 400.0)
 
 
-def test_master_main_v2_rejects_blob_candidate_with_poor_separation() -> None:
+def test_master_main_v2_builds_dynamic_threshold_from_yolo_and_uses_it_for_roi() -> None:
     module = load_master_v2()
     module.image.rgb_to_lab = lambda pixel: pixel
     module.ROI_TRACKING_MAX_FRAMES = 3
@@ -1851,9 +1926,8 @@ def test_master_main_v2_rejects_blob_candidate_with_poor_separation() -> None:
         "target": module.Target.OBJECT,
         "arg": module.Task.SEARCH,
     }
-    _seed_master_short_track(module)
 
-    class Blob:
+    class YoloBlob:
         def rect(self):
             return (150, 30, 20, 20)
 
@@ -1863,28 +1937,313 @@ def test_master_main_v2_rejects_blob_candidate_with_poor_separation() -> None:
         def area(self):
             return 400.0
 
-    class FakeImage:
-        def width(self):
-            return IMAGE_WIDTH
+    calibration_img = DynamicThresholdCalibrationImage(
+        (150, 30, 170, 50),
+        (30, 40, 20),
+        (80, 0, 0),
+    )
+    set_current_image(module, calibration_img)
+    module.remember_object_tracking("red", YoloBlob(), 160.0, 210.0, 400.0, "yolo")
 
-        def height(self):
-            return IMAGE_HEIGHT
+    assert module.state.track_dynamic_threshold is not None
 
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=None):
-            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
-            return [Blob()]
+    class Blob:
+        def rect(self):
+            return (150, 30, 20, 20)
 
-        def get_pixel(self, x, y):
-            _ = (x, y)
-            return (30, 40, 20)
+        def cx(self):
+            return 160.0
 
-    img = FakeImage()
-    module.state.current_image = img
-    module.state.current_image_width = img.width()
-    module.state.current_image_height = img.height()
+        def area(self):
+            return 180.0
+
+    threshold = module.state.track_dynamic_threshold
+    img = DynamicThresholdRoiImage(threshold, [Blob()])
+    set_current_image(module, img)
 
     candidates = module.build_object_candidates(img, ())
 
-    assert module.state.current_detection_source == "predict"
-    assert module.state.track_failure_reason == module.TrackFailureReason.POOR_SEPARATION
-    assert candidates[0][:4] == ("red", 160.0, 210.0, 400.0)
+    assert module.state.current_detection_source == "roi"
+    assert candidates[0][:4] == ("red", 160.0, 210.0, 180.0)
+    assert img.find_blobs_calls[0][0] == tuple(threshold)
+
+
+def test_master_main_v2_yolo_calibration_uses_foreground_area_for_tracking() -> None:
+    module = load_master_v2()
+    module.image.rgb_to_lab = lambda pixel: pixel
+    module.ROI_TRACKING_MAX_FRAMES = 3
+    module.ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 2
+    module.state.current_task = {
+        "context_id": 12,
+        "state": module.State.SEARCH_OBJECT,
+        "target": module.Target.OBJECT,
+        "arg": module.Task.SEARCH,
+    }
+
+    class YoloBlob:
+        def rect(self):
+            return (150, 30, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def area(self):
+            return 400.0
+
+    calibration_img = DynamicThresholdCalibrationImage(
+        (150, 30, 170, 50),
+        (30, 40, 20),
+        (80, 0, 0),
+    )
+    set_current_image(module, calibration_img)
+    module.remember_object_tracking("red", YoloBlob(), 160.0, 210.0, 400.0, "yolo")
+
+    assert module.state.track_dynamic_threshold is not None
+    assert module.state.track_area < 300.0
+
+    class Blob:
+        def rect(self):
+            return (150, 30, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def area(self):
+            return 180.0
+
+    threshold = module.state.track_dynamic_threshold
+    img = DynamicThresholdRoiImage(threshold, [Blob()])
+    set_current_image(module, img)
+
+    candidates = module.build_object_candidates(img, ())
+
+    assert module.state.current_detection_source == "roi"
+    assert module.state.track_failure_reason == module.TrackFailureReason.NONE
+    assert candidates[0][:4] == ("red", 160.0, 210.0, 180.0)
+
+
+def test_master_main_v2_reuses_dynamic_threshold_when_center_stays_stable() -> None:
+    module = load_master_v2()
+    module.image.rgb_to_lab = lambda pixel: pixel
+    module.state.current_task = {
+        "context_id": 12,
+        "state": module.State.SEARCH_OBJECT,
+        "target": module.Target.OBJECT,
+        "arg": module.Task.SEARCH,
+    }
+
+    class YoloBlob:
+        def __init__(self, left, top, width, height):
+            self._rect = (left, top, width, height)
+
+        def rect(self):
+            return self._rect
+
+        def cx(self):
+            left, _top, width, _height = self._rect
+            return float(left) + float(width) / 2.0
+
+        def area(self):
+            _left, _top, width, height = self._rect
+            return float(width) * float(height)
+
+    first_img = DynamicThresholdCalibrationImage(
+        (150, 30, 170, 50),
+        (30, 40, 20),
+        (80, 0, 0),
+    )
+    set_current_image(module, first_img)
+    module.remember_object_tracking("red", YoloBlob(150, 30, 20, 20), 160.0, 210.0, 400.0, "yolo")
+
+    old_threshold = module.state.track_dynamic_threshold
+    old_generation = module.state.track_dynamic_threshold_generation
+
+    second_img = DynamicThresholdCalibrationImage(
+        (152, 32, 170, 50),
+        (30, 40, 20),
+        (60, 10, 10),
+    )
+    set_current_image(module, second_img)
+    module._build_dynamic_threshold_for_blob = lambda _img, _blob: (_ for _ in ()).throw(
+        AssertionError("中心采样稳定时不应重算阈值")
+    )
+
+    module.remember_object_tracking("red", YoloBlob(152, 32, 18, 18), 161.0, 208.0, 324.0, "yolo")
+
+    assert module.state.track_dynamic_threshold == old_threshold
+    assert module.state.track_dynamic_threshold_generation == old_generation
+
+
+def test_master_main_v2_refreshes_dynamic_threshold_after_consecutive_unhealthy_yolo_frames() -> None:
+    module = load_master_v2()
+    module.image.rgb_to_lab = lambda pixel: pixel
+    module.state.current_task = {
+        "context_id": 12,
+        "state": module.State.SEARCH_OBJECT,
+        "target": module.Target.OBJECT,
+        "arg": module.Task.SEARCH,
+    }
+
+    class YoloBlob:
+        def __init__(self, left, top, width, height):
+            self._rect = (left, top, width, height)
+
+        def rect(self):
+            return self._rect
+
+        def cx(self):
+            left, _top, width, _height = self._rect
+            return float(left) + float(width) / 2.0
+
+        def area(self):
+            _left, _top, width, height = self._rect
+            return float(width) * float(height)
+
+    first_img = DynamicThresholdCalibrationImage(
+        (150, 30, 170, 50),
+        (30, 40, 20),
+        (80, 0, 0),
+    )
+    set_current_image(module, first_img)
+    module.remember_object_tracking("red", YoloBlob(150, 30, 20, 20), 160.0, 210.0, 400.0, "yolo")
+
+    old_threshold = module.state.track_dynamic_threshold
+    old_generation = module.state.track_dynamic_threshold_generation
+    new_threshold = (85, 95, -5, 5, -5, 5)
+    build_calls = []
+
+    def fake_build_dynamic_threshold(_img, _blob):
+        build_calls.append(1)
+        return new_threshold
+
+    module._build_dynamic_threshold_for_blob = fake_build_dynamic_threshold
+
+    second_img = DynamicThresholdCalibrationImage(
+        (150, 30, 170, 50),
+        (90, 0, 0),
+        (80, 0, 0),
+    )
+    set_current_image(module, second_img)
+
+    module.remember_object_tracking("red", YoloBlob(150, 30, 20, 20), 160.0, 210.0, 400.0, "yolo")
+
+    assert module.state.track_dynamic_threshold == old_threshold
+    assert module.state.track_dynamic_threshold_generation == old_generation
+    assert module.state.track_dynamic_threshold_health_failures == 1
+    assert module.state.track_pending_dynamic_threshold is None
+    assert build_calls == []
+
+    module.remember_object_tracking("red", YoloBlob(150, 30, 20, 20), 160.0, 210.0, 400.0, "yolo")
+
+    assert module.state.track_dynamic_threshold == old_threshold
+    assert module.state.track_dynamic_threshold_generation == old_generation
+    assert module.state.track_pending_dynamic_threshold == new_threshold
+    assert module.state.track_pending_dynamic_threshold_ok_frames == 1
+    assert len(build_calls) == 1
+
+    module.remember_object_tracking("red", YoloBlob(150, 30, 20, 20), 160.0, 210.0, 400.0, "yolo")
+
+    assert module.state.track_dynamic_threshold == new_threshold
+    assert module.state.track_dynamic_threshold_generation == old_generation + 1
+    assert module.state.track_dynamic_threshold_health_failures == 0
+
+
+def test_master_main_v2_recomputes_dynamic_threshold_after_track_reset() -> None:
+    module = load_master_v2()
+    module.image.rgb_to_lab = lambda pixel: pixel
+    module.state.current_task = {
+        "context_id": 12,
+        "state": module.State.SEARCH_OBJECT,
+        "target": module.Target.OBJECT,
+        "arg": module.Task.SEARCH,
+    }
+
+    class YoloBlob:
+        def __init__(self, left, top, width, height):
+            self._rect = (left, top, width, height)
+
+        def rect(self):
+            return self._rect
+
+        def cx(self):
+            left, _top, width, _height = self._rect
+            return float(left) + float(width) / 2.0
+
+        def area(self):
+            _left, _top, width, height = self._rect
+            return float(width) * float(height)
+
+    first_img = DynamicThresholdCalibrationImage(
+        (150, 30, 170, 50),
+        (30, 40, 20),
+        (80, 0, 0),
+    )
+    set_current_image(module, first_img)
+    module.remember_object_tracking("red", YoloBlob(150, 30, 20, 20), 160.0, 210.0, 400.0, "yolo")
+
+    new_threshold = (85, 95, -5, 5, -5, 5)
+    module.state.clear_track()
+    second_img = DynamicThresholdCalibrationImage(
+        (150, 30, 170, 50),
+        (90, 0, 0),
+        (80, 0, 0),
+    )
+    set_current_image(module, second_img)
+    module._build_dynamic_threshold_for_blob = lambda _img, _blob: new_threshold
+
+    module.remember_object_tracking("red", YoloBlob(150, 30, 20, 20), 160.0, 210.0, 400.0, "yolo")
+
+    assert module.state.track_dynamic_threshold == new_threshold
+    assert module.state.track_dynamic_threshold_generation == 1
+
+
+def test_master_main_v2_dynamic_threshold_keeps_center_connected_component_only() -> None:
+    module = load_master_v2()
+    module.image.rgb_to_lab = lambda pixel: pixel
+
+    class YoloBlob:
+        def rect(self):
+            return (150, 30, 20, 20)
+
+    calibration_img = DynamicThresholdCalibrationImage(
+        (150, 30, 170, 50),
+        (30, 40, 20),
+        (80, 0, 0),
+        fragment=(150, 30, 155, 35, (32, 75, 60)),
+    )
+    set_current_image(module, calibration_img)
+
+    threshold = module._build_dynamic_threshold_for_blob(calibration_img, YoloBlob())
+
+    assert threshold is not None
+    assert threshold[3] < 75
+    assert threshold[5] < 60
+
+
+def test_master_main_v2_failed_yolo_calibration_disables_roi_tracking() -> None:
+    module = load_master_v2()
+    module.ROI_TRACKING_MAX_FRAMES = 3
+    module.state.current_task = {
+        "context_id": 12,
+        "state": module.State.SEARCH_OBJECT,
+        "target": module.Target.OBJECT,
+        "arg": module.Task.SEARCH,
+    }
+
+    class YoloBlob:
+        def rect(self):
+            return (150, 30, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def area(self):
+            return 400.0
+
+    img = FakeImage()
+    set_current_image(module, img)
+    module.remember_object_tracking("red", YoloBlob(), 160.0, 210.0, 400.0, "yolo")
+
+    assert module.state.track_dynamic_threshold is None
+    assert module.should_use_blob_tracking() is False
+    assert module.build_object_candidates(img, ()) == ()

@@ -7,10 +7,16 @@ import tf
 import time
 from machine import UART
 
+# 是否启用辅车调试画面显示
+ASSISTANT_DEBUG_DISPLAY_ENABLED = False
 
+# 板载串口编号, 用于和主控通信
 UART_ID = 2
+# 串口波特率, 单位为 bit/s
 UART_BAUDRATE = 115200
+# 图像曝光时间, 单位为 us
 EXP_TIME_US = 500
+# 可靠消息重发间隔, 单位为 ms
 RELIABLE_RESEND_INTERVAL_MS = 100
 
 
@@ -68,79 +74,148 @@ class TrackFailureReason:
     POOR_SEPARATION = 5
 
 
+# 帧序号环形空间大小, 取满 1 字节范围
 SEQ_RING_SIZE = 256
+# 半环阈值, 用于比较环形序号前后关系
 SEQ_HALF_RING = 128
+# 协议消息体长度, 单位为 byte
 FRAME_BODY_SIZE = 8
+# 协议帧头标记
 FRAME_HEAD = 0xA5
+# 协议整帧长度, 单位为 byte
 FRAME_SIZE = 13
+# YOLO 模型文件路径
 YOLO_MODEL_PATH = "/sd/yolo.tflite"
+# YOLO 输入图像复制缩放比例
 YOLO_IMAGE_COPY_SCALE = 0.75
+# YOLO 检测最小置信度阈值
 YOLO_MIN_SCORE = 0.50
+# YOLO 输出标签顺序, 需与模型保持一致
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
+# 视觉控制的参考帧率, 用于按时间尺度理解速度响应
 VISION_REFERENCE_FPS = 30.0
 
+# 色块候选合并边距, 单位为 px
 OBJECT_BLOB_MERGE_MARGIN = 0
+# 色块最小像素数阈值
 OBJECT_BLOB_PIXELS_THRESHOLD = 200
+# 色块最小面积阈值
 OBJECT_BLOB_AREA_THRESHOLD = 200
+# 跟随任务的颜色阈值配置
 FOLLOW_TASKS = (("marker", (37, 57, 64, 95, -64, 20)),)
+# 目标相关任务的筛选参数配置
 OBJECT_TASKS = (
-    ('red', ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),
+    ('red', 3, 30, 70, 90, True),
+    ('blue', 3, 30, 70, 90, True),
+    ('brown', 3, 30, 70, 90, True),
+    ('white', 3, 30, 70, 90, True),
+    ('tennis', 3, 30, 70, 90, True),
 )
+# 回库黄线识别阈值
 RETURN_LINE_YELLOW_THRESHOLD = (58, 87, -32, -12, 64, 84)
 
+# 跟随阶段的横向死区, 单位为 px
 FOLLOW_X_DEADZONE_PX = 5.0
+# 跟随阶段的目标纵向位置, 单位为 px
 FOLLOW_TARGET_Y = 45.0
+# 跟随阶段的纵向死区, 单位为 px
 FOLLOW_Y_DEADZONE_PX = 8.0
+# 跟随阶段横向控制比例系数
 FOLLOW_CONTROL_KP_X = 0.04
+# 跟随阶段纵向控制比例系数
 FOLLOW_CONTROL_KP_Y = -0.10
+# 跟随阶段最小输出速度
 FOLLOW_CONTROL_MIN_SPEED = 0
+# 跟随阶段纵向速度上限
 FOLLOW_CONTROL_MAX_Y = 5
 
+# 目标丢失时的默认搜索横向速度
 OBJECT_MISSING_SEARCH_VX = 0.0
+# 目标丢失时的默认搜索纵向速度
 OBJECT_MISSING_SEARCH_VY = 0.0
+# 接近目标阶段横向控制比例系数
 OBJECT_APPROACH_KP_X = 0.05
+# 接近目标阶段纵向控制比例系数
 OBJECT_APPROACH_KP_Y = -0.2
+# 接近目标阶段最小输出速度
 OBJECT_APPROACH_MIN_SPEED = 2
+# 接近目标阶段横向死区, 单位为 px
 OBJECT_APPROACH_DEADZONE_X_PX = 15.0
+# 接近目标阶段纵向死区, 单位为 px
 OBJECT_APPROACH_DEADZONE_Y_PX = 8.0
+# 接近目标阶段横向速度上限
 OBJECT_APPROACH_MAX_VX = 5.0
+# 接近目标阶段纵向速度上限
 OBJECT_APPROACH_MAX_VY = 5.0
+# 绕目标阶段横向控制比例系数
 OBJECT_ORBIT_KP_X = 0.05
+# 绕目标阶段纵向控制比例系数
 OBJECT_ORBIT_KP_Y = -0.15
+# 绕目标阶段最小输出速度
 OBJECT_ORBIT_MIN_SPEED = 0
+# 绕目标阶段横向死区, 单位为 px
 OBJECT_ORBIT_DEADZONE_X_PX = 15.0
+# 绕目标阶段纵向死区, 单位为 px
 OBJECT_ORBIT_DEADZONE_Y_PX = 8.0
+# 绕目标阶段横向速度上限
 OBJECT_ORBIT_MAX_VX = 5.0
+# 绕目标阶段纵向速度上限
 OBJECT_ORBIT_MAX_VY = 5.0
+# 接近目标阶段期望的图像横向位置, 单位为 px
 OBJECT_APPROACH_TARGET_X_PX = 160.0
+# 接近目标阶段期望的图像纵向位置, 单位为 px
 OBJECT_APPROACH_TARGET_Y_PX = 200.0
+# 绕目标阶段期望的图像横向位置, 单位为 px
 OBJECT_ORBIT_TARGET_X_PX = 160.0
+# 绕目标阶段期望的图像纵向位置, 单位为 px
 OBJECT_ORBIT_TARGET_Y_PX = 200.0
+# 辅车运输阶段期望的图像纵向位置, 单位为 px
 ASSISTANT_TRANSPORT_TARGET_Y_PX = 240.0
+# 目标最小有效面积阈值
 OBJECT_MIN_AREA = 50.0
+# 目标横向对齐容差, 单位为 px
 OBJECT_X_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_X_PX
+# 目标纵向对齐容差, 单位为 px
 OBJECT_Y_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_Y_PX
+# 判定目标稳定所需连续帧数
 OBJECT_STABLE_FRAMES = 3
-# 允许在两次 YOLO 之间连续使用 ROI 的最大帧数。
+# 允许在两次 YOLO 之间连续使用 ROI 的最大帧数
 ROI_TRACKING_MAX_FRAMES = 15
-# ROI 连续失手达到该值后立即回退到 YOLO。
-ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 1
-ASSISTANT_DEBUG_DISPLAY_ENABLED = False
+# ROI 连续失手达到该值后立即回退到 YOLO
+ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 3
+# 动态阈值健康检查连续失败达到该值后才触发重标定
+DYNAMIC_THRESHOLD_REFRESH_FAILURE_FRAMES = 2
+# 新阈值连续通过确认达到该值后才正式替换
+DYNAMIC_THRESHOLD_REFRESH_CONFIRM_FRAMES = 2
 
+# 回库阶段采样窗口半宽, 单位为 px
 RETURN_LINE_SAMPLE_HALF_WIDTH_PX = 5
+# 回库阶段期望的图像纵向位置, 单位为 px
 RETURN_LINE_TARGET_Y_PX = 220.0
+# 回库阶段纵向死区, 单位为 px
 RETURN_LINE_DEADZONE_Y_PX = 4.0
+# 回库阶段纵向控制比例系数
 RETURN_LINE_KP_Y = -0.05
+# 回库阶段纵向速度上限
 RETURN_LINE_MAX_VY = 5.0
+# 回库阶段最小输出速度
 RETURN_LINE_MIN_SPEED = 0.0
+# 可接受的最大黄线厚度, 单位为 px
 RETURN_LINE_MAX_THICKNESS_PX = 30
+# 判定为有效横向连通线段的最小长度, 单位为 px
 RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
+# 黄线连续缺失达到该帧数后判定回库结束
 RETURN_LINE_MISSING_FINISH_FRAMES = 5
+# 协议约定的图像宽度, 单位为 px
 PROTOCOL_IMAGE_WIDTH = 320
+# 协议约定的图像高度, 单位为 px
 PROTOCOL_IMAGE_HEIGHT = 240
 
+# 有符号 16 位整数下界
 _I16_MIN = -32768
+# 有符号 16 位整数上界
 _I16_MAX = 32767
+# 浮点数打包为定点数时使用的缩放倍数
 _SCALE = 1000
 
 
@@ -558,17 +633,10 @@ def blob_max_side_length(blob):
     return max(float(right - left), float(bottom - top))
 
 
-def task_thresholds(thresholds):
-    if len(thresholds) == 6 and not isinstance(thresholds[0], (tuple, list)):
-        return (thresholds,)
-    return thresholds
-
-
 def object_task_parts(task):
-    if len(task) >= 7:
+    if len(task) >= 7 and isinstance(task[1], (tuple, list)):
         return (
             task[0],
-            task_thresholds(task[1]),
             int(task[2]),
             int(task[3]),
             int(task[4]),
@@ -578,30 +646,26 @@ def object_task_parts(task):
     if len(task) >= 6:
         return (
             task[0],
-            task_thresholds(task[1]),
+            int(task[1]),
             int(task[2]),
             int(task[3]),
-            int(task[4]),
-            0,
+            max(0, int(task[4])),
             bool(task[5]),
         )
     if len(task) >= 5:
         return (
             task[0],
-            task_thresholds(task[1]),
+            int(task[1]),
             int(task[2]),
             int(task[3]),
-            int(task[4]),
             0,
-            True,
+            bool(task[4]),
         )
     return (
         task[0],
-        task_thresholds(task[1]),
         OBJECT_BLOB_MERGE_MARGIN,
         OBJECT_BLOB_PIXELS_THRESHOLD,
         OBJECT_BLOB_AREA_THRESHOLD,
-        0,
         True,
     )
 
@@ -623,11 +687,11 @@ def object_task_id(task_name):
     return 0
 
 
-def object_thresholds_for_task_name(task_name):
+def _object_task_config(task_name):
     for task in OBJECT_TASKS:
         if task[0] == task_name:
-            return task_thresholds(task[1])
-    return ()
+            return object_task_parts(task)
+    return None
 
 
 def load_yolo_model():
@@ -682,69 +746,32 @@ def yolo_detect(img):
     return candidates
 
 
-def _find_blobs_with_task_config(img, thresholds, pixels_threshold, area_threshold, merge_margin):
+def _find_blobs_with_task_config(img, thresholds, pixels_threshold, area_threshold, merge_margin, roi=None):
     try:
         return img.find_blobs(
             list(thresholds),
             pixels_threshold=pixels_threshold,
             area_threshold=1,
             merge=True,
+            roi=roi,
             margin=max(0, int(merge_margin)),
         )
     except TypeError:
-        return img.find_blobs(
-            list(thresholds),
-            pixels_threshold=pixels_threshold,
-            area_threshold=1,
-            merge=True,
-        )
-
-
-def _blob_code(blob):
-    code_fn = getattr(blob, "code", None)
-    if code_fn is not None:
-        return int(code_fn())
-    try:
-        return int(blob[8])
-    except Exception:
-        return None
-
-
-def _blob_matches_required_thresholds(blob, threshold_count, require_all_thresholds):
-    if int(threshold_count) <= 1 or not bool(require_all_thresholds):
-        return True
-    code = _blob_code(blob)
-    if code is None:
-        return True
-    expected_code = (1 << int(threshold_count)) - 1
-    return (code & expected_code) == expected_code
-
-
-def blob_bbox_overlaps(left, top, right, bottom, other_blob):
-    other_left, other_top, other_right, other_bottom = blob_rect_to_bbox(other_blob.rect())
-    return (
-        min(float(right), float(other_right)) > max(float(left), float(other_left))
-        and min(float(bottom), float(other_bottom)) > max(float(top), float(other_top))
-    )
-
-
-def blob_matches_all_thresholds(img, blob, thresholds, pixels_threshold, area_threshold, merge):
-    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-    for threshold in thresholds[1:]:
-        blobs = img.find_blobs(
-            [threshold],
-            pixels_threshold=pixels_threshold,
-            area_threshold=area_threshold,
-            merge=merge,
-        )
-        matched = False
-        for other_blob in blobs:
-            if blob_bbox_overlaps(left, top, right, bottom, other_blob):
-                matched = True
-                break
-        if not matched:
-            return False
-    return True
+        try:
+            return img.find_blobs(
+                list(thresholds),
+                pixels_threshold=pixels_threshold,
+                area_threshold=1,
+                merge=True,
+                roi=roi,
+            )
+        except TypeError:
+            return img.find_blobs(
+                list(thresholds),
+                pixels_threshold=pixels_threshold,
+                area_threshold=1,
+                merge=True,
+            )
 
 
 def build_blob_candidates(img):
@@ -763,50 +790,53 @@ def build_blob_candidates(img):
             marker_span = compute_marker_span(blob.min_corners())
             candidates.append((task_name, blob.cx(), blob.cy(), bottom, marker_span, blob))
     return candidates
+def _tracked_search_roi():
+    window = _tracked_target_window()
+    if window is None:
+        return None
+    roi_left = max(0, int(window[4]))
+    roi_top = max(0, int(window[5]))
+    roi_right = min(int(state.current_image_width), int(window[6]))
+    roi_bottom = min(int(state.current_image_height), int(window[7]))
+    if roi_right <= roi_left or roi_bottom <= roi_top:
+        return None
+    return (roi_left, roi_top, roi_right - roi_left, roi_bottom - roi_top)
 
 
-def _build_blob_object_candidates(img):
+def _build_dynamic_blob_object_candidates(img):
+    task_name = state.track_task_name
+    threshold = state.track_dynamic_threshold
+    if task_name is None or threshold is None:
+        return ()
+    config = _object_task_config(task_name)
+    if config is None:
+        return ()
+    (
+        _task_name,
+        merge_margin,
+        pixels_threshold,
+        area_threshold,
+        max_side_length,
+        _require_all_thresholds,
+    ) = config
+    blobs = _find_blobs_with_task_config(
+        img,
+        (threshold,),
+        pixels_threshold,
+        area_threshold,
+        merge_margin,
+        _tracked_search_roi(),
+    )
     candidates = []
-    img_height = img.height()
-    for task in OBJECT_TASKS:
-        (
-            task_name,
-            thresholds,
-            merge_margin,
-            pixels_threshold,
-            area_threshold,
-            max_side_length,
-            require_all_thresholds,
-        ) = object_task_parts(task)
-        if len(thresholds) <= 0:
+    for blob in blobs:
+        if blob_area(blob) < float(area_threshold):
             continue
-        blobs = _find_blobs_with_task_config(
-            img,
-            thresholds,
-            pixels_threshold,
-            area_threshold,
-            merge_margin,
-        )
-        for blob in blobs:
-            if not _blob_matches_required_thresholds(blob, len(thresholds), require_all_thresholds):
-                continue
-            if len(thresholds) > 1 and not blob_matches_all_thresholds(
-                img,
-                blob,
-                thresholds,
-                pixels_threshold,
-                area_threshold,
-                True,
-            ):
-                continue
-            if blob_area(blob) < float(area_threshold):
-                continue
-            if int(max_side_length) > 0 and blob_max_side_length(blob) > float(max_side_length):
-                continue
-            left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-            _, _, _, bottom = normalize_bbox_for_protocol(left, top, right, bottom)
-            candidates.append((task_name, blob.cx(), blob.cy(), bottom, blob_area(blob), blob))
-    return candidates
+        if int(max_side_length) > 0 and blob_max_side_length(blob) > float(max_side_length):
+            continue
+        left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+        _, _, _, bottom = normalize_bbox_for_protocol(left, top, right, bottom)
+        candidates.append((task_name, blob.cx(), blob.cy(), bottom, blob_area(blob), blob))
+    return tuple(candidates)
 
 
 def build_object_candidates(img, yolo_candidates):
@@ -848,17 +878,18 @@ def build_object_candidates(img, yolo_candidates):
 def _pixel_to_lab(pixel):
     if pixel is None:
         return None
-    return image.rgb_to_lab(pixel)
+    lab = image.rgb_to_lab(pixel)
+    try:
+        if len(lab) < 3:
+            return None
+    except TypeError:
+        return None
+    return (float(lab[0]), float(lab[1]), float(lab[2]))
 
 
 def _pixel_matches_threshold(pixel, threshold):
     lab = _pixel_to_lab(pixel)
     if lab is None:
-        return False
-    try:
-        if len(lab) < 3:
-            return False
-    except TypeError:
         return False
     return (
         float(threshold[0]) <= float(lab[0]) <= float(threshold[1])
@@ -867,11 +898,311 @@ def _pixel_matches_threshold(pixel, threshold):
     )
 
 
-def _pixel_matches_any_threshold(pixel, thresholds):
-    for threshold in thresholds:
-        if _pixel_matches_threshold(pixel, threshold):
-            return True
-    return False
+def _clamp_range_value(value, lower, upper):
+    value = int(round(float(value)))
+    if value < int(lower):
+        return int(lower)
+    if value > int(upper):
+        return int(upper)
+    return value
+
+
+def _sample_grid_count(span):
+    return min(9, max(3, int((int(span) + 3) // 4)))
+
+
+def _sample_grid_axis(start, end):
+    return tuple(_sample_roi_positions(start, end, _sample_grid_count(int(end) - int(start))))
+
+
+def _median_channel(samples, channel_index):
+    values = sorted(sample[channel_index] for sample in samples)
+    return values[len(values) // 2]
+
+
+def _quantile_value(sorted_values, numerator, denominator):
+    if not sorted_values:
+        return None
+    index = ((len(sorted_values) - 1) * int(numerator)) // int(denominator)
+    return sorted_values[index]
+
+
+def _lab_distance_value(lab, center_lab):
+    delta_l = float(lab[0]) - float(center_lab[0])
+    delta_a = float(lab[1]) - float(center_lab[1])
+    delta_b = float(lab[2]) - float(center_lab[2])
+    return int(delta_l * delta_l + 4.0 * delta_a * delta_a + 4.0 * delta_b * delta_b)
+
+
+def _otsu_threshold(values):
+    if not values:
+        return None
+    min_value = int(min(values))
+    max_value = int(max(values))
+    if max_value <= min_value:
+        return None
+    histogram = [0] * (max_value - min_value + 1)
+    total_sum = 0
+    for value in values:
+        index = int(value) - min_value
+        histogram[index] += 1
+        total_sum += int(value)
+    total_count = len(values)
+    foreground_sum = 0
+    foreground_count = 0
+    best_threshold = None
+    best_score = -1.0
+    for index in range(len(histogram) - 1):
+        count = histogram[index]
+        foreground_count += count
+        if foreground_count <= 0:
+            continue
+        background_count = total_count - foreground_count
+        if background_count <= 0:
+            break
+        value = min_value + index
+        foreground_sum += value * count
+        foreground_mean = float(foreground_sum) / float(foreground_count)
+        background_mean = float(total_sum - foreground_sum) / float(background_count)
+        score = (
+            float(foreground_count)
+            * float(background_count)
+            * (foreground_mean - background_mean)
+            * (foreground_mean - background_mean)
+        )
+        if score > best_score:
+            best_score = score
+            best_threshold = value
+    if best_score <= 0.0:
+        return None
+    return best_threshold
+
+
+def _center_connected_sample_indices(mask_rows, center_mask_rows):
+    height = len(mask_rows)
+    if height <= 0:
+        return ()
+    width = len(mask_rows[0])
+    queue = []
+    visited = {}
+    for row_index in range(height):
+        for col_index in range(width):
+            if not mask_rows[row_index][col_index]:
+                continue
+            if not center_mask_rows[row_index][col_index]:
+                continue
+            key = row_index * width + col_index
+            visited[key] = True
+            queue.append((row_index, col_index))
+    if not queue:
+        return ()
+    connected = []
+    while queue:
+        row_index, col_index = queue.pop()
+        connected.append((row_index, col_index))
+        for next_row, next_col in (
+            (row_index - 1, col_index),
+            (row_index + 1, col_index),
+            (row_index, col_index - 1),
+            (row_index, col_index + 1),
+        ):
+            if next_row < 0 or next_row >= height or next_col < 0 or next_col >= width:
+                continue
+            if not mask_rows[next_row][next_col]:
+                continue
+            key = next_row * width + next_col
+            if key in visited:
+                continue
+            visited[key] = True
+            queue.append((next_row, next_col))
+    return tuple(connected)
+
+
+def _build_dynamic_threshold_from_labs(samples):
+    threshold = []
+    for channel_index, lower_bound, upper_bound in (
+        (0, 0, 100),
+        (1, -128, 127),
+        (2, -128, 127),
+    ):
+        channel_values = sorted(sample[channel_index] for sample in samples)
+        low = _quantile_value(channel_values, 1, 8)
+        high = _quantile_value(channel_values, 7, 8)
+        if low is None or high is None:
+            return None
+        margin = max(1, int((float(high) - float(low) + 3.0) // 4.0))
+        threshold.append(_clamp_range_value(float(low) - float(margin), lower_bound, upper_bound))
+        threshold.append(_clamp_range_value(float(high) + float(margin), lower_bound, upper_bound))
+    return tuple(threshold)
+
+
+def _build_dynamic_threshold_for_blob(img, blob):
+    get_pixel = getattr(img, "get_pixel", None)
+    if get_pixel is None:
+        return None
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    left = max(0, int(left))
+    top = max(0, int(top))
+    right = min(int(state.current_image_width), int(right))
+    bottom = min(int(state.current_image_height), int(bottom))
+    if right - left <= 4 or bottom - top <= 4:
+        return None
+    if (right - left) * (bottom - top) < int(OBJECT_MIN_AREA):
+        return None
+    sample_xs = _sample_grid_axis(left, right)
+    sample_ys = _sample_grid_axis(top, bottom)
+    if len(sample_xs) * len(sample_ys) < 9:
+        return None
+    inset_x = max(1, int((right - left) // 4))
+    inset_y = max(1, int((bottom - top) // 4))
+    center_left = left + inset_x
+    center_top = top + inset_y
+    center_right = right - inset_x
+    center_bottom = bottom - inset_y
+    if center_right <= center_left or center_bottom <= center_top:
+        return None
+    lab_rows = []
+    center_samples = []
+    total_valid = 0
+    center_valid = 0
+    for sample_y in sample_ys:
+        row = []
+        for sample_x in sample_xs:
+            lab = _pixel_to_lab(get_pixel(int(sample_x), int(sample_y)))
+            row.append(lab)
+            if lab is None:
+                continue
+            total_valid += 1
+            if (
+                int(center_left) <= int(sample_x) < int(center_right)
+                and int(center_top) <= int(sample_y) < int(center_bottom)
+            ):
+                center_samples.append(lab)
+                center_valid += 1
+        lab_rows.append(row)
+    if total_valid < 9 or center_valid < 3:
+        return None
+    center_lab = (
+        _median_channel(center_samples, 0),
+        _median_channel(center_samples, 1),
+        _median_channel(center_samples, 2),
+    )
+    distance_rows = []
+    distances = []
+    center_mask_rows = []
+    for row_index in range(len(sample_ys)):
+        distance_row = []
+        center_mask_row = []
+        sample_y = sample_ys[row_index]
+        for col_index in range(len(sample_xs)):
+            sample_x = sample_xs[col_index]
+            lab = lab_rows[row_index][col_index]
+            if lab is None:
+                distance_row.append(None)
+                center_mask_row.append(False)
+                continue
+            distance = _lab_distance_value(lab, center_lab)
+            distance_row.append(distance)
+            distances.append(distance)
+            center_mask_row.append(
+                int(center_left) <= int(sample_x) < int(center_right)
+                and int(center_top) <= int(sample_y) < int(center_bottom)
+            )
+        distance_rows.append(distance_row)
+        center_mask_rows.append(center_mask_row)
+    threshold_value = _otsu_threshold(distances)
+    if threshold_value is None:
+        return None
+    max_distance = int(max(distances))
+    if threshold_value >= max_distance:
+        return None
+    mask_rows = []
+    for distance_row in distance_rows:
+        mask_rows.append(
+            [
+                distance is not None and int(distance) <= int(threshold_value)
+                for distance in distance_row
+            ]
+        )
+    connected_indices = _center_connected_sample_indices(mask_rows, center_mask_rows)
+    if not connected_indices:
+        return None
+    connected_samples = []
+    center_connected = 0
+    for row_index, col_index in connected_indices:
+        lab = lab_rows[row_index][col_index]
+        if lab is None:
+            continue
+        connected_samples.append(lab)
+        if center_mask_rows[row_index][col_index]:
+            center_connected += 1
+    connected_count = len(connected_samples)
+    if connected_count < max(3, total_valid // 10):
+        return None
+    if connected_count * 20 <= total_valid:
+        return None
+    if connected_count * 20 >= total_valid * 19:
+        return None
+    if center_connected * total_valid < connected_count * center_valid:
+        return None
+    return _build_dynamic_threshold_from_labs(connected_samples)
+
+
+def _estimate_dynamic_foreground_area(img, blob, threshold):
+    get_pixel = getattr(img, "get_pixel", None)
+    if get_pixel is None or threshold is None:
+        return None
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    width = max(1.0, float(right) - float(left))
+    height = max(1.0, float(bottom) - float(top))
+    sample_xs = _sample_grid_axis(int(left), int(right))
+    sample_ys = _sample_grid_axis(int(top), int(bottom))
+    sample_total = len(sample_xs) * len(sample_ys)
+    if sample_total <= 0:
+        return None
+    foreground_count = 0
+    for sample_y in sample_ys:
+        for sample_x in sample_xs:
+            if _pixel_matches_threshold(get_pixel(int(sample_x), int(sample_y)), threshold):
+                foreground_count += 1
+    if foreground_count <= 0:
+        return None
+    estimated_area = width * height * float(foreground_count) / float(sample_total)
+    return max(1.0, float(estimated_area))
+
+
+def _blob_bbox_area_from_rect(rect):
+    left, top, right, bottom = rect
+    return max(0.0, float(right) - float(left)) * max(0.0, float(bottom) - float(top))
+
+
+def _dynamic_threshold_center_is_healthy(img, blob, threshold):
+    get_pixel = getattr(img, "get_pixel", None)
+    if threshold is None or get_pixel is None:
+        return False
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    sample_xs = _sample_grid_axis(int(left), int(right))
+    sample_ys = _sample_grid_axis(int(top), int(bottom))
+    inset_x = max(1, int((int(right) - int(left)) // 4))
+    inset_y = max(1, int((int(bottom) - int(top)) // 4))
+    center_left = int(left) + inset_x
+    center_top = int(top) + inset_y
+    center_right = int(right) - inset_x
+    center_bottom = int(bottom) - inset_y
+    if center_right <= center_left or center_bottom <= center_top:
+        return False
+    center_hits = 0
+    for sample_y in sample_ys:
+        for sample_x in sample_xs:
+            if not (
+                center_left <= int(sample_x) < center_right
+                and center_top <= int(sample_y) < center_bottom
+            ):
+                continue
+            center_hits += 1
+            if not _pixel_matches_threshold(get_pixel(int(sample_x), int(sample_y)), threshold):
+                return False
+    return center_hits >= 3
 
 
 def _sample_roi_positions(start, end, sample_count):
@@ -881,57 +1212,6 @@ def _sample_roi_positions(start, end, sample_count):
     span = max(1, end - start)
     for index in range(count):
         yield start + (span * (index * 2 + 1)) // (count * 2)
-
-
-def _sample_threshold_match_ratio(img, rois, thresholds):
-    get_pixel = getattr(img, "get_pixel", None)
-    if get_pixel is None:
-        return None
-    samples = 0
-    matches = 0
-    for left, top, right, bottom in rois:
-        if right <= left or bottom <= top:
-            continue
-        for y in _sample_roi_positions(top, bottom, 3):
-            for x in _sample_roi_positions(left, right, 3):
-                samples += 1
-                if _pixel_matches_any_threshold(get_pixel(int(x), int(y)), thresholds):
-                    matches += 1
-    if samples <= 0:
-        return None
-    return float(matches) / float(samples)
-
-
-def _blob_background_ring_rois(blob):
-    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-    expand_x = max(1, int((right - left) / 2))
-    expand_y = max(1, int((bottom - top) / 2))
-    outer_left = max(0, int(left) - expand_x)
-    outer_top = max(0, int(top) - expand_y)
-    outer_right = min(int(state.current_image_width), int(right) + expand_x)
-    outer_bottom = min(int(state.current_image_height), int(bottom) + expand_y)
-    return (
-        (outer_left, outer_top, outer_right, int(top)),
-        (outer_left, int(bottom), outer_right, outer_bottom),
-        (outer_left, int(top), int(left), int(bottom)),
-        (int(right), int(top), outer_right, int(bottom)),
-    )
-
-
-def _blob_is_separable_from_background(img, task_name, blob):
-    thresholds = object_thresholds_for_task_name(task_name)
-    if not thresholds:
-        return True
-    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-    inner_ratio = _sample_threshold_match_ratio(img, ((left, top, right, bottom),), thresholds)
-    ring_ratio = _sample_threshold_match_ratio(img, _blob_background_ring_rois(blob), thresholds)
-    if inner_ratio is None or ring_ratio is None:
-        return True
-    if inner_ratio <= 0.0:
-        return True
-    return ring_ratio < max(0.5, inner_ratio * 0.8)
-
-
 def _return_line_pixel_matches(img, x, y):
     image_width = state.current_image_width
     image_height = state.current_image_height
@@ -1427,6 +1707,13 @@ class RuntimeState:
         self.track_predicted_center_x = None
         self.track_predicted_bottom_y = None
         self.track_predicted_roi = None
+        self.track_dynamic_threshold = None
+        self.track_dynamic_threshold_rect = None
+        self.track_dynamic_threshold_generation = 0
+        self.track_dynamic_threshold_failure = None
+        self.track_dynamic_threshold_health_failures = 0
+        self.track_pending_dynamic_threshold = None
+        self.track_pending_dynamic_threshold_ok_frames = 0
         self.current_second_total_frames = 0
         self.current_second_yolo_frames = 0
         self.current_second_roi_frames = 0
@@ -1856,7 +2143,7 @@ def _filter_candidate_by_track(candidate):
 
 
 def _build_tracked_blob_object_candidates(img):
-    candidates = _build_blob_object_candidates(img)
+    candidates = _build_dynamic_blob_object_candidates(img)
     if state.track_task_name is not None:
         candidates = [candidate for candidate in candidates if candidate[0] == state.track_task_name]
     if not candidates:
@@ -1867,10 +2154,6 @@ def _build_tracked_blob_object_candidates(img):
     for candidate in candidates:
         reason = _candidate_tracking_failure_reason(candidate)
         if reason == TrackFailureReason.NONE:
-            if not _blob_is_separable_from_background(img, candidate[0], candidate[5]):
-                if failure_reason == TrackFailureReason.NO_CANDIDATE:
-                    failure_reason = TrackFailureReason.POOR_SEPARATION
-                continue
             filtered_candidates.append(candidate)
             continue
         if failure_reason == TrackFailureReason.NO_CANDIDATE:
@@ -1932,6 +2215,8 @@ def should_use_blob_tracking():
         return False
     if state.track_task_name is None or state.track_rect is None:
         return False
+    if state.track_dynamic_threshold is None:
+        return False
     if state.track_frames_since_yolo >= int(ROI_TRACKING_MAX_FRAMES):
         return False
     if state.track_roi_failure_frames >= int(ROI_TRACKING_FAILURE_TO_YOLO_FRAMES):
@@ -1952,6 +2237,9 @@ def should_run_yolo_for_current_frame():
 
 def remember_object_tracking(task_name, blob, center_x, center_y, bottom_y, area, source):
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    previous_task_name = state.track_task_name
+    previous_threshold = state.track_dynamic_threshold
+    previous_pending_threshold = state.track_pending_dynamic_threshold
     previous_center_x = state.track_center_x
     previous_bottom_y = state.track_bottom_y
     state.track_task_name = task_name
@@ -1981,6 +2269,68 @@ def remember_object_tracking(task_name, blob, center_x, center_y, bottom_y, area
         state.track_roi_success_frames = 0
     if source == "yolo":
         state.track_confidence = 80
+        same_lock = previous_task_name == task_name and previous_threshold is not None
+        if not same_lock:
+            next_threshold = _build_dynamic_threshold_for_blob(state.current_image, blob)
+            state.track_dynamic_threshold = next_threshold
+            state.track_pending_dynamic_threshold = None
+            state.track_pending_dynamic_threshold_ok_frames = 0
+            state.track_dynamic_threshold_health_failures = 0
+        elif _dynamic_threshold_center_is_healthy(state.current_image, blob, previous_threshold):
+            next_threshold = previous_threshold
+            state.track_dynamic_threshold = next_threshold
+            state.track_pending_dynamic_threshold = None
+            state.track_pending_dynamic_threshold_ok_frames = 0
+            state.track_dynamic_threshold_health_failures = 0
+            state.track_dynamic_threshold_failure = None
+        else:
+            next_threshold = previous_threshold
+            state.track_dynamic_threshold = next_threshold
+            state.track_dynamic_threshold_health_failures += 1
+            if state.track_dynamic_threshold_health_failures >= int(DYNAMIC_THRESHOLD_REFRESH_FAILURE_FRAMES):
+                if previous_pending_threshold is None:
+                    pending_threshold = _build_dynamic_threshold_for_blob(state.current_image, blob)
+                    pending_ok_frames = 0
+                else:
+                    pending_threshold = previous_pending_threshold
+                    pending_ok_frames = int(state.track_pending_dynamic_threshold_ok_frames)
+                if pending_threshold is not None and _dynamic_threshold_center_is_healthy(
+                    state.current_image,
+                    blob,
+                    pending_threshold,
+                ):
+                    pending_ok_frames += 1
+                    state.track_pending_dynamic_threshold = pending_threshold
+                    state.track_pending_dynamic_threshold_ok_frames = pending_ok_frames
+                    if pending_ok_frames >= int(DYNAMIC_THRESHOLD_REFRESH_CONFIRM_FRAMES):
+                        next_threshold = pending_threshold
+                        state.track_dynamic_threshold = next_threshold
+                        state.track_dynamic_threshold_generation += 1
+                        state.track_pending_dynamic_threshold = None
+                        state.track_pending_dynamic_threshold_ok_frames = 0
+                        state.track_dynamic_threshold_health_failures = 0
+                        state.track_dynamic_threshold_failure = None
+                else:
+                    state.track_pending_dynamic_threshold = None
+                    state.track_pending_dynamic_threshold_ok_frames = 0
+                    state.track_dynamic_threshold_failure = "calibration_failed"
+            else:
+                state.track_dynamic_threshold_failure = "health_check_failed"
+        state.track_dynamic_threshold_rect = (float(left), float(top), float(right), float(bottom))
+        if state.track_dynamic_threshold is not None:
+            estimated_area = _estimate_dynamic_foreground_area(
+                state.current_image,
+                blob,
+                state.track_dynamic_threshold,
+            )
+            if estimated_area is not None:
+                state.track_area = float(estimated_area)
+            if not same_lock:
+                state.track_dynamic_threshold_generation += 1
+            if state.track_dynamic_threshold_failure != "health_check_failed":
+                state.track_dynamic_threshold_failure = None
+        else:
+            state.track_dynamic_threshold_failure = "calibration_failed"
     elif source == "roi":
         state.track_confidence = min(100, max(int(state.track_confidence), 60) + 10)
     state.track_failure_reason = TrackFailureReason.NONE
