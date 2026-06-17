@@ -178,6 +178,22 @@ def test_master_main_v2_run_repeats_yolo_after_entering_transport_align() -> Non
     assert module.should_run_yolo_for_current_frame() is True
 
 
+def test_master_main_v2_yolo_miss_waits_configured_retry_frames() -> None:
+    module = load_master_v2()
+    module.MASTER_YOLO_RETRY_SKIP_FRAMES = 2
+    module.handle_control_frame(task_sync_frame(module))
+
+    module.record_yolo_retry_miss()
+
+    assert module.state.yolo_retry_skip_frames_remaining == 2
+    assert module.should_run_yolo_for_current_frame() is False
+    assert module.state.yolo_retry_skip_frames_remaining == 1
+    assert module.should_run_yolo_for_current_frame() is False
+    assert module.state.yolo_retry_skip_frames_remaining == 0
+
+    assert module.should_run_yolo_for_current_frame() is True
+
+
 def test_master_main_v2_run_skips_yolo_after_entering_orbit() -> None:
     module = load_master_v2()
     module.handle_control_frame(
@@ -814,39 +830,37 @@ def test_master_main_v2_process_task_frame_prints_object_debug_log_when_enabled(
     assert any("cand=1" in line for line in logs)
 
 
-def test_master_main_v2_debug_display_shows_preview_without_task_sync() -> None:
+def test_master_main_v2_debug_display_shows_finish_yellow_without_task_sync() -> None:
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
-    module.tf.detect = lambda net, img: [search_aligned_detection()]
     uart = FakeUART()
     module.state.uart_device = uart
     img = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
 
     run_frame(module, img)
 
     assert img.rectangles
-    assert any(entry[2] == "red" for entry in img.strings)
-    assert img.crosses
+    assert any("finish ratio=" in entry[2] for entry in img.strings)
+    assert any("touch=" in entry[2] for entry in img.strings)
+    assert any("stable=" in entry[2] for entry in img.strings)
     assert img.flush_count == 1
     assert uart.writes == []
 
 
-def test_master_main_v2_debug_preview_remembers_target_without_task_sync() -> None:
+def test_master_main_v2_debug_display_reports_finish_yellow_ratio_without_task_sync() -> None:
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
     img = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
     set_current_image(module, img)
-    blob = module.YoloDetectionBlob(150.0, 30.0, 170.0, 50.0, 1, 0.95)
-    module.state.current_detection_source = "yolo"
-    module.state.current_yolo_candidates = (("red", 160.0, 210.0, 400.0, blob),)
-    module.state.current_object_candidates = tuple(module.state.current_yolo_candidates)
 
     module.process_task_frame(img)
 
-    assert module.state.track_task_name == "red"
-    assert module.state.track_source == "yolo"
-    assert module.state.track_rect == (150.0, 30.0, 170.0, 50.0)
-    assert any("src=" in entry[2] for entry in img.strings)
+    assert any("finish ratio=100.0" in entry[2] for entry in img.strings)
+    assert any("touch=1" in entry[2] for entry in img.strings)
     assert img.flush_count == 1
 
 
@@ -1115,6 +1129,34 @@ def test_master_main_v2_finish_accepts_x_outside_when_bottom_hits_target_window(
     assert observation[3] == pytest.approx(400.0)
 
 
+def test_master_main_v2_finish_uses_flipped_candidate_bottom_for_target_window() -> None:
+    module = load_master_v2()
+    module.state.yolo_net = "fake-net"
+    target_x, target_y = module.build_search_target_point(module.Task.TRANSPORT_FINISH)
+    module.tf.detect = lambda net, img: [
+        pixel_detection(
+            target_x - 10.0,
+            IMAGE_HEIGHT - target_y,
+            target_x + 10.0,
+            IMAGE_HEIGHT - target_y + 20,
+        )
+    ]
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
+        )
+    )
+
+    cache_yolo_candidates(module)
+    observation, best_blob, _, _ = module.build_observation_and_candidates()
+
+    assert best_blob is not None
+    assert observation[2] == pytest.approx(0.0)
+
+
 def test_master_main_v2_finish_prefers_largest_area_after_bottom_filter() -> None:
     module = load_master_v2()
     module.state.yolo_net = "fake-net"
@@ -1206,6 +1248,122 @@ def test_master_main_v2_finish_uses_target_window_and_reports_arrived_after_cont
     }
 
 
+def test_master_main_v2_finish_observation_enters_contact_seen_and_pending_event() -> None:
+    module = load_master_v2()
+    module.state.yolo_net = "fake-net"
+    module.FINISH_HOOK_STABLE_FRAMES = 2
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=21,
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
+        )
+    )
+    uart = FakeUART()
+    module.state.uart_device = uart
+    img = FakeImage()
+    module.accept_observation((21, 0.0, 0.0, 1.0), img, event_value=100.0)
+    assert module.state.finish_contact_seen is True
+    assert module.state.stable_frame_count == 0
+    assert module.state.pending_event is None
+
+    module.accept_observation((21, 0.0, 0.0, 1.0), img, event_value=0.0)
+    module.accept_observation((21, 0.0, 0.0, 1.0), img, event_value=0.0)
+
+    assert module.state.pending_event is not None
+
+
+def test_master_main_v2_finish_debug_touch_uses_same_ratio_as_finish_acceptance() -> None:
+    module = load_master_v2()
+    module.MASTER_DEBUG_DISPLAY_ENABLED = True
+    module.state.yolo_net = "fake-net"
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=22,
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
+        )
+    )
+    module.state.uart_device = FakeUART()
+    img = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
+    module.state.current_detection_source = "roi"
+    target_x, target_y = module.build_search_target_point(module.Task.TRANSPORT_FINISH)
+    blob = module.YoloDetectionBlob(
+        target_x - 10.0,
+        IMAGE_HEIGHT - target_y,
+        target_x + 10.0,
+        IMAGE_HEIGHT - target_y + 20.0,
+        1,
+        0.95,
+    )
+    module.state.current_yolo_candidates = (("red", target_x, target_y, 400.0, blob),)
+    module.state.current_object_candidates = tuple(module.state.current_yolo_candidates)
+
+    module.process_task_frame(img)
+
+    assert module.state.finish_contact_seen is True
+    assert any("touch=1" in entry[2] for entry in img.strings)
+
+
+def test_master_main_v2_finish_process_task_frame_consumes_touch_into_finish_state() -> None:
+    module = load_master_v2()
+    module.state.yolo_net = "fake-net"
+    module.FINISH_HOOK_STABLE_FRAMES = 2
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=23,
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
+        )
+    )
+    module.state.uart_device = FakeUART()
+    img = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
+    module.state.current_detection_source = "roi"
+    target_x, target_y = module.build_search_target_point(module.Task.TRANSPORT_FINISH)
+    blob = module.YoloDetectionBlob(
+        target_x - 10.0,
+        IMAGE_HEIGHT - target_y,
+        target_x + 10.0,
+        IMAGE_HEIGHT - target_y + 20.0,
+        1,
+        0.95,
+    )
+    module.state.current_yolo_candidates = (("red", target_x, target_y, 400.0, blob),)
+    module.state.current_object_candidates = tuple(module.state.current_yolo_candidates)
+
+    module.process_task_frame(img)
+
+    assert module.state.finish_contact_seen is True
+    assert module.state.pending_event is None
+    assert module.state.stable_frame_count == 0
+
+
+def test_master_main_v2_debug_finish_without_task_sync_emits_local_pending_event_after_release() -> None:
+    module = load_master_v2()
+    module.MASTER_DEBUG_DISPLAY_ENABLED = True
+    module.FINISH_HOOK_STABLE_FRAMES = 2
+    module.state.uart_device = FakeUART()
+    touch_img = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(touch_img)
+    touch_img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
+
+    module.process_task_frame(touch_img)
+    module.process_task_frame(FakeImage())
+    module.process_task_frame(FakeImage())
+
+    assert module.state.finish_contact_seen is True
+    assert module.state.pending_event is not None
+
 def test_master_main_v2_finish_yellow_ratio_uses_fixed_object_roi() -> None:
     module = load_master_v2()
     img = FakeImage()
@@ -1218,7 +1376,7 @@ def test_master_main_v2_finish_yellow_ratio_uses_fixed_object_roi() -> None:
 
     img.yellow_area_by_roi[tuple(fixed_roi)] = yellow_area
 
-    assert fixed_roi == (80, 160, 160, 80)
+    assert fixed_roi == (80, 0, 160, 80)
     assert module.build_finish_task_yellow_ratio_percent(img, FarObjectBlob()) == pytest.approx(100.0)
 
 
@@ -1371,8 +1529,8 @@ def test_master_main_v2_pending_event_blocks_non_return_velocity_until_ack() -> 
     assert decode_frame(uart.writes[-1])["topic"] == module.Topic.LOCAL_VISION_VELOCITY
 
 
-def test_master_main_v2_run_applies_lens_correction_and_uses_yolo_preview_without_task_sync() -> None:
-    """主车调试模式下即使没有任务同步也应先跑预览识别."""
+def test_master_main_v2_run_applies_lens_correction_and_shows_finish_yellow_debug_without_task_sync() -> None:
+    """主车调试模式下没有任务同步时显示搬运结束黄线判定结果."""
 
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
@@ -1383,8 +1541,8 @@ def test_master_main_v2_run_applies_lens_correction_and_uses_yolo_preview_withou
         pass
 
     class SnapshotImage(FakeImage):
-        def __init__(self):
-            super().__init__()
+        def __init__(self, pixels=None):
+            super().__init__(pixels=pixels)
             self.lens_corr_called = False
 
         def lens_corr(self, strength, zoom):
@@ -1393,7 +1551,13 @@ def test_master_main_v2_run_applies_lens_correction_and_uses_yolo_preview_withou
             self.lens_corr_called = True
             return self
 
+        def flush(self):
+            super().flush()
+            raise StopLoop()
+
     image = SnapshotImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(image)
+    image.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
     class Sensor:
         def snapshot(self):
             return image
@@ -1403,26 +1567,11 @@ def test_master_main_v2_run_applies_lens_correction_and_uses_yolo_preview_withou
     module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
     module.process_uart_input = lambda rx_buffer: rx_buffer
 
-    class FakeBlob:
-        def rect(self):
-            return (150, 30, 20, 20)
-
     def fake_yolo_detect(img):
-        assert img is image
-        return [("red", 160.0, 210.0, 400.0, FakeBlob())]
-
-    def stop_after_frame(current_img):
-        assert current_img is image
-        assert module.state.current_image is image
-        assert image.lens_corr_called is True
-        assert tuple(candidate[:4] for candidate in module.state.current_yolo_candidates) == (
-            ("red", 160.0, 210.0, 400.0),
-        )
-        assert module.state.current_detection_source == "yolo"
-        raise StopLoop()
+        _ = img
+        raise AssertionError("上电黄线调试不应调用 yolo_detect")
 
     module.yolo_detect = fake_yolo_detect
-    module.process_task_frame = stop_after_frame
     module.write_reliable_line = lambda _frame_bytes: (_ for _ in ()).throw(
         AssertionError("上电调试预览不应发送底盘暂停控制")
     )
@@ -1431,9 +1580,42 @@ def test_master_main_v2_run_applies_lens_correction_and_uses_yolo_preview_withou
         module.run()
 
     assert module.state.current_second_total_frames == 1
-    assert module.state.current_second_yolo_frames == 1
+    assert module.state.current_second_yolo_frames == 0
+    assert module.state.current_image is image
+    assert image.lens_corr_called is True
+    assert tuple(module.state.current_yolo_candidates) == ()
+    assert tuple(module.state.current_object_candidates) == ()
+    assert image.flush_count == 1
+    assert any("finish ratio=" in entry[2] for entry in image.strings)
+    assert any("touch=" in entry[2] for entry in image.strings)
+    assert any("stable=" in entry[2] for entry in image.strings)
     assert any("[master_v2][boot]" in line for line in logs)
     assert any("debug=1" in line for line in logs)
+
+
+def test_master_main_v2_finish_debug_shows_pending_event_when_contact_stabilizes() -> None:
+    module = load_master_v2()
+    module.state.current_task = {
+        "context_id": 12,
+        "state": module.State.TRANSPORT_OBJECT,
+        "target": module.Target.EDGE_LINE,
+        "arg": module.Task.TRANSPORT_FINISH,
+    }
+    module.state.finish_contact_seen = True
+    module.state.stable_frame_count = int(module.FINISH_HOOK_STABLE_FRAMES) - 1
+    module.state.pending_event = {"event": module.Event.ARRIVED}
+
+    class ImageWithYellow(FakeImage):
+        def __init__(self):
+            super().__init__()
+            roi = module.build_finish_task_fixed_object_roi(self)
+            self.yellow_area_by_roi[tuple(roi)] = int(roi[2]) * int(roi[3])
+
+    image = ImageWithYellow()
+    module.draw_finish_task_debug(image, None, 100.0)
+
+    assert any("event=1" in entry[2] for entry in image.strings)
+    assert any("touch=1" in entry[2] for entry in image.strings)
 
 
 def test_master_main_v2_run_requests_reliable_pause_before_yolo() -> None:
@@ -1539,65 +1721,43 @@ def test_master_main_v2_yolo_frame_suppresses_velocity_and_requests_resume() -> 
     assert module.state.current_detection_source == "yolo"
 
 
-def test_master_main_v2_debug_preview_uses_blob_tracking_over_cached_yolo_without_task_sync() -> None:
+def test_master_main_v2_finish_debug_ignores_cached_object_tracking_without_task_sync() -> None:
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
-
-    class PreviewBlob:
-        def rect(self):
-            return (150, 10, 20, 20)
-
-        def cx(self):
-            return 160.0
-
-        def area(self):
-            return 400.0
-
-    class SnapshotImage(FakeImage):
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=None):
-            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
-            return [PreviewBlob()]
-
-    image = SnapshotImage()
+    image = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(image)
+    image.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
     set_current_image(module, image)
     _seed_master_short_track(module)
     yolo_blob = module.YoloDetectionBlob(150.0, 30.0, 170.0, 50.0, 1, 0.95)
     module.state.current_detection_source = "yolo"
     module.state.current_yolo_candidates = (("red", 160.0, 210.0, 400.0, yolo_blob),)
-    module.state.current_object_candidates = tuple(module.build_object_candidates(image, ()))
+    module.state.current_object_candidates = tuple(module.state.current_yolo_candidates)
 
     module.process_task_frame(image)
 
     assert tuple(module.state.current_yolo_candidates[:1])[0][:4] == ("red", 160.0, 210.0, 400.0)
-    assert tuple(module.state.current_object_candidates[:1])[0][:4] == ("red", 160.0, 230.0, 400.0)
-    assert module.state.current_detection_source == "roi"
-    assert module.state.track_source == "roi"
+    assert tuple(module.state.current_object_candidates[:1])[0][:4] == ("red", 160.0, 210.0, 400.0)
+    assert module.state.track_source == "yolo"
+    assert any("finish ratio=" in entry[2] for entry in image.strings)
     assert image.flush_count == 1
 
 
-def test_master_main_v2_run_skips_yolo_in_debug_preview_when_blob_tracking_is_active() -> None:
+def test_master_main_v2_run_shows_finish_debug_when_blob_tracking_is_active() -> None:
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
 
     class StopLoop(Exception):
         pass
 
-    class PreviewBlob:
-        def rect(self):
-            return (150, 10, 20, 20)
-
-        def cx(self):
-            return 160.0
-
-        def area(self):
-            return 400.0
-
     class SnapshotImage(FakeImage):
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=None):
-            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
-            return [PreviewBlob()]
+        def flush(self):
+            super().flush()
+            raise StopLoop()
 
     image = SnapshotImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(image)
+    image.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
 
     class Sensor:
         def snapshot(self):
@@ -1619,20 +1779,14 @@ def test_master_main_v2_run_skips_yolo_in_debug_preview_when_blob_tracking_is_ac
         yolo_call_count += 1
         return []
 
-    def stop_after_flush():
-        raise StopLoop()
-
-    image.flush = stop_after_flush
     module.yolo_detect = fake_yolo_detect
 
     with pytest.raises(StopLoop):
         module.run()
 
     assert tuple(module.state.current_yolo_candidates) == ()
-    assert tuple(module.state.current_object_candidates) == (
-        ("red", 160.0, 230.0, 400.0, module.state.current_object_candidates[0][4]),
-    )
-    assert module.state.current_detection_source == "roi"
+    assert tuple(module.state.current_object_candidates) == ()
+    assert any("finish ratio=" in entry[2] for entry in image.strings)
     assert yolo_call_count == 0
 
 

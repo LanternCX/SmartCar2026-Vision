@@ -99,7 +99,7 @@ YOLO_MIN_SCORE = 0.50
 # YOLO 输出标签顺序, 需与模型保持一致
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
 # 视觉控制的参考帧率, 用于按时间尺度理解速度响应
-VISION_REFERENCE_FPS = 30.0
+VISION_REFERENCE_FPS = 25.0
 
 # 色块候选合并边距, 单位为 px
 OBJECT_BLOB_MERGE_MARGIN = 0

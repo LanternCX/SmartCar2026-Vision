@@ -94,10 +94,12 @@ YOLO_MODEL_PATH = "/sd/yolo.tflite"
 YOLO_IMAGE_COPY_SCALE = 0.75
 # YOLO 检测最小置信度阈值
 YOLO_MIN_SCORE = 0.50
+# YOLO 未命中后跳过重新尝试的帧数
+MASTER_YOLO_RETRY_SKIP_FRAMES = 10
 # YOLO 输出标签顺序, 需与模型保持一致
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
 # 视觉控制的参考帧率, 用于按时间尺度理解速度响应
-VISION_REFERENCE_FPS = 30
+VISION_REFERENCE_FPS = 25
 
 # 目标最小有效面积阈值
 OBJECT_MIN_AREA = 50.0
@@ -253,6 +255,8 @@ class RuntimeState:
         self.current_image_height = PROTOCOL_IMAGE_HEIGHT
         self.current_frame_interval_ms = 0.0
         self.current_detection_source = "miss"
+        self.yolo_retry_skip_frames_remaining = 0
+        self.yolo_retry_skip_active_for_frame = False
         self.clear_track()
 
     def clear_track(self):
@@ -376,6 +380,8 @@ class RuntimeState:
         self.current_image_height = PROTOCOL_IMAGE_HEIGHT
         self.current_frame_interval_ms = reference_frame_interval_ms()
         self.current_detection_source = "miss"
+        self.yolo_retry_skip_frames_remaining = 0
+        self.yolo_retry_skip_active_for_frame = False
         self.clear_track()
 
 
@@ -1104,6 +1110,24 @@ def is_entry_yolo_only_task_context():
     )
 
 
+def record_yolo_retry_miss():
+    state.yolo_retry_skip_frames_remaining = max(0, int(MASTER_YOLO_RETRY_SKIP_FRAMES))
+
+
+def clear_yolo_retry_skip():
+    state.yolo_retry_skip_frames_remaining = 0
+    state.yolo_retry_skip_active_for_frame = False
+
+
+def should_skip_yolo_retry_frame():
+    state.yolo_retry_skip_active_for_frame = False
+    if state.yolo_retry_skip_frames_remaining <= 0:
+        return False
+    state.yolo_retry_skip_frames_remaining -= 1
+    state.yolo_retry_skip_active_for_frame = True
+    return True
+
+
 def should_run_yolo_for_current_frame():
     if state.pending_event is not None:
         return False
@@ -1113,6 +1137,8 @@ def should_run_yolo_for_current_frame():
     if current_task is not None and is_entry_yolo_only_task_context():
         return bool(state.entry_yolo_pending)
     if state.current_task is None and not MASTER_DEBUG_DISPLAY_ENABLED:
+        return False
+    if current_task is not None and should_skip_yolo_retry_frame():
         return False
     return not should_use_blob_tracking()
 
@@ -1495,12 +1521,17 @@ def build_finish_task_ring_rois(blob, img):
 def build_finish_task_fixed_object_roi(img):
     image_width = int(img.width())
     image_height = int(img.height())
-    left = int(float(image_width) * float(FINISH_HOOK_FIXED_OBJECT_ROI_LEFT_RATIO))
-    right = int(float(image_width) * float(FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO))
-    top = int(float(image_height) * float(FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO))
-    right = min(int(image_width), max(int(left), int(right)))
-    top = min(int(image_height), max(0, int(top)))
-    return (int(left), int(top), int(right) - int(left), int(image_height) - int(top))
+    display_left = int(float(image_width) * float(FINISH_HOOK_FIXED_OBJECT_ROI_LEFT_RATIO))
+    display_right = int(float(image_width) * float(FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO))
+    display_top = int(float(image_height) * float(FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO))
+    display_left = max(0, min(int(image_width), int(display_left)))
+    display_right = max(int(display_left), min(int(image_width), int(display_right)))
+    display_top = max(0, min(int(image_height), int(display_top)))
+    left = int(image_width) - int(display_right)
+    right = int(image_width) - int(display_left)
+    top = 0
+    bottom = int(image_height) - int(display_top)
+    return (int(left), int(top), int(right) - int(left), int(bottom) - int(top))
 
 
 def _count_yellow_pixels_in_roi(img, roi):
@@ -1672,10 +1703,41 @@ def draw_tracking_state_debug(img):
 def draw_finish_task_debug(img, blob, yellow_ratio):
     _ = blob
     img.draw_rectangle(build_finish_task_fixed_object_roi(img), color=(255, 255, 0), thickness=1)
+    touched = float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0
+    event_type = current_event_type()
+    pending_finish_event = (
+        state.pending_event is not None
+        and event_type is not None
+        and int(state.pending_event.get("event", 0)) == int(event_type)
+    )
     img.draw_string(
         2,
         50,
         "finish ratio=%.1f" % float(yellow_ratio),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+    img.draw_string(
+        2,
+        62,
+        "touch=%d seen=%d thr=%.1f" % (
+            1 if touched else 0,
+            1 if bool(state.finish_contact_seen) else 0,
+            float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0,
+        ),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+    img.draw_string(
+        2,
+        74,
+        "stable=%d/%d event=%d" % (
+            int(state.stable_frame_count),
+            int(required_stable_frames()),
+            1 if pending_finish_event else 0,
+        ),
         color=(255, 255, 255),
         scale=1,
         mono_space=False,
@@ -2514,6 +2576,24 @@ def _accept_return_line_observation(context_id, observation_value, img, event_ty
         create_pending_event(context_id, event_type, 0)
 
 
+def _process_debug_finish_preview_frame(img):
+    debug_task = {
+        "context_id": 0,
+        "state": int(State.TRANSPORT_OBJECT),
+        "target": int(Target.EDGE_LINE),
+        "arg": int(Task.TRANSPORT_FINISH),
+    }
+    previous_task = state.current_task
+    state.current_task = debug_task
+    try:
+        yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
+        accept_observation((0, 0.0, 0.0, 1.0), img, event_value=yellow_ratio)
+        draw_finish_task_debug(img, None, yellow_ratio)
+        img.flush()
+    finally:
+        state.current_task = previous_task
+
+
 def accept_observation(observation, img, event_value=None):
     if state.local_vision_control_paused:
         state.stable_frame_count = 0
@@ -2585,6 +2665,7 @@ def handle_control_frame(frame_bytes):
             )
             state.last_return_line_y = None
             state.return_line_finish_missing_count = 0
+            clear_yolo_retry_skip()
             state.clear_track()
         return format_ack_frame(packet["reliable_seq"])
 
@@ -2651,6 +2732,9 @@ def _process_return_line_frame(img):
 
 
 def process_task_frame(img):
+    if state.current_task is None and MASTER_DEBUG_DISPLAY_ENABLED:
+        _process_debug_finish_preview_frame(img)
+        return
     if state.pending_event is not None:
         event_frame = next_event_frame()
         if event_frame is not None:
@@ -2659,34 +2743,8 @@ def process_task_frame(img):
             return
     if state.current_task is None:
         if MASTER_DEBUG_DISPLAY_ENABLED:
-            observation, best_blob, task_name, _candidates = build_observation_and_candidates()
-            debug_log(
-                "preview",
-                "src=%s cand=%d best=%s conf=%d fail=%s" % (
-                    tracking_source_debug_name(state.current_detection_source).lower(),
-                    len(_candidates),
-                    task_name if task_name is not None else "none",
-                    int(state.track_confidence),
-                    tracking_failure_debug_name(state.track_failure_reason),
-                ),
-            )
-            if best_blob is not None and state.current_detection_source != "predict":
-                remember_object_tracking(
-                    task_name,
-                    best_blob,
-                    best_blob.cx(),
-                    observation[2] + build_search_target_point(current_task_config_id())[1],
-                    observation[3],
-                    state.current_detection_source,
-                )
-            elif state.current_detection_source == "yolo":
-                state.clear_track()
-            draw_object_candidates_debug(img, _candidates)
-            if best_blob is not None and task_name is not None:
-                draw_selected_candidate_debug(img, task_name, best_blob)
-            target_x, target_y = build_search_target_point(current_task_config_id())
-            draw_protocol_target_point_debug(img, target_x, target_y)
-            draw_tracking_state_debug(img)
+            yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
+            draw_finish_task_debug(img, None, yellow_ratio)
             img.flush()
         return
     if is_return_line_task_context():
@@ -2786,7 +2844,10 @@ def run():
             state.current_object_candidates = ()
             debug_log("skip", "reason=return_line")
         else:
-            if state.current_task is not None or MASTER_DEBUG_DISPLAY_ENABLED:
+            if state.current_task is None and MASTER_DEBUG_DISPLAY_ENABLED:
+                state.current_yolo_candidates = ()
+                state.current_object_candidates = ()
+            elif state.current_task is not None or MASTER_DEBUG_DISPLAY_ENABLED:
                 need_yolo = should_run_yolo_for_current_frame()
                 if not need_yolo:
                     state.current_yolo_candidates = ()
@@ -2800,7 +2861,10 @@ def run():
                             state.current_detection_source = "miss"
                         need_yolo = False
                     else:
-                        need_yolo = state.current_detection_source == "yolo"
+                        need_yolo = (
+                            state.current_detection_source == "yolo"
+                            and not state.yolo_retry_skip_active_for_frame
+                        )
                 if need_yolo:
                     yolo_requires_control = state.current_task is not None
                     if yolo_requires_control and not ensure_yolo_control_paused():
@@ -2811,6 +2875,9 @@ def run():
                         raw_yolo_candidates = tuple(yolo_detect(img))
                         if raw_yolo_candidates:
                             state.current_detection_source = "yolo"
+                            clear_yolo_retry_skip()
+                        else:
+                            record_yolo_retry_miss()
                         state.current_yolo_candidates = raw_yolo_candidates
                         state.current_object_candidates = tuple(
                             build_object_candidates(img, raw_yolo_candidates)
