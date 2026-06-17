@@ -90,10 +90,10 @@ SEQ_RING_SIZE = 256
 # 判断序号新旧使用的半环长度。
 SEQ_HALF_RING = 128
 # 固定帧 body 槽位长度。
-FRAME_BODY_SIZE = 8
+FRAME_BODY_SIZE = 10
 FRAME_HEAD = 0xA5
 # 固定帧总长度。
-FRAME_SIZE = 13
+FRAME_SIZE = 15
 # 物体识别开关。False 使用色块阈值，True 使用 YOLO。
 OBJECT_DETECTION_USE_YOLO = False
 # YOLO 模型文件路径，对应部署到 OpenART SD 卡根目录的模型文件。

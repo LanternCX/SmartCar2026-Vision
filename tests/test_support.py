@@ -9,9 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ASSISTANT_MAIN_PATH = ROOT / "assistant" / "main.py"
 
-FRAME_BODY_SIZE = 8
+FRAME_BODY_SIZE = 10
 FRAME_HEAD = 0xA5
-FRAME_SIZE = 13
+FRAME_SIZE = 15
 MODE_UDP = 0x01
 MODE_TCP = 0x02
 MODE_ACK = 0x03
@@ -219,30 +219,56 @@ def decode_master_vision_hook_sync_body(body: bytes):
     }
 
 
-def encode_assistant_vision_task_sync_body(state: int, target: int, arg: int) -> bytes:
+def _pack_i8(value: int) -> int:
+    value = int(value)
+    if value < 0:
+        value += 256
+    return value
+
+
+def _unpack_i8(value: int) -> int:
+    value = int(value)
+    if value >= 128:
+        return value - 256
+    return value
+
+
+def encode_assistant_vision_task_sync_body(state: int, target: int, arg: int, threshold=None) -> bytes:
     """编码辅车视觉同步 body."""
 
-    return bytes([int(state), int(target)]) + _pack_i16(arg)
+    if threshold is None:
+        threshold = (0, 0, 0, 0, 0, 0)
+    return bytes([int(state), int(target)]) + _pack_i16(arg) + bytes(
+        _pack_i8(value) for value in threshold
+    )
 
 
 def decode_assistant_vision_task_sync_body(body: bytes):
     """解码辅车视觉同步 body."""
 
-    return {
+    packet = {
         "state": int(body[0]),
         "target": int(body[1]),
         "arg": _unpack_i16(body, 2),
     }
+    threshold = tuple(_unpack_i8(value) for value in body[4:10])
+    if any(threshold):
+        packet["threshold"] = threshold
+    return packet
 
 
 def decode_master_vision_event_report_body(body: bytes):
     """解码主车视觉事件 body."""
 
-    return {
+    packet = {
         "context_id": int(body[0]),
         "event": int(body[1]),
         "value": _unpack_i16(body, 2),
     }
+    threshold = tuple(_unpack_i8(value) for value in body[4:10])
+    if any(threshold):
+        packet["threshold"] = threshold
+    return packet
 
 
 def decode_assistant_vision_event_report_body(body: bytes):
@@ -254,14 +280,14 @@ def decode_assistant_vision_event_report_body(body: bytes):
     }
 
 
-def assistant_sync_frame(seq: int, state: int, target: int, arg: int) -> bytes:
+def assistant_sync_frame(seq: int, state: int, target: int, arg: int, threshold=None) -> bytes:
     """构造辅车视觉同步帧."""
 
     return encode_frame(
         MODE_TCP,
         TOPIC_ASSISTANT_VISION_TASK_SYNC,
         seq,
-        encode_assistant_vision_task_sync_body(state, target, arg),
+        encode_assistant_vision_task_sync_body(state, target, arg, threshold),
     )
 
 

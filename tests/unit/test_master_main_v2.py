@@ -34,6 +34,16 @@ def set_current_image(module, img):
     module.state.current_image_height = img.height()
 
 
+def start_run_as_local_vision_paused(module):
+    original_reset_runtime_state = module.reset_runtime_state
+
+    def reset_as_paused():
+        original_reset_runtime_state()
+        module.state.local_vision_control_paused = True
+
+    module.reset_runtime_state = reset_as_paused
+
+
 def test_master_main_v2_default_configuration_reports_target_found_after_configured_observations() -> None:
     module = load_role_entry_module(
         "master",
@@ -453,7 +463,7 @@ def test_master_main_v2_replies_task_sync_ack_and_records_task() -> None:
         "mode": MODE_ACK,
         "topic": module.Topic.MASTER_VISION_TASK_SYNC,
         "seq": 12,
-        "body": b"\x00" * 8,
+        "body": b"\x00" * 10,
     }
     assert module.state.current_task["context_id"] == 7
     assert module.state.current_task["arg"] == module.Task.SEARCH
@@ -502,7 +512,7 @@ def test_master_main_v2_process_uart_input_replies_ack_for_task_sync_frame() -> 
         "mode": MODE_ACK,
         "topic": module.Topic.MASTER_VISION_TASK_SYNC,
         "seq": 12,
-        "body": b"\x00" * 8,
+        "body": b"\x00" * 10,
     }
     assert module.state.current_task is not None
 
@@ -601,6 +611,24 @@ def test_master_main_v2_repeats_event_until_matching_ack() -> None:
 
     assert second == first
     assert module.next_event_frame() is None
+
+
+def test_master_main_v2_event_report_carries_current_dynamic_threshold() -> None:
+    module = load_master_v2()
+    threshold = (12, 80, -30, 40, -20, 60)
+    module.state.track_dynamic_threshold = threshold
+
+    module.create_pending_event(7, module.Event.TARGET_FOUND, 2)
+
+    frame = decode_frame(module.next_event_frame())
+    assert frame is not None
+    event = decode_master_vision_event_report_body(frame["body"])
+    assert event == {
+        "context_id": 7,
+        "event": module.Event.TARGET_FOUND,
+        "value": 2,
+        "threshold": threshold,
+    }
 
 
 def test_master_main_v2_creates_target_found_once_per_context() -> None:
@@ -1292,6 +1320,9 @@ def test_master_main_v2_run_applies_lens_correction_and_uses_yolo_preview_withou
 
     module.yolo_detect = fake_yolo_detect
     module.process_task_frame = stop_after_frame
+    module.write_reliable_line = lambda _frame_bytes: (_ for _ in ()).throw(
+        AssertionError("上电调试预览不应发送底盘暂停控制")
+    )
 
     with pytest.raises(StopLoop):
         module.run()
@@ -1300,6 +1331,109 @@ def test_master_main_v2_run_applies_lens_correction_and_uses_yolo_preview_withou
     assert module.state.current_second_yolo_frames == 1
     assert any("[master_v2][boot]" in line for line in logs)
     assert any("debug=1" in line for line in logs)
+
+
+def test_master_main_v2_run_requests_reliable_pause_before_yolo() -> None:
+    module = load_master_v2()
+    module.MASTER_DEBUG_DISPLAY_ENABLED = True
+
+    class StopLoop(Exception):
+        pass
+
+    image = FakeImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    uart = FakeUART()
+    module.sensor = Sensor()
+    module.init_uart = lambda: uart
+    module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    def prime_search_task(rx_buffer):
+        module.state.current_task = {
+            "context_id": 12,
+            "state": module.State.SEARCH_OBJECT,
+            "target": module.Target.OBJECT,
+            "arg": module.Task.SEARCH,
+        }
+        return rx_buffer
+
+    module.process_uart_input = prime_search_task
+    module.yolo_detect = lambda img: (_ for _ in ()).throw(AssertionError("暂停确认前不应运行 YOLO"))
+
+    def stop_after_reliable(frame_bytes):
+        uart.write(frame_bytes)
+        raise StopLoop()
+
+    module.write_reliable_line = stop_after_reliable
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+    frame = decode_frame(uart.writes[-1])
+    assert frame is not None
+    assert frame["mode"] == MODE_TCP
+    assert frame["topic"] == module.Topic.LOCAL_VISION_CONTROL
+    assert frame["body"][0] == module.LocalVisionControl.PAUSE
+
+
+def test_master_main_v2_yolo_frame_suppresses_velocity_and_requests_resume() -> None:
+    module = load_master_v2()
+    module.MASTER_DEBUG_DISPLAY_ENABLED = True
+    start_run_as_local_vision_paused(module)
+
+    class StopLoop(Exception):
+        pass
+
+    class FakeBlob:
+        def rect(self):
+            return (150, 30, 20, 20)
+
+    image = FakeImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    uart = FakeUART()
+    module.sensor = Sensor()
+    module.init_uart = lambda: uart
+    module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    def prime_search_task(rx_buffer):
+        module.state.current_task = {
+            "context_id": 12,
+            "state": module.State.SEARCH_OBJECT,
+            "target": module.Target.OBJECT,
+            "arg": module.Task.SEARCH,
+        }
+        return rx_buffer
+
+    module.process_uart_input = prime_search_task
+    module.yolo_detect = lambda img: [("red", 160.0, 210.0, 400.0, FakeBlob())]
+
+    def fail_data_write(frame_bytes):
+        _ = frame_bytes
+        raise AssertionError("YOLO 暂停帧不应发送速度")
+
+    def stop_after_resume(frame_bytes):
+        uart.write(frame_bytes)
+        raise StopLoop()
+
+    module.write_data_line = fail_data_write
+    module.write_reliable_line = stop_after_resume
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+    frame = decode_frame(uart.writes[-1])
+    assert frame is not None
+    assert frame["mode"] == MODE_TCP
+    assert frame["topic"] == module.Topic.LOCAL_VISION_CONTROL
+    assert frame["body"][0] == module.LocalVisionControl.RESUME
+    assert module.state.current_detection_source == "yolo"
 
 
 def test_master_main_v2_debug_preview_uses_blob_tracking_over_cached_yolo_without_task_sync() -> None:
@@ -1540,6 +1674,7 @@ def test_master_main_v2_run_falls_back_to_yolo_after_roi_failure() -> None:
     module = load_master_v2()
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 1
+    start_run_as_local_vision_paused(module)
 
     class StopLoop(Exception):
         pass
@@ -1587,11 +1722,14 @@ def test_master_main_v2_run_falls_back_to_yolo_after_roi_failure() -> None:
     yolo_blob = FakeBlob()
     module.yolo_detect = lambda img: [("red", 160.0, 210.0, 400.0, yolo_blob)]
 
-    def stop_after_write(frame_bytes):
-        _ = frame_bytes
+    def stop_after_resume(frame_bytes):
+        frame = decode_frame(frame_bytes)
+        assert frame is not None
+        assert frame["topic"] == module.Topic.LOCAL_VISION_CONTROL
+        assert frame["body"][0] == module.LocalVisionControl.RESUME
         raise StopLoop()
 
-    module.write_data_line = stop_after_write
+    module.write_reliable_line = stop_after_resume
 
     with pytest.raises(StopLoop):
         module.run()
@@ -2146,6 +2284,60 @@ def test_master_main_v2_refreshes_dynamic_threshold_after_consecutive_unhealthy_
     assert module.state.track_dynamic_threshold == new_threshold
     assert module.state.track_dynamic_threshold_generation == old_generation + 1
     assert module.state.track_dynamic_threshold_health_failures == 0
+
+
+def test_master_main_v2_keeps_dynamic_threshold_in_non_search_state() -> None:
+    module = load_master_v2()
+    module.image.rgb_to_lab = lambda pixel: pixel
+    module.DYNAMIC_THRESHOLD_REFRESH_FAILURE_FRAMES = 1
+    module.state.current_task = {
+        "context_id": 12,
+        "state": module.State.ORBITING,
+        "target": module.Target.OBJECT,
+        "arg": module.Task.ORBIT,
+    }
+
+    class YoloBlob:
+        def __init__(self, left, top, width, height):
+            self._rect = (left, top, width, height)
+
+        def rect(self):
+            return self._rect
+
+        def cx(self):
+            left, _top, width, _height = self._rect
+            return float(left) + float(width) / 2.0
+
+        def area(self):
+            _left, _top, width, height = self._rect
+            return float(width) * float(height)
+
+    first_img = DynamicThresholdCalibrationImage(
+        (150, 30, 170, 50),
+        (30, 40, 20),
+        (80, 0, 0),
+    )
+    set_current_image(module, first_img)
+    module.remember_object_tracking("red", YoloBlob(150, 30, 20, 20), 160.0, 210.0, 400.0, "yolo")
+
+    old_threshold = module.state.track_dynamic_threshold
+    old_generation = module.state.track_dynamic_threshold_generation
+    second_img = DynamicThresholdCalibrationImage(
+        (150, 30, 170, 50),
+        (90, 0, 0),
+        (80, 0, 0),
+    )
+    set_current_image(module, second_img)
+    module._build_dynamic_threshold_for_blob = lambda _img, _blob: (_ for _ in ()).throw(
+        AssertionError("非寻找态不应重复计算动态阈值")
+    )
+
+    module.remember_object_tracking("red", YoloBlob(150, 30, 20, 20), 160.0, 210.0, 400.0, "yolo")
+
+    assert module.state.track_dynamic_threshold == old_threshold
+    assert module.state.track_dynamic_threshold_generation == old_generation
+    assert module.state.track_dynamic_threshold_health_failures == 0
+    assert module.state.track_pending_dynamic_threshold is None
 
 
 def test_master_main_v2_recomputes_dynamic_threshold_after_track_reset() -> None:

@@ -52,7 +52,7 @@ def test_master_main_v2_formats_velocity_and_reliable_event_frames() -> None:
         "mode": MODE_ACK,
         "topic": module.Topic.MASTER_VISION_TASK_SYNC,
         "seq": 12,
-        "body": b"\x00" * 8,
+        "body": b"\x00" * 10,
     }
     assert event_frame is not None
     assert event_frame["mode"] == MODE_TCP
@@ -136,7 +136,7 @@ def test_assistant_main_v2_formats_velocity_and_reliable_event_frames_with_maste
         "mode": MODE_ACK,
         "topic": module.Topic.ASSISTANT_VISION_TASK_SYNC,
         "seq": 12,
-        "body": b"\x00" * 8,
+        "body": b"\x00" * 10,
     }
     assert event_frame is not None
     assert event_frame["mode"] == MODE_TCP

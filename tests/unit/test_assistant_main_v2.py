@@ -16,6 +16,16 @@ def load_assistant_v2():
     return module
 
 
+def start_run_as_local_vision_paused(module):
+    original_reset_runtime_state = module.reset_runtime_state
+
+    def reset_as_paused():
+        original_reset_runtime_state()
+        module.state.local_vision_control_paused = True
+
+    module.reset_runtime_state = reset_as_paused
+
+
 legacy_tests.load_assistant = load_assistant_v2
 
 
@@ -387,6 +397,9 @@ def test_assistant_main_v2_run_applies_lens_correction_and_uses_yolo_preview_wit
 
     module.yolo_detect = fake_yolo_detect
     module.process_task_frame = stop_after_frame
+    module.write_reliable_line = lambda _frame_bytes: (_ for _ in ()).throw(
+        AssertionError("上电调试预览不应发送底盘暂停控制")
+    )
 
     with pytest.raises(StopLoop):
         module.run()
@@ -395,6 +408,142 @@ def test_assistant_main_v2_run_applies_lens_correction_and_uses_yolo_preview_wit
     assert module.state.current_second_yolo_frames == 1
     assert any("[assistant_v2][boot]" in line for line in logs)
     assert any("debug=1" in line for line in logs)
+
+
+def test_assistant_main_v2_run_requests_reliable_pause_before_yolo() -> None:
+    module = load_assistant_v2()
+    module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
+
+    class StopLoop(Exception):
+        pass
+
+    class SnapshotImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def lens_corr(self, strength, zoom):
+            _ = (strength, zoom)
+            return self
+
+    image = SnapshotImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    uart = legacy_tests.FakeUART()
+    module.sensor = Sensor()
+    module.init_uart = lambda: uart
+    module.init_sensor = lambda: (legacy_tests.IMAGE_WIDTH, legacy_tests.IMAGE_HEIGHT)
+
+    def prime_search_sync(rx_buffer):
+        module.state.current_sync = {
+            "reliable_seq": 12,
+            "state": module.State.APPROACH_OBJECT,
+            "target": module.Target.OBJECT,
+            "arg": module.pack_task_arg(module.Task.SEARCH, 1),
+        }
+        module.state.mode = module.RunMode.APPROACH_OBJECT
+        return rx_buffer
+
+    module.process_uart_input = prime_search_sync
+    module.yolo_detect = lambda img: (_ for _ in ()).throw(AssertionError("暂停确认前不应运行 YOLO"))
+
+    def stop_after_reliable(frame_bytes):
+        uart.write(frame_bytes)
+        raise StopLoop()
+
+    module.write_reliable_line = stop_after_reliable
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+    frame = module.decode_frame(uart.writes[-1])
+    assert frame is not None
+    assert frame["mode"] == module.Mode.TCP
+    assert frame["topic"] == module.Topic.LOCAL_VISION_CONTROL
+    assert frame["body"][0] == module.LocalVisionControl.PAUSE
+
+
+def test_assistant_main_v2_yolo_frame_suppresses_velocity_and_requests_resume() -> None:
+    module = load_assistant_v2()
+    module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
+    start_run_as_local_vision_paused(module)
+
+    class StopLoop(Exception):
+        pass
+
+    class FakeBlob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+    class SnapshotImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def lens_corr(self, strength, zoom):
+            _ = (strength, zoom)
+            return self
+
+        def draw_string(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_rectangle(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_cross(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+    image = SnapshotImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    uart = legacy_tests.FakeUART()
+    module.sensor = Sensor()
+    module.init_uart = lambda: uart
+    module.init_sensor = lambda: (legacy_tests.IMAGE_WIDTH, legacy_tests.IMAGE_HEIGHT)
+
+    def prime_search_sync(rx_buffer):
+        module.state.current_sync = {
+            "reliable_seq": 12,
+            "state": module.State.APPROACH_OBJECT,
+            "target": module.Target.OBJECT,
+            "arg": module.pack_task_arg(module.Task.SEARCH, 1),
+        }
+        module.state.mode = module.RunMode.APPROACH_OBJECT
+        return rx_buffer
+
+    module.process_uart_input = prime_search_sync
+    module.yolo_detect = lambda img: [("red", 160.0, 30.0, 220.0, 400.0, FakeBlob())]
+
+    def fail_data_write(frame_bytes):
+        _ = frame_bytes
+        raise AssertionError("YOLO 暂停帧不应发送速度")
+
+    def stop_after_resume(frame_bytes):
+        uart.write(frame_bytes)
+        raise StopLoop()
+
+    module.write_data_line = fail_data_write
+    module.write_reliable_line = stop_after_resume
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+    frame = module.decode_frame(uart.writes[-1])
+    assert frame is not None
+    assert frame["mode"] == module.Mode.TCP
+    assert frame["topic"] == module.Topic.LOCAL_VISION_CONTROL
+    assert frame["body"][0] == module.LocalVisionControl.RESUME
+    assert module.state.current_detection_source == "yolo"
 
 
 def test_assistant_main_v2_run_skips_yolo_in_return_line_mode() -> None:
@@ -1586,6 +1735,70 @@ def test_assistant_main_v2_refreshes_dynamic_threshold_after_consecutive_unhealt
     assert module.state.track_dynamic_threshold_health_failures == 0
 
 
+def test_assistant_main_v2_keeps_dynamic_threshold_in_non_search_state() -> None:
+    module = load_assistant_v2()
+    module.image.rgb_to_lab = lambda pixel: pixel
+    module.DYNAMIC_THRESHOLD_REFRESH_FAILURE_FRAMES = 1
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.ORBIT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+
+    class YoloBlob:
+        def __init__(self, left, top, width, height):
+            self._rect = (left, top, width, height)
+
+        def rect(self):
+            return self._rect
+
+        def cx(self):
+            left, _top, width, _height = self._rect
+            return float(left) + float(width) / 2.0
+
+        def cy(self):
+            _left, top, _width, height = self._rect
+            return float(top) + float(height) / 2.0
+
+        def area(self):
+            _left, _top, width, height = self._rect
+            return float(width) * float(height)
+
+    first_img = DynamicThresholdCalibrationImage(
+        (150, 20, 170, 40),
+        (30, 40, 20),
+        (80, 0, 0),
+    )
+    module.state.current_image = first_img
+    module.state.current_image_width = first_img.width()
+    module.state.current_image_height = first_img.height()
+    module.remember_object_tracking("red", YoloBlob(150, 20, 20, 20), 160.0, 30.0, 220.0, 400.0, "yolo")
+
+    old_threshold = module.state.track_dynamic_threshold
+    old_generation = module.state.track_dynamic_threshold_generation
+    second_img = DynamicThresholdCalibrationImage(
+        (150, 20, 170, 40),
+        (90, 0, 0),
+        (80, 0, 0),
+    )
+    module.state.current_image = second_img
+    module.state.current_image_width = second_img.width()
+    module.state.current_image_height = second_img.height()
+    module._build_dynamic_threshold_for_blob = lambda _img, _blob: (_ for _ in ()).throw(
+        AssertionError("非寻找态不应重复计算动态阈值")
+    )
+
+    module.remember_object_tracking("red", YoloBlob(150, 20, 20, 20), 160.0, 30.0, 220.0, 400.0, "yolo")
+
+    assert module.state.track_dynamic_threshold == old_threshold
+    assert module.state.track_dynamic_threshold_generation == old_generation
+    assert module.state.track_dynamic_threshold_health_failures == 0
+    assert module.state.track_pending_dynamic_threshold is None
+
+
 def test_assistant_main_v2_recomputes_dynamic_threshold_after_track_reset() -> None:
     module = load_assistant_v2()
     module.image.rgb_to_lab = lambda pixel: pixel
@@ -1807,12 +2020,14 @@ def test_assistant_main_v2_parse_task_sync_packet_matches_master_style_name() ->
 
     module = load_assistant_v2()
 
+    threshold = (12, 80, -30, 40, -20, 60)
     packet = module.parse_task_sync_packet(
         legacy_tests.assistant_sync_frame(
             12,
             module.State.APPROACH_OBJECT,
             module.Target.OBJECT,
             legacy_tests.pack_task_arg(module.Task.SEARCH, 2),
+            threshold,
         )
     )
 
@@ -1821,7 +2036,64 @@ def test_assistant_main_v2_parse_task_sync_packet_matches_master_style_name() ->
         "state": module.State.APPROACH_OBJECT,
         "target": module.Target.OBJECT,
         "arg": legacy_tests.pack_task_arg(module.Task.SEARCH, 2),
+        "threshold": threshold,
     }
+
+
+def test_assistant_main_v2_uses_synced_threshold_without_yolo() -> None:
+    module = load_assistant_v2()
+    threshold = (12, 80, -30, 40, -20, 60)
+    reply = module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.SEARCH, 2),
+            threshold,
+        )
+    )
+
+    class FakeBlob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def cy(self):
+            return 30.0
+
+        def area(self):
+            return 400.0
+
+    class FakeImage:
+        def __init__(self):
+            self.find_blobs_calls = []
+
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0, roi=None):
+            _ = (pixels_threshold, area_threshold, merge, margin, roi)
+            self.find_blobs_calls.append(tuple(thresholds[0]))
+            return [FakeBlob()]
+
+    legacy_tests.assert_assistant_ack(module, reply, 12)
+    module.yolo_detect = lambda img: (_ for _ in ()).throw(
+        AssertionError("同步阈值后辅车不应调用 YOLO")
+    )
+    img = FakeImage()
+
+    candidates = module.build_object_candidates(img, ())
+
+    assert img.find_blobs_calls == [threshold]
+    assert tuple(candidate[:5] for candidate in candidates) == (
+        ("blue", 160.0, 30.0, 220.0, 400.0),
+    )
+    assert module.state.current_detection_source == "sync_threshold"
 
 
 def test_assistant_main_v2_build_search_velocity_wrapper_matches_object_path() -> None:

@@ -34,8 +34,8 @@
 
 当前视觉链路统一使用固定长度短帧:
 
-- 每帧固定 13 字节, 由 `head/mode/topic/seq/body[8]/crc8` 组成。
-- `head=0xA5`, `crc8` 覆盖 `mode/topic/seq/body[8]`, 用于串口字节流重新对齐。
+- 每帧固定 15 字节, 由 `head/mode/topic/seq/body[10]/crc8` 组成。
+- `head=0xA5`, `crc8` 覆盖 `mode/topic/seq/body[10]`, 用于串口字节流重新对齐。
 - 本地视觉速度使用 `MODE_UDP + TOPIC_LOCAL_VISION_VELOCITY`。
 - 本地视觉同步与事件回报使用 `MODE_TCP`。
 - 可靠确认使用 `MODE_ACK`, `topic` 与被确认的可靠帧保持一致。
@@ -66,7 +66,7 @@
 
 - 跟随模式识别主车色标。
 - 找物体模式可通过代码开关选择色块阈值或 YOLO 模型识别目标物体。
-- `assistant/main_v2.py` 的找物体主线与 `master/main_v2.py` 对齐, 在物体任务中优先使用 ROI 短期跟踪, 失败或达到阈值时回退到 YOLO; 跟随和回库黄线任务跳过物体 YOLO。
+- `assistant/main_v2.py` 的找物体主线与 `master/main_v2.py` 对齐, 在物体任务中优先使用主车同步阈值和 ROI 短期跟踪, 失败或达到阈值时回退到 YOLO; 跟随和回库黄线任务跳过物体 YOLO。
 - 在 OpenART 端完成角色内阶段判断。
 - 输出辅车视觉速度修正短帧, body 字段为 `vx/vy/omega/has_omega`, 其中 `omega=0`、`has_omega=0`。
 - 接收辅车 RT1021 下发的本地任务同步帧, body 字段为 `state/target/arg`。

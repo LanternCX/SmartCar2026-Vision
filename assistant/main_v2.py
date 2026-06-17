@@ -28,8 +28,14 @@ class Mode:
 
 class Topic:
     LOCAL_VISION_VELOCITY = 0x01
+    LOCAL_VISION_CONTROL = 0x04
     ASSISTANT_VISION_TASK_SYNC = 0x11
     ASSISTANT_VISION_EVENT_REPORT = 0x13
+
+
+class LocalVisionControl:
+    PAUSE = 1
+    RESUME = 2
 
 
 class RunMode:
@@ -79,11 +85,11 @@ SEQ_RING_SIZE = 256
 # 半环阈值, 用于比较环形序号前后关系
 SEQ_HALF_RING = 128
 # 协议消息体长度, 单位为 byte
-FRAME_BODY_SIZE = 8
+FRAME_BODY_SIZE = 10
 # 协议帧头标记
 FRAME_HEAD = 0xA5
 # 协议整帧长度, 单位为 byte
-FRAME_SIZE = 13
+FRAME_SIZE = 15
 # YOLO 模型文件路径
 YOLO_MODEL_PATH = "/sd/yolo.tflite"
 # YOLO 输入图像复制缩放比例
@@ -102,7 +108,7 @@ OBJECT_BLOB_PIXELS_THRESHOLD = 200
 # 色块最小面积阈值
 OBJECT_BLOB_AREA_THRESHOLD = 200
 # 跟随任务的颜色阈值配置
-FOLLOW_TASKS = (("marker", (37, 57, 64, 95, -64, 20)),)
+FOLLOW_TASKS = (("marker", (50, 100, 41, 127, -60, 127)),)
 # 目标相关任务的筛选参数配置
 OBJECT_TASKS = (
     ('red', 3, 30, 70, 90, True),
@@ -180,7 +186,7 @@ OBJECT_Y_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_Y_PX
 # 判定目标稳定所需连续帧数
 OBJECT_STABLE_FRAMES = 3
 # 允许在两次 YOLO 之间连续使用 ROI 的最大帧数
-ROI_TRACKING_MAX_FRAMES = 15
+ROI_TRACKING_MAX_FRAMES = 60
 # ROI 连续失手达到该值后立即回退到 YOLO
 ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 3
 # 动态阈值健康检查连续失败达到该值后才触发重标定
@@ -246,6 +252,34 @@ def _unpack_i16(body, offset):
     if value >= 0x8000:
         value -= 0x10000
     return value
+
+
+def _pack_i8(value):
+    value = int(value)
+    if value < -128 or value > 127:
+        raise ValueError("i8 out of range")
+    if value < 0:
+        value += 0x100
+    return value
+
+
+def _unpack_i8(body, offset):
+    value = int(body[offset])
+    if value >= 0x80:
+        value -= 0x100
+    return value
+
+
+def _pack_threshold(threshold):
+    if threshold is None:
+        threshold = (0, 0, 0, 0, 0, 0)
+    if len(threshold) != 6:
+        raise ValueError("threshold must have 6 values")
+    return bytes(_pack_i8(value) for value in threshold)
+
+
+def _unpack_threshold(body, offset):
+    return tuple(_unpack_i8(body, offset + index) for index in range(6))
 
 
 def _pack_scaled(value):
@@ -320,8 +354,21 @@ def decode_velocity_body(body):
     }
 
 
-def encode_assistant_vision_task_sync_body(state_value, target, arg):
-    return bytes((_require_u8(state_value), _require_u8(target))) + _pack_i16(arg)
+def encode_local_vision_control_body(action):
+    return bytes((_require_u8(action),))
+
+
+def format_local_vision_control_frame(reliable_seq, action):
+    return encode_frame(
+        Mode.TCP,
+        Topic.LOCAL_VISION_CONTROL,
+        reliable_seq,
+        encode_local_vision_control_body(action),
+    )
+
+
+def encode_assistant_vision_task_sync_body(state_value, target, arg, threshold=None):
+    return bytes((_require_u8(state_value), _require_u8(target))) + _pack_i16(arg) + _pack_threshold(threshold)
 
 
 def decode_assistant_vision_task_sync_body(body):
@@ -329,6 +376,7 @@ def decode_assistant_vision_task_sync_body(body):
         "state": int(body[0]),
         "target": int(body[1]),
         "arg": _unpack_i16(body, 2),
+        "threshold": _unpack_threshold(body, 4),
     }
 
 
@@ -387,12 +435,16 @@ def parse_task_sync_packet(frame_bytes):
     if frame["mode"] != Mode.TCP or frame["topic"] != Topic.ASSISTANT_VISION_TASK_SYNC:
         return None
     packet = decode_assistant_vision_task_sync_body(frame["body"])
-    return {
+    result = {
         "reliable_seq": int(frame["seq"]),
         "state": int(packet["state"]),
         "target": int(packet["target"]),
         "arg": int(packet["arg"]),
     }
+    threshold = tuple(packet["threshold"])
+    if threshold_has_value(threshold):
+        result["threshold"] = threshold
+    return result
 
 
 def parse_event_ack_packet(frame_bytes):
@@ -400,6 +452,15 @@ def parse_event_ack_packet(frame_bytes):
     if frame is None:
         return None
     if frame["mode"] != Mode.ACK or frame["topic"] != Topic.ASSISTANT_VISION_EVENT_REPORT:
+        return None
+    return {"reliable_seq": int(frame["seq"])}
+
+
+def parse_local_vision_control_ack_packet(frame_bytes):
+    frame = decode_frame(frame_bytes)
+    if frame is None:
+        return None
+    if frame["mode"] != Mode.ACK or frame["topic"] != Topic.LOCAL_VISION_CONTROL:
         return None
     return {"reliable_seq": int(frame["seq"])}
 
@@ -680,6 +741,15 @@ def object_task_name_from_id(object_id):
     return OBJECT_TASKS[index][0]
 
 
+def threshold_has_value(threshold):
+    if threshold is None:
+        return False
+    for value in threshold:
+        if int(value) != 0:
+            return True
+    return False
+
+
 def object_task_id(task_name):
     for index, task in enumerate(OBJECT_TASKS, 1):
         if task[0] == task_name:
@@ -856,6 +926,11 @@ def build_object_candidates(img, yolo_candidates):
             state.track_confidence = max(0, int(state.track_confidence) - 20)
             return _build_predicted_object_candidates()
         state.record_roi_fallback()
+    if state.track_rect is None and state.track_dynamic_threshold is not None:
+        candidates = _build_dynamic_blob_object_candidates(img)
+        if candidates:
+            state.current_detection_source = "sync_threshold"
+            return candidates
     state.current_detection_source = "yolo"
     candidates = tuple(yolo_candidates)
     if state.track_rect is None:
@@ -1674,6 +1749,10 @@ class RuntimeState:
         self._stable_count = 0
         self._pending_event = None
         self._pending_event_last_sent_ms = None
+        self.pending_local_vision_control = None
+        self.pending_local_vision_control_last_sent_ms = None
+        self.next_local_vision_control_seq = 1
+        self.local_vision_control_paused = False
         self._completed_event_sync_seq = None
         self._last_return_line_y = None
         self.yolo_net = None
@@ -1801,12 +1880,19 @@ class RuntimeState:
                 "state": int(packet["state"]),
                 "target": int(packet["target"]),
                 "arg": int(packet["arg"]),
+                "threshold": tuple(packet.get("threshold", (0, 0, 0, 0, 0, 0))),
             }
             self._last_sync_seq = reliable_seq
             self.mode = self._mode_from_sync(self.current_sync)
             self._stable_count = 0
             self._last_return_line_y = None
             self.clear_track()
+            object_id = unpack_task_arg_object_id(self.current_sync["arg"])
+            task_name = object_task_name_from_id(object_id)
+            if task_name is not None and threshold_has_value(self.current_sync["threshold"]):
+                self.track_task_name = task_name
+                self.track_object_id = object_id
+                self.track_dynamic_threshold = tuple(self.current_sync["threshold"])
         return format_ack_frame(reliable_seq)
 
     def _should_apply_sync(self, reliable_seq):
@@ -1983,7 +2069,65 @@ def next_event_frame():
     return state.next_event_frame()
 
 
+def _allocate_local_vision_control_seq():
+    reliable_seq = state.next_local_vision_control_seq
+    state.next_local_vision_control_seq = (reliable_seq + 1) % SEQ_RING_SIZE
+    return reliable_seq
+
+
+def request_local_vision_control(action):
+    pending = state.pending_local_vision_control
+    if pending is not None and int(pending["action"]) == int(action):
+        return
+    state.pending_local_vision_control = {
+        "reliable_seq": _allocate_local_vision_control_seq(),
+        "action": int(action),
+    }
+    state.pending_local_vision_control_last_sent_ms = None
+
+
+def next_local_vision_control_frame():
+    pending = state.pending_local_vision_control
+    if pending is None:
+        return None
+    now_ms = default_now_ms()
+    if not should_resend(
+        now_ms,
+        state.pending_local_vision_control_last_sent_ms,
+        RELIABLE_RESEND_INTERVAL_MS,
+    ):
+        return None
+    state.pending_local_vision_control_last_sent_ms = now_ms
+    return format_local_vision_control_frame(
+        pending["reliable_seq"],
+        pending["action"],
+    )
+
+
+def send_pending_local_vision_control():
+    frame = next_local_vision_control_frame()
+    if frame is None:
+        return False
+    return write_reliable_line(frame)
+
+
+def ensure_yolo_control_paused():
+    if state.local_vision_control_paused:
+        return True
+    request_local_vision_control(LocalVisionControl.PAUSE)
+    send_pending_local_vision_control()
+    return False
+
+
+def request_yolo_control_resume():
+    request_local_vision_control(LocalVisionControl.RESUME)
+    send_pending_local_vision_control()
+
+
 def accept_observation(observation=None, line_y=None):
+    if state.local_vision_control_paused:
+        state._stable_count = 0
+        return
     if state.mode == RunMode.RETURN_LINE:
         state.accept_return_line_observation(line_y)
         return
@@ -2232,7 +2376,20 @@ def should_run_yolo_for_current_frame():
         and not (state.current_sync is None and ASSISTANT_DEBUG_DISPLAY_ENABLED)
     ):
         return False
+    if state.track_rect is None and state.track_dynamic_threshold is not None:
+        return False
     return not should_use_blob_tracking()
+
+
+def should_refresh_dynamic_threshold_from_yolo():
+    current_sync = state.current_sync
+    if current_sync is None:
+        return False
+    return (
+        int(current_sync["state"]) == int(State.APPROACH_OBJECT)
+        and int(current_sync["target"]) == int(Target.OBJECT)
+        and unpack_task_arg_config(current_sync["arg"]) == int(Task.SEARCH)
+    )
 
 
 def remember_object_tracking(task_name, blob, center_x, center_y, bottom_y, area, source):
@@ -2276,6 +2433,13 @@ def remember_object_tracking(task_name, blob, center_x, center_y, bottom_y, area
             state.track_pending_dynamic_threshold = None
             state.track_pending_dynamic_threshold_ok_frames = 0
             state.track_dynamic_threshold_health_failures = 0
+        elif not should_refresh_dynamic_threshold_from_yolo():
+            next_threshold = previous_threshold
+            state.track_dynamic_threshold = next_threshold
+            state.track_pending_dynamic_threshold = None
+            state.track_pending_dynamic_threshold_ok_frames = 0
+            state.track_dynamic_threshold_health_failures = 0
+            state.track_dynamic_threshold_failure = None
         elif _dynamic_threshold_center_is_healthy(state.current_image, blob, previous_threshold):
             next_threshold = previous_threshold
             state.track_dynamic_threshold = next_threshold
@@ -2360,6 +2524,8 @@ def _write_all(frame_bytes):
 
 
 def write_data_line(frame_bytes):
+    if state.local_vision_control_paused:
+        return False
     _write_all(frame_bytes)
 
 
@@ -2396,10 +2562,22 @@ def _find_control_frame_start(rx_buffer):
             return index
         if mode == Mode.ACK and topic == Topic.ASSISTANT_VISION_EVENT_REPORT:
             return index
+        if mode == Mode.ACK and topic == Topic.LOCAL_VISION_CONTROL:
+            return index
     return -1
 
 
 def handle_control_frame(frame_bytes):
+    packet = parse_local_vision_control_ack_packet(frame_bytes)
+    pending_control = state.pending_local_vision_control
+    if packet is not None and pending_control is not None:
+        if int(packet["reliable_seq"]) == int(pending_control["reliable_seq"]):
+            action = int(pending_control["action"])
+            state.pending_local_vision_control = None
+            state.pending_local_vision_control_last_sent_ms = None
+            state.local_vision_control_paused = action == LocalVisionControl.PAUSE
+        return None
+
     return state.handle_control_line(frame_bytes)
 
 
@@ -2637,6 +2815,7 @@ def run():
         state.current_image_width = int(img.width())
         state.current_image_height = int(img.height())
         state.current_detection_source = "miss"
+        skip_task_frame = False
         if state.has_pending_event():
             state.current_yolo_candidates = ()
             state.current_object_candidates = ()
@@ -2655,16 +2834,25 @@ def run():
                 state.current_object_candidates = tuple(build_object_candidates(img, ()))
                 need_yolo = state.current_detection_source == "yolo"
             if need_yolo:
-                raw_yolo_candidates = tuple(yolo_detect(img))
-                if raw_yolo_candidates:
-                    state.current_detection_source = "yolo"
-                state.current_yolo_candidates = raw_yolo_candidates
-                state.current_object_candidates = tuple(build_object_candidates(img, raw_yolo_candidates))
+                yolo_requires_control = state.current_sync is not None
+                if yolo_requires_control and not ensure_yolo_control_paused():
+                    state.current_yolo_candidates = ()
+                    state.current_object_candidates = ()
+                    skip_task_frame = True
+                else:
+                    raw_yolo_candidates = tuple(yolo_detect(img))
+                    if raw_yolo_candidates:
+                        state.current_detection_source = "yolo"
+                    state.current_yolo_candidates = raw_yolo_candidates
+                    state.current_object_candidates = tuple(build_object_candidates(img, raw_yolo_candidates))
+                    if yolo_requires_control:
+                        request_yolo_control_resume()
         else:
             state.current_yolo_candidates = ()
             state.current_object_candidates = ()
         try:
-            process_task_frame(img)
+            if not skip_task_frame:
+                process_task_frame(img)
         finally:
             state.record_frame_source(state.current_detection_source)
             gc.collect()
