@@ -90,6 +90,7 @@ def test_master_main_v2_process_task_and_velocity_helpers_drop_frame_size_parame
         "previous_line_y",
     )
     assert tuple(inspect.signature(module.build_finish_task_ring_rois).parameters) == ("blob", "img")
+    assert tuple(inspect.signature(module.build_finish_task_fixed_object_roi).parameters) == ("img",)
     assert tuple(inspect.signature(module.build_finish_task_yellow_ratio_percent).parameters) == ("img", "blob")
     assert tuple(inspect.signature(module.draw_protocol_target_point_debug).parameters) == (
         "img",
@@ -135,6 +136,63 @@ def test_master_main_v2_run_skips_yolo_gate_when_short_tracking_is_active() -> N
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
     _seed_master_short_track(module)
+
+    assert module.should_run_yolo_for_current_frame() is False
+
+
+def test_master_main_v2_run_skips_yolo_after_entering_transport_finish() -> None:
+    module = load_master_v2()
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=12,
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
+        )
+    )
+
+    assert module.should_run_yolo_for_current_frame() is True
+
+    module.state.entry_yolo_pending = False
+
+    assert module.should_run_yolo_for_current_frame() is False
+
+
+def test_master_main_v2_run_repeats_yolo_after_entering_transport_align() -> None:
+    module = load_master_v2()
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=12,
+            state=int(module.State.SEARCH_OBJECT),
+            target=int(module.Target.OBJECT),
+            arg=int(module.Task.TRANSPORT),
+        )
+    )
+
+    assert module.should_run_yolo_for_current_frame() is True
+
+    module.state.entry_yolo_pending = False
+
+    assert module.should_run_yolo_for_current_frame() is True
+
+
+def test_master_main_v2_run_skips_yolo_after_entering_orbit() -> None:
+    module = load_master_v2()
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=12,
+            state=int(module.State.ORBITING),
+            target=int(module.Target.OBJECT),
+            arg=int(module.Task.ORBIT),
+        )
+    )
+
+    assert module.should_run_yolo_for_current_frame() is True
+
+    module.state.entry_yolo_pending = False
 
     assert module.should_run_yolo_for_current_frame() is False
 
@@ -1103,10 +1161,8 @@ def test_master_main_v2_finish_uses_target_window_and_reports_arrived_after_cont
     )
     uart = FakeUART()
     module.state.uart_device = uart
-    set_current_image(module, FakeImage())
-    blob = module.YoloDetectionBlob(145.0, 0.0, 175.0, 20.0, 1, 0.96)
-    rois, _ = module.build_finish_task_ring_rois(blob, module.state.current_image)
-    touch_areas = {tuple(roi): max(1, int(roi[2]) * int(roi[3])) for roi in rois}
+    fixed_roi = module.build_finish_task_fixed_object_roi(FakeImage())
+    touch_areas = {tuple(fixed_roi): max(1, int(fixed_roi[2]) * int(fixed_roi[3]))}
 
     run_frame(module, FakeImage(yellow_area_by_roi=touch_areas))
     run_frame(module, FakeImage(yellow_area_by_roi={}))
@@ -1117,6 +1173,22 @@ def test_master_main_v2_finish_uses_target_window_and_reports_arrived_after_cont
         "event": module.Event.ARRIVED,
         "value": 0,
     }
+
+
+def test_master_main_v2_finish_yellow_ratio_uses_fixed_object_roi() -> None:
+    module = load_master_v2()
+    img = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    yellow_area = int(fixed_roi[2]) * int(fixed_roi[3])
+
+    class FarObjectBlob:
+        def rect(self):
+            return (0, 0, 20, 20)
+
+    img.yellow_area_by_roi[tuple(fixed_roi)] = yellow_area
+
+    assert fixed_roi == (80, 160, 160, 80)
+    assert module.build_finish_task_yellow_ratio_percent(img, FarObjectBlob()) == pytest.approx(100.0)
 
 
 def test_master_main_v2_return_retreat_reports_line_aligned() -> None:

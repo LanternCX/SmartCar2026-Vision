@@ -931,6 +931,10 @@ def build_object_candidates(img, yolo_candidates):
         if candidates:
             state.current_detection_source = "sync_threshold"
             return candidates
+    if state.current_sync is not None and not current_sync_allows_yolo():
+        state.current_detection_source = "miss"
+        state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+        return ()
     state.current_detection_source = "yolo"
     candidates = tuple(yolo_candidates)
     if state.track_rect is None:
@@ -940,6 +944,9 @@ def build_object_candidates(img, yolo_candidates):
     if tracked_candidates is not None:
         state.track_failure_reason = TrackFailureReason.NONE
         return tracked_candidates
+    if state.current_sync is not None:
+        state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+        return ()
     if state.track_task_name is not None:
         same_task_candidates = [candidate for candidate in candidates if candidate[0] == state.track_task_name]
         if same_task_candidates:
@@ -1755,6 +1762,7 @@ class RuntimeState:
         self.local_vision_control_paused = False
         self._completed_event_sync_seq = None
         self._last_return_line_y = None
+        self.entry_yolo_pending = False
         self.yolo_net = None
         self.uart_device = None
         self.rx_buffer = b""
@@ -1887,6 +1895,7 @@ class RuntimeState:
             self._stable_count = 0
             self._last_return_line_y = None
             self.clear_track()
+            self.entry_yolo_pending = current_sync_is_entry_yolo_only(self.current_sync)
             object_id = unpack_task_arg_object_id(self.current_sync["arg"])
             task_name = object_task_name_from_id(object_id)
             if task_name is not None and threshold_has_value(self.current_sync["threshold"]):
@@ -2376,9 +2385,44 @@ def should_run_yolo_for_current_frame():
         and not (state.current_sync is None and ASSISTANT_DEBUG_DISPLAY_ENABLED)
     ):
         return False
+    if state.current_sync is not None and current_sync_is_entry_yolo_only(state.current_sync):
+        return bool(state.entry_yolo_pending)
+    if state.current_sync is not None and not current_sync_allows_yolo():
+        return False
     if state.track_rect is None and state.track_dynamic_threshold is not None:
         return False
     return not should_use_blob_tracking()
+
+
+def current_sync_allows_yolo():
+    current_sync = state.current_sync
+    if current_sync is None:
+        return True
+    if current_sync_is_entry_yolo_only(current_sync):
+        return bool(state.entry_yolo_pending)
+    return (
+        int(current_sync["target"]) == int(Target.OBJECT)
+    )
+
+
+def current_sync_is_entry_yolo_only(current_sync):
+    if current_sync is None:
+        return False
+    sync_state = int(current_sync["state"])
+    target = int(current_sync["target"])
+    config_id = unpack_task_arg_config(current_sync["arg"])
+    return (
+        (
+            sync_state == int(State.TRANSPORT_OBJECT)
+            and target == int(Target.OBJECT)
+            and config_id == int(Task.TRANSPORT)
+        )
+        or (
+            sync_state == int(State.ORBIT)
+            and target == int(Target.OBJECT)
+            and config_id == int(Task.ORBIT)
+        )
+    )
 
 
 def should_refresh_dynamic_threshold_from_yolo():
@@ -2832,7 +2876,16 @@ def run():
             if not need_yolo:
                 state.current_yolo_candidates = ()
                 state.current_object_candidates = tuple(build_object_candidates(img, ()))
-                need_yolo = state.current_detection_source == "yolo"
+                if state.current_sync is not None:
+                    if current_sync_allows_yolo() and state.current_detection_source == "yolo":
+                        need_yolo = True
+                    elif state.current_detection_source == "yolo":
+                        state.current_detection_source = "miss"
+                        need_yolo = False
+                    else:
+                        need_yolo = False
+                else:
+                    need_yolo = state.current_detection_source == "yolo"
             if need_yolo:
                 yolo_requires_control = state.current_sync is not None
                 if yolo_requires_control and not ensure_yolo_control_paused():
@@ -2845,6 +2898,11 @@ def run():
                         state.current_detection_source = "yolo"
                     state.current_yolo_candidates = raw_yolo_candidates
                     state.current_object_candidates = tuple(build_object_candidates(img, raw_yolo_candidates))
+                    if (
+                        state.current_sync is not None
+                        and current_sync_is_entry_yolo_only(state.current_sync)
+                    ):
+                        state.entry_yolo_pending = False
                     if yolo_requires_control:
                         request_yolo_control_resume()
         else:

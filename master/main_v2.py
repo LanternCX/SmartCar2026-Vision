@@ -165,6 +165,12 @@ MASTER_TRANSPORT_TARGET_Y_PX = 240.0
 FINISH_HOOK_RING_EXPAND_PX = 5
 # 搬运收尾黄线识别阈值
 FINISH_HOOK_YELLOW_THRESHOLD = (58, 87, -32, -12, 64, 84)
+# 搬运收尾固定物体区域左边界比例, 以反转矫正后的图像宽度为基准
+FINISH_HOOK_FIXED_OBJECT_ROI_LEFT_RATIO = 0.25
+# 搬运收尾固定物体区域右边界比例, 以反转矫正后的图像宽度为基准
+FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO = 0.75
+# 搬运收尾固定物体区域顶部比例, 区域覆盖反转矫正后图像的底部三分之一
+FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO = 2.0 / 3.0
 # 搬运收尾黄色接触占比阈值
 FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.1
 # 搬运收尾脱离接触后的稳定帧数
@@ -238,6 +244,7 @@ class RuntimeState:
         self.local_vision_control_paused = False
         self.last_event_context_id = None
         self.finish_contact_seen = False
+        self.entry_yolo_pending = False
         self.last_return_line_y = None
         self.return_line_finish_missing_count = 0
         self.rx_buffer = b""
@@ -360,6 +367,7 @@ class RuntimeState:
         self.local_vision_control_paused = False
         self.last_event_context_id = None
         self.finish_contact_seen = False
+        self.entry_yolo_pending = False
         self.last_return_line_y = None
         self.return_line_finish_missing_count = 0
         self.rx_buffer = b""
@@ -1059,11 +1067,35 @@ def should_use_blob_tracking():
     return True
 
 
+def is_entry_yolo_only_task_context():
+    current_task = state.current_task
+    if current_task is None:
+        return False
+    task_state = int(current_task["state"])
+    target = int(current_task["target"])
+    arg = int(current_task["arg"])
+    return (
+        (
+            task_state == int(State.ORBITING)
+            and target == int(Target.OBJECT)
+            and arg == int(Task.ORBIT)
+        )
+        or (
+            task_state == int(State.TRANSPORT_OBJECT)
+            and target == int(Target.EDGE_LINE)
+            and arg == int(Task.TRANSPORT_FINISH)
+        )
+    )
+
+
 def should_run_yolo_for_current_frame():
     if state.pending_event is not None:
         return False
     if is_return_line_task_context():
         return False
+    current_task = state.current_task
+    if current_task is not None and is_entry_yolo_only_task_context():
+        return bool(state.entry_yolo_pending)
     if state.current_task is None and not MASTER_DEBUG_DISPLAY_ENABLED:
         return False
     return not should_use_blob_tracking()
@@ -1444,6 +1476,17 @@ def build_finish_task_ring_rois(blob, img):
     return valid_rois, ring_area
 
 
+def build_finish_task_fixed_object_roi(img):
+    image_width = int(img.width())
+    image_height = int(img.height())
+    left = int(float(image_width) * float(FINISH_HOOK_FIXED_OBJECT_ROI_LEFT_RATIO))
+    right = int(float(image_width) * float(FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO))
+    top = int(float(image_height) * float(FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO))
+    right = min(int(image_width), max(int(left), int(right)))
+    top = min(int(image_height), max(0, int(top)))
+    return (int(left), int(top), int(right) - int(left), int(image_height) - int(top))
+
+
 def _count_yellow_pixels_in_roi(img, roi):
     roi_area = int(roi[2]) * int(roi[3])
     if roi_area <= 0:
@@ -1466,9 +1509,10 @@ def _count_yellow_pixels_in_roi(img, roi):
 
 
 def build_finish_task_yellow_ratio_percent(img, blob):
-    if blob is None:
-        return 0.0
-    rois, ring_area = build_finish_task_ring_rois(blob, img)
+    _ = blob
+    roi = build_finish_task_fixed_object_roi(img)
+    rois = (roi,)
+    ring_area = int(roi[2]) * int(roi[3])
     if ring_area <= 0:
         return 0.0
     yellow_pixels = 0
@@ -1610,12 +1654,8 @@ def draw_tracking_state_debug(img):
 
 
 def draw_finish_task_debug(img, blob, yellow_ratio):
-    if blob is None:
-        img.draw_string(2, 50, "finish ratio=0.0", color=(255, 255, 255), scale=1, mono_space=False)
-        return
-    rois, _ = build_finish_task_ring_rois(blob, img)
-    for roi in rois:
-        img.draw_rectangle(roi, color=(255, 255, 0), thickness=1)
+    _ = blob
+    img.draw_rectangle(build_finish_task_fixed_object_roi(img), color=(255, 255, 0), thickness=1)
     img.draw_string(
         2,
         50,
@@ -2520,6 +2560,10 @@ def handle_control_frame(frame_bytes):
             state.last_task_context_id = context_id
             state.stable_frame_count = 0
             state.finish_contact_seen = False
+            state.entry_yolo_pending = (
+                not is_return_line_task_context()
+                and is_entry_yolo_only_task_context()
+            )
             state.last_return_line_y = None
             state.return_line_finish_missing_count = 0
             state.clear_track()
@@ -2728,7 +2772,16 @@ def run():
                 if not need_yolo:
                     state.current_yolo_candidates = ()
                     state.current_object_candidates = tuple(build_object_candidates(img, ()))
-                    need_yolo = state.current_detection_source == "yolo"
+                    if (
+                        state.current_task is not None
+                        and is_entry_yolo_only_task_context()
+                        and not state.entry_yolo_pending
+                    ):
+                        if state.current_detection_source == "yolo":
+                            state.current_detection_source = "miss"
+                        need_yolo = False
+                    else:
+                        need_yolo = state.current_detection_source == "yolo"
                 if need_yolo:
                     yolo_requires_control = state.current_task is not None
                     if yolo_requires_control and not ensure_yolo_control_paused():
@@ -2743,6 +2796,11 @@ def run():
                         state.current_object_candidates = tuple(
                             build_object_candidates(img, raw_yolo_candidates)
                         )
+                        if (
+                            state.current_task is not None
+                            and is_entry_yolo_only_task_context()
+                        ):
+                            state.entry_yolo_pending = False
                         if yolo_requires_control:
                             request_yolo_control_resume()
             else:
