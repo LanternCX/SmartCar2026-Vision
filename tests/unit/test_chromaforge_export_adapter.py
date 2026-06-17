@@ -347,7 +347,7 @@ def test_role_build_v2_script_generates_master_v2_output_from_shared_rules(tmp_p
     assert "threshold_index" not in uploaded
 
 
-def test_role_build_v2_script_copies_master_v2_source_without_rewriting_calibration(tmp_path) -> None:
+def test_role_build_v2_script_rewrites_master_v2_source_from_shared_rules(tmp_path) -> None:
     target_dir = tmp_path / "master-v2-copy-only-device"
     target_dir.mkdir()
     root_dir = DEFAULT_RULES_PATH.parent.parent
@@ -360,14 +360,23 @@ def test_role_build_v2_script_copies_master_v2_source_without_rewriting_calibrat
     )
     source_path.write_text(modified_text, encoding="utf-8")
     try:
-        _run_role_build_script_preserving_sources(
-            "master/build_v2.sh",
-            target_dir,
-            preserved_sources=("master/main_v2.py",),
+        subprocess.run(
+            ["bash", "master/build_v2.sh"],
+            check=True,
+            cwd=root_dir,
+            env={
+                "PATH": os.environ["PATH"],
+                "TARGET_DIR": str(target_dir),
+            },
+            capture_output=True,
+            text=True,
         )
         uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
-        assert uploaded == modified_text
-        assert "runtime_only_marker" in uploaded
+        generated_source = source_path.read_text(encoding="utf-8")
+        assert generated_source != modified_text
+        assert uploaded == generated_source
+        assert "runtime_only_marker" not in generated_source
+        assert "threshold_index" not in generated_source
     finally:
         source_path.write_text(original_text, encoding="utf-8")
 
@@ -389,7 +398,29 @@ def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path
         assert "RETURN_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
 
 
-def test_role_build_v2_script_copies_assistant_v2_source_without_rewriting_calibration(tmp_path) -> None:
+def test_role_build_v2_script_generates_assistant_v2_output_from_shared_rules(tmp_path) -> None:
+    target_dir = tmp_path / "assistant-v2-device"
+    target_dir.mkdir()
+
+    _run_role_build_script_preserving_sources(
+        "assistant/build_v2.sh",
+        target_dir,
+        preserved_sources=("assistant/main_v2.py",),
+    )
+
+    uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+    rules = json.loads(load_rules_json())
+    yellow_threshold = _first_yellow_threshold(rules)
+
+    assert "OBJECT_TASKS = (" in uploaded
+    assert "('red'" in uploaded
+    assert "'yellow'" not in uploaded
+    if yellow_threshold is not None:
+        assert "RETURN_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
+    assert "threshold_index" not in uploaded
+
+
+def test_role_build_v2_script_rewrites_assistant_v2_source_from_shared_rules(tmp_path) -> None:
     target_dir = tmp_path / "assistant-v2-copy-only-device"
     target_dir.mkdir()
     root_dir = DEFAULT_RULES_PATH.parent.parent
@@ -402,13 +433,22 @@ def test_role_build_v2_script_copies_assistant_v2_source_without_rewriting_calib
     )
     source_path.write_text(modified_text, encoding="utf-8")
     try:
-        _run_role_build_script_preserving_sources(
-            "assistant/build_v2.sh",
-            target_dir,
-            preserved_sources=("assistant/main_v2.py",),
+        subprocess.run(
+            ["bash", "assistant/build_v2.sh"],
+            check=True,
+            cwd=root_dir,
+            env={
+                "PATH": os.environ["PATH"],
+                "TARGET_DIR": str(target_dir),
+            },
+            capture_output=True,
+            text=True,
         )
         uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
-        assert uploaded == modified_text
-        assert "runtime_only_marker" in uploaded
+        generated_source = source_path.read_text(encoding="utf-8")
+        assert generated_source != modified_text
+        assert uploaded == generated_source
+        assert "runtime_only_marker" not in generated_source
+        assert "threshold_index" not in generated_source
     finally:
         source_path.write_text(original_text, encoding="utf-8")

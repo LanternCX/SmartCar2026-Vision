@@ -200,11 +200,8 @@ def test_master_main_v2_run_skips_yolo_after_entering_orbit() -> None:
 def test_master_main_v2_object_task_config_keeps_only_filter_parameters() -> None:
     module = load_master_v2()
 
-    assert module._object_task_config("tennis") == ("tennis", 3, 30, 70, 90, True)
     assert module._object_task_config("red") == ("red", 3, 30, 70, 90, True)
-    assert module._object_task_config("blue") == ("blue", 3, 30, 70, 90, True)
-    assert module._object_task_config("brown") == ("brown", 3, 30, 70, 90, True)
-    assert module._object_task_config("white") == ("white", 3, 30, 70, 90, True)
+    assert module._object_task_config("tennis") is None
 
 
 def test_master_main_v2_object_task_config_accepts_legacy_threshold_layout() -> None:
@@ -212,6 +209,40 @@ def test_master_main_v2_object_task_config_accepts_legacy_threshold_layout() -> 
     module.OBJECT_TASKS = (("red", ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),)
 
     assert module._object_task_config("red") == ("red", 3, 30, 70, 90, True)
+
+
+def test_master_main_v2_roi_tracking_uses_calibrated_object_threshold() -> None:
+    module = load_master_v2()
+    calibrated_threshold = (1, 2, 3, 4, 5, 6)
+    stale_dynamic_threshold = (16, 51, 21, 84, -11, 52)
+    module.OBJECT_TASKS = (("red", (calibrated_threshold,), 3, 30, 70, 90, True),)
+    _seed_master_short_track(module)
+    module.state.track_dynamic_threshold = stale_dynamic_threshold
+    module.state.current_task = {
+        "context_id": 12,
+        "state": module.State.SEARCH_OBJECT,
+        "target": module.Target.OBJECT,
+        "arg": module.Task.SEARCH,
+    }
+
+    class Blob:
+        def rect(self):
+            return (150, 30, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def area(self):
+            return 220.0
+
+    img = DynamicThresholdRoiImage(calibrated_threshold, [Blob()])
+    set_current_image(module, img)
+
+    candidates = module.build_object_candidates(img, ())
+
+    assert module.state.current_detection_source == "roi"
+    assert candidates[0][:4] == ("red", 160.0, 210.0, 220.0)
+    assert img.find_blobs_calls[0][0] == calibrated_threshold
 
 
 class FakeUART:
@@ -2484,7 +2515,7 @@ def test_master_main_v2_dynamic_threshold_keeps_center_connected_component_only(
     assert threshold[5] < 60
 
 
-def test_master_main_v2_failed_yolo_calibration_disables_roi_tracking() -> None:
+def test_master_main_v2_calibrated_threshold_enables_roi_tracking_without_pixel_sampling() -> None:
     module = load_master_v2()
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.state.current_task = {
@@ -2508,6 +2539,5 @@ def test_master_main_v2_failed_yolo_calibration_disables_roi_tracking() -> None:
     set_current_image(module, img)
     module.remember_object_tracking("red", YoloBlob(), 160.0, 210.0, 400.0, "yolo")
 
-    assert module.state.track_dynamic_threshold is None
-    assert module.should_use_blob_tracking() is False
-    assert module.build_object_candidates(img, ()) == ()
+    assert module.state.track_dynamic_threshold == module.OBJECT_TASKS[0][1][0]
+    assert module.should_use_blob_tracking() is True

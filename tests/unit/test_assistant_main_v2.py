@@ -222,11 +222,8 @@ def test_assistant_main_v2_build_object_candidates_matches_master_style_signatur
 def test_assistant_main_v2_object_task_config_keeps_only_filter_parameters() -> None:
     module = load_assistant_v2()
 
-    assert module._object_task_config("tennis") == ("tennis", 3, 30, 70, 90, True)
     assert module._object_task_config("red") == ("red", 3, 30, 70, 90, True)
-    assert module._object_task_config("blue") == ("blue", 3, 30, 70, 90, True)
-    assert module._object_task_config("brown") == ("brown", 3, 30, 70, 90, True)
-    assert module._object_task_config("white") == ("white", 3, 30, 70, 90, True)
+    assert module._object_task_config("tennis") is None
 
 
 def test_assistant_main_v2_object_task_config_accepts_legacy_threshold_layout() -> None:
@@ -705,6 +702,44 @@ class DynamicThresholdRoiImage:
         if len(thresholds) == 1 and key == self.expected_threshold:
             return list(self.blobs)
         return []
+
+
+def test_assistant_main_v2_roi_tracking_uses_calibrated_object_threshold() -> None:
+    module = load_assistant_v2()
+    calibrated_threshold = (1, 2, 3, 4, 5, 6)
+    stale_dynamic_threshold = (16, 51, 21, 84, -11, 52)
+    module.OBJECT_TASKS = (("red", (calibrated_threshold,), 3, 30, 70, 90, True),)
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
+        )
+    )
+    _seed_assistant_short_track(module)
+    module.state.track_dynamic_threshold = stale_dynamic_threshold
+
+    class Blob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def cy(self):
+            return 30.0
+
+        def area(self):
+            return 220.0
+
+    img = DynamicThresholdRoiImage(calibrated_threshold, [Blob()])
+
+    candidates = module.build_object_candidates(img, ())
+
+    assert module.state.current_detection_source == "roi"
+    assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 220.0)
+    assert img.find_blobs_calls[0][0] == calibrated_threshold
 
 
 def test_assistant_main_v2_build_object_candidates_prefers_blob_tracking_between_yolo_frames() -> None:
@@ -1979,8 +2014,8 @@ def test_assistant_main_v2_dynamic_threshold_keeps_center_connected_component_on
     assert threshold[5] < 60
 
 
-def test_assistant_main_v2_failed_yolo_calibration_disables_roi_tracking() -> None:
-    """辅车未建立动态阈值时不应继续 ROI 跟踪."""
+def test_assistant_main_v2_calibrated_threshold_enables_roi_tracking_without_pixel_sampling() -> None:
+    """辅车使用标定阈值建立 ROI 跟踪, 不依赖现场像素采样."""
 
     module = load_assistant_v2()
     module.ROI_TRACKING_MAX_FRAMES = 3
@@ -2019,9 +2054,8 @@ def test_assistant_main_v2_failed_yolo_calibration_disables_roi_tracking() -> No
     module.state.current_image_height = img.height()
     module.remember_object_tracking("red", YoloBlob(), 160.0, 30.0, 220.0, 400.0, "yolo")
 
-    assert module.state.track_dynamic_threshold is None
-    assert module.should_use_blob_tracking() is False
-    assert module.build_object_candidates(img, ()) == ()
+    assert module.state.track_dynamic_threshold == module.OBJECT_TASKS[0][1][0]
+    assert module.should_use_blob_tracking() is True
 
 
 def test_assistant_main_v2_process_task_frame_uses_cached_yolo_candidates() -> None:
@@ -2134,7 +2168,7 @@ def test_assistant_main_v2_parse_task_sync_packet_matches_master_style_name() ->
     }
 
 
-def test_assistant_main_v2_uses_synced_threshold_without_yolo() -> None:
+def test_assistant_main_v2_ignores_synced_threshold_without_yolo_roi() -> None:
     module = load_assistant_v2()
     threshold = (12, 80, -30, 40, -20, 60)
     reply = module.handle_control_frame(
@@ -2142,7 +2176,7 @@ def test_assistant_main_v2_uses_synced_threshold_without_yolo() -> None:
             12,
             module.State.APPROACH_OBJECT,
             module.Target.OBJECT,
-            legacy_tests.pack_task_arg(module.Task.SEARCH, 2),
+            legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
             threshold,
         )
     )
@@ -2176,18 +2210,13 @@ def test_assistant_main_v2_uses_synced_threshold_without_yolo() -> None:
             return [FakeBlob()]
 
     legacy_tests.assert_assistant_ack(module, reply, 12)
-    module.yolo_detect = lambda img: (_ for _ in ()).throw(
-        AssertionError("同步阈值后辅车不应调用 YOLO")
-    )
     img = FakeImage()
 
     candidates = module.build_object_candidates(img, ())
 
-    assert img.find_blobs_calls == [threshold]
-    assert tuple(candidate[:5] for candidate in candidates) == (
-        ("blue", 160.0, 30.0, 220.0, 400.0),
-    )
-    assert module.state.current_detection_source == "sync_threshold"
+    assert img.find_blobs_calls == []
+    assert candidates == ()
+    assert module.state.current_detection_source == "yolo"
 
 
 def test_assistant_main_v2_build_search_velocity_wrapper_matches_object_path() -> None:

@@ -214,11 +214,7 @@ SEQ_HALF_RING = 128
 
 # 目标相关任务的筛选参数配置
 OBJECT_TASKS = (
-    ('red', 3, 30, 70, 90, True),
-    ('blue', 3, 30, 70, 90, True),
-    ('brown', 3, 30, 70, 90, True),
-    ('white', 3, 30, 70, 90, True),
-    ('tennis', 3, 30, 70, 90, True),
+    ('red', ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),
 )
 
 # 有符号 16 位整数下界
@@ -782,11 +778,27 @@ def object_task_parts(task):
     )
 
 
+def object_task_thresholds(task):
+    if len(task) < 7 or not isinstance(task[1], (tuple, list)):
+        return ()
+    thresholds = task[1]
+    if len(thresholds) == 6 and not isinstance(thresholds[0], (tuple, list)):
+        return (tuple(thresholds),)
+    return tuple(tuple(threshold) for threshold in thresholds)
+
+
 def object_task_id(task_name):
     for index, task in enumerate(OBJECT_TASKS, 1):
         if task[0] == task_name:
             return index
     return 0
+
+
+def _object_task_thresholds(task_name):
+    for task in OBJECT_TASKS:
+        if task[0] == task_name:
+            return object_task_thresholds(task)
+    return ()
 
 
 def _object_task_config(task_name):
@@ -879,8 +891,7 @@ def _tracked_search_roi():
 
 def _build_dynamic_blob_object_candidates(img):
     task_name = state.track_task_name
-    threshold = state.track_dynamic_threshold
-    if task_name is None or threshold is None:
+    if task_name is None:
         return ()
     config = _object_task_config(task_name)
     if config is None:
@@ -893,9 +904,14 @@ def _build_dynamic_blob_object_candidates(img):
         max_side_length,
         _require_all_thresholds,
     ) = config
+    thresholds = _object_task_thresholds(task_name)
+    if not thresholds and state.track_dynamic_threshold is not None:
+        thresholds = (state.track_dynamic_threshold,)
+    if not thresholds:
+        return ()
     blobs = _find_blobs_with_task_config(
         img,
-        (threshold,),
+        thresholds,
         pixels_threshold,
         area_threshold,
         merge_margin,
@@ -2008,6 +2024,9 @@ def _build_dynamic_threshold_from_labs(samples):
 
 
 def _build_dynamic_threshold_for_blob(img, blob):
+    calibrated_thresholds = _object_task_thresholds(state.track_task_name)
+    if calibrated_thresholds:
+        return calibrated_thresholds[0]
     get_pixel = getattr(img, "get_pixel", None)
     if get_pixel is None:
         return None

@@ -1,8 +1,10 @@
 """! @brief 主辅视觉入口目录布局测试"""
 
+import json
 import os
 import subprocess
 
+from calibration.chromaforge_export_adapter import load_rules_json
 from tests.test_support import ROOT, load_role_main_module, role_main_path
 
 
@@ -140,6 +142,11 @@ def test_role_build_v2_scripts_generate_and_upload_v2_entry(tmp_path) -> None:
         assert uploaded.is_file()
         source_text = source.read_text(encoding="utf-8")
         uploaded_text = uploaded.read_text(encoding="utf-8")
+        rules_text = load_rules_json()
+        rules = json.loads(rules_text)
+        first_object_threshold = tuple(rules["objects"][0]["thresholds"][0])
+        formatted_threshold = "(" + ", ".join(str(value) for value in first_object_threshold) + ")"
         assert source_text == uploaded_text
-        assert "threshold_index" not in source_text
-        assert "OBJECT_TASKS = (" in source_text
+        assert "threshold_index" not in uploaded_text
+        assert "OBJECT_TASKS = (" in uploaded_text
+        assert formatted_threshold in uploaded_text
