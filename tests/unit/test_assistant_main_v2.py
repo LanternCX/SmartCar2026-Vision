@@ -564,6 +564,83 @@ def test_assistant_main_v2_approach_object_yolo_requests_resume() -> None:
     assert frame["body"][0] == module.LocalVisionControl.RESUME
 
 
+def test_assistant_main_v2_transport_mode_retries_pending_resume_control() -> None:
+    module = load_assistant_v2()
+
+    class StopLoop(Exception):
+        pass
+
+    class SnapshotImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def lens_corr(self, strength, zoom):
+            _ = (strength, zoom)
+            return self
+
+        def draw_string(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_rectangle(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def draw_cross(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, margin)
+            return []
+
+    image = SnapshotImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    uart = legacy_tests.FakeUART()
+    module.sensor = Sensor()
+    module.init_uart = lambda: uart
+    module.init_sensor = lambda: (legacy_tests.IMAGE_WIDTH, legacy_tests.IMAGE_HEIGHT)
+    module.RELIABLE_RESEND_INTERVAL_MS = 20
+    module.default_now_ms = lambda: 100
+
+    def prime_transport_sync(rx_buffer):
+        module.state.current_sync = {
+            "reliable_seq": 12,
+            "state": module.State.TRANSPORT_OBJECT,
+            "target": module.Target.OBJECT,
+            "arg": module.pack_task_arg(module.Task.TRANSPORT, 1),
+            "threshold": (16, 51, 21, 84, -11, 52),
+        }
+        module.state.mode = module.RunMode.APPROACH_OBJECT
+        module.state.local_vision_control_paused = True
+        module.state.pending_local_vision_control = {
+            "reliable_seq": 7,
+            "action": module.LocalVisionControl.RESUME,
+        }
+        module.state.pending_local_vision_control_last_sent_ms = 0
+        return rx_buffer
+
+    module.process_uart_input = prime_transport_sync
+
+    def stop_after_frame(current_img):
+        assert current_img is image
+        frame = module.decode_frame(uart.writes[-1])
+        assert frame is not None
+        assert frame["mode"] == module.Mode.TCP
+        assert frame["topic"] == module.Topic.LOCAL_VISION_CONTROL
+        assert frame["body"][0] == module.LocalVisionControl.RESUME
+        raise StopLoop()
+
+    module.process_task_frame = stop_after_frame
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+
 def test_assistant_main_v2_run_skips_yolo_in_return_line_mode() -> None:
     """辅车回库黄线模式不应进入物体 YOLO 链路."""
 
@@ -2283,6 +2360,30 @@ def test_assistant_main_v2_handle_control_frame_reuses_global_state() -> None:
     legacy_tests.assert_assistant_ack(module, reply, 12)
     assert module.state.mode == module.RunMode.APPROACH_OBJECT
     assert module.state.current_object_config_id() == module.Task.SEARCH
+
+
+def test_assistant_main_v2_new_sync_clears_pending_local_vision_control() -> None:
+    module = load_assistant_v2()
+    module.state.local_vision_control_paused = True
+    module.state.pending_local_vision_control = {
+        "reliable_seq": 9,
+        "action": module.LocalVisionControl.RESUME,
+    }
+    module.state.pending_local_vision_control_last_sent_ms = 50
+
+    reply = module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
+        )
+    )
+
+    legacy_tests.assert_assistant_ack(module, reply, 12)
+    assert module.state.local_vision_control_paused is False
+    assert module.state.pending_local_vision_control is None
+    assert module.state.pending_local_vision_control_last_sent_ms is None
 
 
 def test_assistant_main_v2_parse_task_sync_packet_matches_master_style_name() -> None:

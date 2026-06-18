@@ -2594,6 +2594,12 @@ def request_yolo_control_resume():
     send_pending_local_vision_control()
 
 
+def clear_local_vision_control_state():
+    state.pending_local_vision_control = None
+    state.pending_local_vision_control_last_sent_ms = None
+    state.local_vision_control_paused = False
+
+
 def _accept_finish_task_observation(context_id, observation_value, yellow_ratio, event_type):
     if float(observation_value) <= 0.0:
         state.stable_frame_count = 0
@@ -2735,6 +2741,7 @@ def handle_control_frame(frame_bytes):
                 and int(packet["target"]) == int(Target.OBJECT)
                 and int(packet["arg"]) == int(Task.ORBIT)
             )
+            clear_local_vision_control_state()
             state.current_task = {
                 "context_id": context_id,
                 "state": int(packet["state"]),
@@ -2944,6 +2951,8 @@ def run():
         state.current_image_width = int(img.width())
         state.current_image_height = int(img.height())
         state.current_detection_source = "miss"
+        if state.pending_local_vision_control is not None:
+            send_pending_local_vision_control()
         skip_task_frame = False
         if state.pending_event is not None:
             state.current_yolo_candidates = ()

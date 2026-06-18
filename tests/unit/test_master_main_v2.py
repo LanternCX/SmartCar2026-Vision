@@ -705,6 +705,28 @@ def test_master_main_v2_replies_task_sync_ack_and_records_task() -> None:
     assert module.state.current_task["arg"] == module.Task.SEARCH
 
 
+def test_master_main_v2_new_task_sync_clears_pending_local_vision_control() -> None:
+    module = load_master_v2()
+    module.state.local_vision_control_paused = True
+    module.state.pending_local_vision_control = {
+        "reliable_seq": 9,
+        "action": module.LocalVisionControl.RESUME,
+    }
+    module.state.pending_local_vision_control_last_sent_ms = 50
+
+    reply = module.handle_control_frame(task_sync_frame(module, seq=12, context_id=7))
+
+    assert decode_frame(reply) == {
+        "mode": MODE_ACK,
+        "topic": module.Topic.MASTER_VISION_TASK_SYNC,
+        "seq": 12,
+        "body": b"\x00" * 10,
+    }
+    assert module.state.local_vision_control_paused is False
+    assert module.state.pending_local_vision_control is None
+    assert module.state.pending_local_vision_control_last_sent_ms is None
+
+
 def test_master_main_v2_runtime_state_uses_state_object() -> None:
     module = load_master_v2()
 
@@ -1896,6 +1918,62 @@ def test_master_main_v2_yolo_frame_suppresses_velocity_and_requests_resume() -> 
     assert frame["topic"] == module.Topic.LOCAL_VISION_CONTROL
     assert frame["body"][0] == module.LocalVisionControl.RESUME
     assert module.state.current_detection_source == "yolo"
+
+
+def test_master_main_v2_transport_finish_retries_pending_resume_control() -> None:
+    module = load_master_v2()
+
+    class StopLoop(Exception):
+        pass
+
+    class SnapshotImage(FakeImage):
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=None):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
+            return []
+
+    image = SnapshotImage()
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    uart = FakeUART()
+    module.sensor = Sensor()
+    module.init_uart = lambda: uart
+    module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
+    module.RELIABLE_RESEND_INTERVAL_MS = 20
+    module.default_now_ms = lambda: 100
+
+    def prime_transport_finish_task(rx_buffer):
+        module.state.current_task = {
+            "context_id": 12,
+            "state": module.State.TRANSPORT_OBJECT,
+            "target": module.Target.EDGE_LINE,
+            "arg": module.Task.TRANSPORT_FINISH,
+        }
+        module.state.local_vision_control_paused = True
+        module.state.pending_local_vision_control = {
+            "reliable_seq": 7,
+            "action": module.LocalVisionControl.RESUME,
+        }
+        module.state.pending_local_vision_control_last_sent_ms = 0
+        return rx_buffer
+
+    module.process_uart_input = prime_transport_finish_task
+
+    def stop_after_frame(current_img):
+        assert current_img is image
+        frame = decode_frame(uart.writes[-1])
+        assert frame is not None
+        assert frame["mode"] == MODE_TCP
+        assert frame["topic"] == module.Topic.LOCAL_VISION_CONTROL
+        assert frame["body"][0] == module.LocalVisionControl.RESUME
+        raise StopLoop()
+
+    module.process_task_frame = stop_after_frame
+
+    with pytest.raises(StopLoop):
+        module.run()
 
 
 def test_master_main_v2_finish_debug_ignores_cached_object_tracking_without_task_sync() -> None:

@@ -1936,6 +1936,7 @@ class RuntimeState:
                 and int(packet["target"]) == int(Target.OBJECT)
                 and unpack_task_arg_config(packet["arg"]) == int(Task.TRANSPORT)
             )
+            clear_local_vision_control_state()
             self.current_sync = {
                 "reliable_seq": reliable_seq,
                 "state": int(packet["state"]),
@@ -2180,6 +2181,12 @@ def ensure_yolo_control_paused():
 def request_yolo_control_resume():
     request_local_vision_control(LocalVisionControl.RESUME)
     send_pending_local_vision_control()
+
+
+def clear_local_vision_control_state():
+    state.pending_local_vision_control = None
+    state.pending_local_vision_control_last_sent_ms = None
+    state.local_vision_control_paused = False
 
 
 def accept_observation(observation=None, line_y=None):
@@ -2965,6 +2972,8 @@ def run():
         state.current_image_width = int(img.width())
         state.current_image_height = int(img.height())
         state.current_detection_source = "miss"
+        if state.pending_local_vision_control is not None:
+            send_pending_local_vision_control()
         skip_task_frame = False
         if state.has_pending_event():
             state.current_yolo_candidates = ()
