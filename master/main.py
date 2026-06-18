@@ -164,12 +164,16 @@ OBJECT_BLOB_PIXELS_THRESHOLD = 200
 OBJECT_BLOB_AREA_THRESHOLD = 200
 # 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
 TASKS = (
-    ('red', ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),
+    ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 90, True),
+    ('tennis', ((71, 95, -54, -33, 64, 95),), 5, 20, 30, 50, True),
+    ('blue', ((32, 70, -22, 14, -61, -33),), 5, 20, 25, 60, True),
+    ('white', ((33, 78, -11, 4, -22, 3),), 5, 20, 50, 80, True),
+    ('brown', ((16, 48, 0, 20, 10, 31),), 3, 20, 50, 100, True),
 )
 # 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
-FINISH_HOOK_YELLOW_THRESHOLD = (58, 87, -32, -12, 64, 84)
+FINISH_HOOK_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
 # 回库黄线使用的黄色阈值，格式为 OpenART LAB 阈值。
-RETURN_GARAGE_LINE_YELLOW_THRESHOLD = (58, 87, -32, -12, 64, 84)
+RETURN_GARAGE_LINE_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
 # 回库黄线采样半宽, 单位像素。
 RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX = 5
 # 回库黄线目标 Y 坐标。

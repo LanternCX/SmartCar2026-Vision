@@ -346,9 +346,18 @@ def test_master_main_v2_orbit_blob_only_preserves_previous_track() -> None:
 
 def test_master_main_v2_object_task_config_keeps_only_filter_parameters() -> None:
     module = load_master_v2()
+    for task_name in ("red", "tennis"):
+        task = next(task for task in module.OBJECT_TASKS if task[0] == task_name)
+        expected = (
+            task[0],
+            int(task[2]),
+            int(task[3]),
+            int(task[4]),
+            max(0, int(task[5])),
+            bool(task[6]),
+        )
 
-    assert module._object_task_config("red") == ("red", 3, 30, 70, 90, True)
-    assert module._object_task_config("tennis") is None
+        assert module._object_task_config(task_name) == expected
 
 
 def test_master_main_v2_object_task_config_accepts_legacy_threshold_layout() -> None:
