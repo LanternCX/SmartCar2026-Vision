@@ -16,6 +16,11 @@ except ImportError:
     sensor = None
 
 try:
+    import tf
+except ImportError:
+    tf = None
+
+try:
     from machine import UART
 except ImportError:
     UART = None
@@ -29,21 +34,68 @@ UART_BAUDRATE = 115200
 EXP_TIME_US = 500
 # TARGET_FOUND 未确认时的重复发送间隔，单位为毫秒。
 RELIABLE_RESEND_INTERVAL_MS = 100
-# 固定帧模式编号。
-MODE_UDP = 0x01
-MODE_TCP = 0x02
-MODE_ACK = 0x03
+
+# 固定帧模式编号分组。
+class Mode:
+    UDP = 0x01
+    TCP = 0x02
+    ACK = 0x03
+
+
+# 主车视觉协议 topic 编号分组。
+class Topic:
+    LOCAL_VISION_VELOCITY = 0x01
+    MASTER_VISION_HOOK_SYNC = 0x10
+    MASTER_VISION_EVENT_REPORT = 0x12
+
+# 主车状态编号分组。
+class State:
+    SEARCH_OBJECT = 1
+    ORBITING = 2
+    TRANSPORT_OBJECT = 4
+    RETURN_GARAGE_RETREAT = 6
+    RETURN_GARAGE_LINE = 7
+
+
+# 主车目标编号分组。
+class Target:
+    OBJECT = 1
+    EDGE_LINE = 3
+
+
+# 主车任务编号分组。
+class Task:
+    SEARCH = 1
+    TRANSPORT = 2
+    TRANSPORT_FINISH = 3
+    ORBIT = 4
+    RETURN_GARAGE_LINE = 5
+
+
+# 主车事件编号分组。
+class Event:
+    TARGET_FOUND = 6
+    ALIGNED = 7
+    ARRIVED = 8
+    RETURN_LINE_ALIGNED = 10
+    RETURN_GARAGE_FINISHED = 12
+
+
 # 固定帧 body 槽位长度。
-FRAME_BODY_SIZE = 8
+FRAME_BODY_SIZE = 10
 FRAME_HEAD = 0xA5
 # 固定帧总长度。
-FRAME_SIZE = 13
-# 本地视觉速度 topic。
-TOPIC_LOCAL_VISION_VELOCITY = 0x01
-# 主车视觉同步 topic。
-TOPIC_MASTER_VISION_HOOK_SYNC = 0x10
-# 主车视觉事件回报 topic。
-TOPIC_MASTER_VISION_EVENT_REPORT = 0x12
+FRAME_SIZE = 15
+# 物体识别开关。False 使用色块阈值，True 使用 YOLO。
+OBJECT_DETECTION_USE_YOLO = False
+# YOLO 模型文件路径，对应部署到 OpenART SD 卡根目录的模型文件。
+YOLO_MODEL_PATH = "/sd/yolo.tflite"
+# YOLO 检测前对图像做缩放复制，与模型验证脚本保持一致。
+YOLO_IMAGE_COPY_SCALE = 0.75
+# 物体识别最低置信度。
+YOLO_MIN_SCORE = 0.90
+# YOLO 标签编号映射。
+YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
 # 红色候选目标的最小面积，小于该值不会触发找到事件。
 OBJECT_MIN_AREA = 50.0
 # 主车搜索目标丢失时输出的配置横向速度。
@@ -99,40 +151,6 @@ FINISH_HOOK_RING_EXPAND_PX = 5
 # 主车收尾判定黄色占比阈值。
 FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.1
 FINISH_HOOK_STABLE_FRAMES = 2
-# 车端协议中的主车搜索状态编号。
-STATE_SEARCH_OBJECT = 1
-# 车端协议中的主车绕行状态编号。
-STATE_ORBITING = 2
-# 车端协议中的主车搬运状态编号。
-STATE_TRANSPORT_OBJECT = 4
-# 车端协议中的主车回库后退状态编号。
-STATE_RETURN_GARAGE_RETREAT = 6
-# 车端协议中的主车回库黄线平移状态编号。
-STATE_RETURN_GARAGE_LINE = 7
-# 车端协议中的物体目标编号。
-TARGET_OBJECT = 1
-# 车端协议中的边线目标编号。
-TARGET_EDGE_LINE = 3
-# 车端下发的主车搜索 hook 配置编号。
-MASTER_SEARCH_HOOK_CONFIG_ID = 1
-# 车端下发的主车搬运 hook 配置编号。
-MASTER_TRANSPORT_HOOK_CONFIG_ID = 2
-# 车端下发的主车收尾判定 hook 配置编号。
-MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID = 3
-# 车端下发的主车绕行视觉修正配置编号。
-MASTER_ORBIT_HOOK_CONFIG_ID = 4
-# 车端下发的主车回库黄线配置编号。
-MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID = 5
-# 车端协议中的目标找到事件编号。
-EVENT_TARGET_FOUND = 6
-# 车端协议中的对正完成事件编号。
-EVENT_ALIGNED = 7
-# 车端协议中的收尾到达事件编号。
-EVENT_ARRIVED = 8
-# 车端协议中的回库黄线对正事件编号。
-EVENT_RETURN_LINE_ALIGNED = 10
-# 车端协议中的回库完成事件编号。
-EVENT_RETURN_GARAGE_FINISHED = 12
 # 可靠包序号的环形范围大小。
 SEQ_RING_SIZE = 256
 # 判断环形序号新旧关系使用的半环长度。
@@ -146,12 +164,16 @@ OBJECT_BLOB_PIXELS_THRESHOLD = 200
 OBJECT_BLOB_AREA_THRESHOLD = 200
 # 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
 TASKS = (
-    ('red', ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),
+    ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 90, True),
+    ('tennis', ((71, 95, -54, -33, 64, 95),), 5, 20, 30, 50, True),
+    ('blue', ((32, 70, -22, 14, -61, -33),), 5, 20, 25, 60, True),
+    ('white', ((33, 78, -11, 4, -22, 3),), 5, 20, 50, 80, True),
+    ('brown', ((16, 48, 0, 20, 10, 31),), 3, 20, 50, 100, True),
 )
 # 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
-FINISH_HOOK_YELLOW_THRESHOLD = (58, 87, -32, -12, 64, 84)
+FINISH_HOOK_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
 # 回库黄线使用的黄色阈值，格式为 OpenART LAB 阈值。
-RETURN_GARAGE_LINE_YELLOW_THRESHOLD = (58, 87, -32, -12, 64, 84)
+RETURN_GARAGE_LINE_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
 # 回库黄线采样半宽, 单位像素。
 RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX = 5
 # 回库黄线目标 Y 坐标。
@@ -171,7 +193,7 @@ RETURN_GARAGE_LINE_MAX_THICKNESS_PX = 30
 # 回库黄线候选点左右水平联通黄线的最小合计长度, 单位像素。
 RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
 # 主车物体识别调试绘制总开关。
-MASTER_OBJECT_DEBUG_DRAW_ENABLED = False
+MASTER_OBJECT_DEBUG_DRAW_ENABLED = True
 
 _I16_MIN = -32768
 _I16_MAX = 32767
@@ -332,7 +354,7 @@ def parse_sync_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
-    if frame["mode"] != MODE_TCP or frame["topic"] != TOPIC_MASTER_VISION_HOOK_SYNC:
+    if frame["mode"] != Mode.TCP or frame["topic"] != Topic.MASTER_VISION_HOOK_SYNC:
         return None
     packet = decode_master_vision_hook_sync_body(frame["body"])
     return {
@@ -354,7 +376,7 @@ def parse_ack_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
-    if frame["mode"] != MODE_ACK or frame["topic"] != TOPIC_MASTER_VISION_EVENT_REPORT:
+    if frame["mode"] != Mode.ACK or frame["topic"] != Topic.MASTER_VISION_EVENT_REPORT:
         return None
     return {"reliable_seq": int(frame["seq"])}
 
@@ -413,7 +435,7 @@ def format_ack_frame(reliable_seq):
     @return ACK 短帧
     """
 
-    return encode_frame(MODE_ACK, TOPIC_MASTER_VISION_HOOK_SYNC, reliable_seq, b"")
+    return encode_frame(Mode.ACK, Topic.MASTER_VISION_HOOK_SYNC, reliable_seq, b"")
 
 
 def format_search_velocity_frame(vx, vy):
@@ -425,8 +447,8 @@ def format_search_velocity_frame(vx, vy):
     """
 
     return encode_frame(
-        MODE_UDP,
-        TOPIC_LOCAL_VISION_VELOCITY,
+        Mode.UDP,
+        Topic.LOCAL_VISION_VELOCITY,
         0,
         encode_velocity_body(vx, vy, 0.0, False),
     )
@@ -443,8 +465,8 @@ def format_event_frame(reliable_seq, context_id, event, value):
     """
 
     return encode_frame(
-        MODE_TCP,
-        TOPIC_MASTER_VISION_EVENT_REPORT,
+        Mode.TCP,
+        Topic.MASTER_VISION_EVENT_REPORT,
         reliable_seq,
         encode_master_vision_event_report_body(context_id, event, value),
     )
@@ -503,9 +525,9 @@ def _find_control_frame_start(rx_buffer):
             continue
         mode = frame["mode"]
         topic = frame["topic"]
-        if mode == MODE_TCP and topic == TOPIC_MASTER_VISION_HOOK_SYNC:
+        if mode == Mode.TCP and topic == Topic.MASTER_VISION_HOOK_SYNC:
             return index
-        if mode == MODE_ACK and topic == TOPIC_MASTER_VISION_EVENT_REPORT:
+        if mode == Mode.ACK and topic == Topic.MASTER_VISION_EVENT_REPORT:
             return index
     return -1
 
@@ -541,6 +563,42 @@ def blob_area(blob):
         return float(area_fn())
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     return float((right - left) * (bottom - top))
+
+
+class YoloDetectionBlob:
+    """! @brief 让模型检测框复用现有候选接口"""
+
+    def __init__(self, left, top, right, bottom, label, score):
+        self._left = float(left)
+        self._top = float(top)
+        self._right = float(right)
+        self._bottom = float(bottom)
+        self.label = int(label)
+        self.score = float(score)
+
+    def rect(self):
+        left = int(round(self._left))
+        top = int(round(self._top))
+        right = int(round(self._right))
+        bottom = int(round(self._bottom))
+        return left, top, right - left, bottom - top
+
+    def cx(self):
+        return (self._left + self._right) / 2.0
+
+    def cy(self):
+        return (self._top + self._bottom) / 2.0
+
+    def area(self):
+        return max(0.0, self._right - self._left) * max(0.0, self._bottom - self._top)
+
+    def min_corners(self):
+        return (
+            (self._left, self._top),
+            (self._right, self._top),
+            (self._right, self._bottom),
+            (self._left, self._bottom),
+        )
 
 
 def blob_center_y(blob):
@@ -623,6 +681,84 @@ def object_task_id(task_name):
     return 0
 
 
+def load_yolo_model():
+    """! @brief 在开启开关时加载 YOLO 模型"""
+
+    if not OBJECT_DETECTION_USE_YOLO or tf is None:
+        return None
+    return tf.load(YOLO_MODEL_PATH)
+
+
+def _copy_image_for_yolo(img):
+    """! @brief 生成 YOLO 推理使用的图像副本"""
+
+    copy_fn = getattr(img, "copy", None)
+    if copy_fn is None:
+        return img
+    return copy_fn(YOLO_IMAGE_COPY_SCALE, 1)
+
+
+def _image_width(img):
+    """! @brief 读取图像宽度"""
+
+    width_fn = getattr(img, "width", None)
+    if width_fn is not None:
+        return float(width_fn())
+    return 320.0
+
+
+def _image_height(img):
+    """! @brief 读取图像高度"""
+
+    height_fn = getattr(img, "height", None)
+    if height_fn is not None:
+        return float(height_fn())
+    return 240.0
+
+
+def _label_name(label):
+    """! @brief 返回 YOLO 标签名"""
+
+    label = int(label)
+    if 0 <= label < len(YOLO_LABELS):
+        return YOLO_LABELS[label]
+    return "unknown"
+
+
+def _build_yolo_candidates(img, yolo_net=None):
+    """! @brief 从 YOLO 检测结果生成物体候选"""
+
+    net = yolo_net
+    if net is None:
+        net = load_yolo_model()
+    if net is None or tf is None:
+        return []
+    detect_img = _copy_image_for_yolo(img)
+    image_width = _image_width(img)
+    image_height = _image_height(img)
+    allowed_task_names = {task[0] for task in TASKS}
+    candidates = []
+    for detected in tf.detect(net, detect_img):
+        x1, y1, x2, y2, label, score = detected
+        if float(score) <= float(YOLO_MIN_SCORE):
+            continue
+        task_name = _label_name(label)
+        if task_name not in allowed_task_names:
+            continue
+        left = float(x1) * image_width
+        top = float(y1) * image_height
+        right = float(x2) * image_width
+        bottom = float(y2) * image_height
+        if right <= left or bottom <= top:
+            continue
+        blob = YoloDetectionBlob(left, top, right, bottom, label, score)
+        _, _, _, protocol_bottom = normalize_bbox_for_protocol(
+            left, top, right, bottom, image_height
+        )
+        candidates.append((task_name, blob.cx(), protocol_bottom, blob.area(), blob))
+    return candidates
+
+
 def _find_blobs_with_task_config(
     img, thresholds, pixels_threshold, area_threshold, merge_margin
 ):
@@ -702,13 +838,15 @@ def blob_matches_all_thresholds(img, blob, thresholds, pixels_threshold, area_th
     return True
 
 
-def build_blob_candidates(img):
+def build_blob_candidates(img, yolo_net=None):
     """! @brief 提取物体候选目标, 面积作为目标强度
 
     @param img 当前图像对象
     @return 候选目标列表, 元素格式为 task_name, cx, bottom, area, blob
     """
 
+    if OBJECT_DETECTION_USE_YOLO:
+        return _build_yolo_candidates(img, yolo_net)
     candidates = []
     for task in TASKS:
         (
@@ -793,18 +931,18 @@ def should_filter_candidates_by_target_window(hook):
 
 
 def build_search_target_point(
-    image_width, image_height, config_id=MASTER_SEARCH_HOOK_CONFIG_ID
+    image_width, image_height, config_id=Task.SEARCH
 ):
     """! @brief 根据当前 hook 配置生成主车搜索目标点"""
 
     _ = image_width
     _ = image_height
     target_x = float(MASTER_SEARCH_TARGET_X_PX)
-    if int(config_id) == int(MASTER_ORBIT_HOOK_CONFIG_ID):
+    if int(config_id) == int(Task.ORBIT):
         return float(MASTER_ORBIT_TARGET_X_PX), float(MASTER_ORBIT_TARGET_Y_PX)
     if int(config_id) in (
-        int(MASTER_TRANSPORT_HOOK_CONFIG_ID),
-        int(MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID),
+        int(Task.TRANSPORT),
+        int(Task.TRANSPORT_FINISH),
     ):
         return target_x, float(MASTER_TRANSPORT_TARGET_Y_PX)
     return target_x, float(MASTER_SEARCH_TARGET_Y_PX)
@@ -1298,7 +1436,7 @@ class MasterVisionHook:
         """! @brief 返回当前 hook 使用的目标点配置编号"""
 
         if self.context is None:
-            return MASTER_SEARCH_HOOK_CONFIG_ID
+            return Task.SEARCH
         return int(self.context["arg"])
 
     def is_finish_hook_context(self):
@@ -1307,9 +1445,9 @@ class MasterVisionHook:
         if self.context is None:
             return False
         return (
-            int(self.context["state"]) == int(STATE_TRANSPORT_OBJECT)
-            and int(self.context["target"]) == int(TARGET_EDGE_LINE)
-            and int(self.context["arg"]) == int(MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID)
+            int(self.context["state"]) == int(State.TRANSPORT_OBJECT)
+            and int(self.context["target"]) == int(Target.EDGE_LINE)
+            and int(self.context["arg"]) == int(Task.TRANSPORT_FINISH)
         )
 
     def is_orbit_correction_context(self):
@@ -1318,9 +1456,9 @@ class MasterVisionHook:
         if self.context is None:
             return False
         return (
-            int(self.context["state"]) == int(STATE_ORBITING)
-            and int(self.context["target"]) == int(TARGET_OBJECT)
-            and int(self.context["arg"]) == int(MASTER_ORBIT_HOOK_CONFIG_ID)
+            int(self.context["state"]) == int(State.ORBITING)
+            and int(self.context["target"]) == int(Target.OBJECT)
+            and int(self.context["arg"]) == int(Task.ORBIT)
         )
 
     def is_return_line_context(self):
@@ -1329,11 +1467,11 @@ class MasterVisionHook:
         if self.context is None:
             return False
         return (
-            int(self.context["target"]) == int(TARGET_EDGE_LINE)
-            and int(self.context["arg"]) == int(MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID)
+            int(self.context["target"]) == int(Target.EDGE_LINE)
+            and int(self.context["arg"]) == int(Task.RETURN_GARAGE_LINE)
             and (
-                int(self.context["state"]) == int(STATE_RETURN_GARAGE_RETREAT)
-                or int(self.context["state"]) == int(STATE_RETURN_GARAGE_LINE)
+                int(self.context["state"]) == int(State.RETURN_GARAGE_RETREAT)
+                or int(self.context["state"]) == int(State.RETURN_GARAGE_LINE)
             )
         )
 
@@ -1500,7 +1638,7 @@ class MasterVisionHook:
     ):
         """! @brief 处理回库黄线配置下的对正与丢线完成事件"""
 
-        if event_type == EVENT_RETURN_LINE_ALIGNED:
+        if event_type == Event.RETURN_LINE_ALIGNED:
             if (
                 float(value) > 0.0
                 and float(value) <= float(RETURN_GARAGE_LINE_TARGET_Y_PX)
@@ -1509,13 +1647,13 @@ class MasterVisionHook:
             else:
                 self._stable_count = 0
                 return
-        elif event_type == EVENT_RETURN_GARAGE_FINISHED:
+        elif event_type == Event.RETURN_GARAGE_FINISHED:
             self._stable_count = 0
             return
         else:
             return
         required_stable_frames = self._required_stable_frames()
-        if event_type == EVENT_RETURN_GARAGE_FINISHED:
+        if event_type == Event.RETURN_GARAGE_FINISHED:
             required_stable_frames = 5
         if self._stable_count >= required_stable_frames:
             self._create_event(
@@ -1580,9 +1718,9 @@ class MasterVisionHook:
             return int(float(value))
         if (
             self.context is not None
-            and int(self.context["state"]) == STATE_SEARCH_OBJECT
-            and int(self.context["target"]) == TARGET_OBJECT
-            and int(self.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
+            and int(self.context["state"]) == State.SEARCH_OBJECT
+            and int(self.context["target"]) == Target.OBJECT
+            and int(self.context["arg"]) == Task.SEARCH
             and hook_value is not None
         ):
             return int(hook_value)
@@ -1600,41 +1738,41 @@ class MasterVisionHook:
         target = int(self.context["target"])
         arg = int(self.context["arg"])
         if (
-            state == STATE_SEARCH_OBJECT
-            and target == TARGET_OBJECT
-            and arg == MASTER_SEARCH_HOOK_CONFIG_ID
+            state == State.SEARCH_OBJECT
+            and target == Target.OBJECT
+            and arg == Task.SEARCH
         ):
-            return EVENT_TARGET_FOUND
+            return Event.TARGET_FOUND
         if (
-            state == STATE_SEARCH_OBJECT
-            and target == TARGET_OBJECT
-            and arg == MASTER_TRANSPORT_HOOK_CONFIG_ID
+            state == State.SEARCH_OBJECT
+            and target == Target.OBJECT
+            and arg == Task.TRANSPORT
         ):
-            return EVENT_ALIGNED
+            return Event.ALIGNED
         if (
-            state == STATE_ORBITING
-            and target == TARGET_OBJECT
-            and arg == MASTER_ORBIT_HOOK_CONFIG_ID
+            state == State.ORBITING
+            and target == Target.OBJECT
+            and arg == Task.ORBIT
         ):
             return None
         if (
-            state == STATE_TRANSPORT_OBJECT
-            and target == TARGET_EDGE_LINE
-            and arg == MASTER_TRANSPORT_FINISH_HOOK_CONFIG_ID
+            state == State.TRANSPORT_OBJECT
+            and target == Target.EDGE_LINE
+            and arg == Task.TRANSPORT_FINISH
         ):
-            return EVENT_ARRIVED
+            return Event.ARRIVED
         if (
-            state == STATE_RETURN_GARAGE_RETREAT
-            and target == TARGET_EDGE_LINE
-            and arg == MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID
+            state == State.RETURN_GARAGE_RETREAT
+            and target == Target.EDGE_LINE
+            and arg == Task.RETURN_GARAGE_LINE
         ):
-            return EVENT_RETURN_LINE_ALIGNED
+            return Event.RETURN_LINE_ALIGNED
         if (
-            state == STATE_RETURN_GARAGE_LINE
-            and target == TARGET_EDGE_LINE
-            and arg == MASTER_RETURN_GARAGE_LINE_HOOK_CONFIG_ID
+            state == State.RETURN_GARAGE_LINE
+            and target == Target.EDGE_LINE
+            and arg == Task.RETURN_GARAGE_LINE
         ):
-            return EVENT_RETURN_GARAGE_FINISHED
+            return Event.RETURN_GARAGE_FINISHED
         return None
 
     def _allocate_reliable_seq(self):
@@ -1764,7 +1902,7 @@ def process_uart_input(uart, rx_buffer, hook):
     return rx_buffer
 
 
-def build_observation_from_image(hook, img, image_width, image_height):
+def build_observation_from_image(hook, img, image_width, image_height, yolo_net=None):
     """! @brief 从图像生成一帧物体观测
 
     @param hook 主车视觉 hook 状态对象
@@ -1779,14 +1917,21 @@ def build_observation_from_image(hook, img, image_width, image_height):
         img,
         image_width,
         image_height,
+        yolo_net,
     )
     return observation, best_blob
 
 
-def build_observation_and_candidates_from_image(hook, img, image_width, image_height):
+def build_observation_and_candidates_from_image(
+    hook,
+    img,
+    image_width,
+    image_height,
+    yolo_net=None,
+):
     """! @brief 从图像生成一帧物体观测并返回全部候选色块"""
 
-    candidates = build_blob_candidates(img)
+    candidates = build_blob_candidates(img, yolo_net)
     if not candidates:
         return (
             hook.build_observation(0, 0, 0, 0, image_width, image_height),
@@ -1839,9 +1984,9 @@ def build_hook_event_value(hook, img, best_blob, image_width, image_height, task
     if not hook.is_finish_hook_context():
         if (
             hook.context is not None
-            and int(hook.context["state"]) == STATE_SEARCH_OBJECT
-            and int(hook.context["target"]) == TARGET_OBJECT
-            and int(hook.context["arg"]) == MASTER_SEARCH_HOOK_CONFIG_ID
+            and int(hook.context["state"]) == State.SEARCH_OBJECT
+            and int(hook.context["target"]) == Target.OBJECT
+            and int(hook.context["arg"]) == Task.SEARCH
             and task_name is not None
         ):
             return object_task_id(task_name)
@@ -1866,7 +2011,7 @@ def _process_return_line_frame(uart, hook, img, image_width, image_height):
     hook.remember_return_line_y(line_y)
     velocity = build_return_line_velocity_from_y(line_y)
     write_data_line(uart, format_search_velocity_frame(*velocity))
-    if int(hook.context["state"]) == int(STATE_RETURN_GARAGE_RETREAT):
+    if int(hook.context["state"]) == int(State.RETURN_GARAGE_RETREAT):
         hook.accept_observation(hook.build_return_line_observation(line_y))
         return
     if line_y is None:
@@ -2046,7 +2191,7 @@ def run_master_return_line_debug():
         draw_master_return_line_debug(img, image_width, image_height, line_y, vx, vy)
 
 
-def process_search_frame(uart, hook, img, image_width, image_height):
+def process_search_frame(uart, hook, img, image_width, image_height, yolo_net=None):
     """! @brief 处理单帧主车搜索速度流和 hook 事件
 
     @param uart 主车视觉串口
@@ -2067,7 +2212,7 @@ def process_search_frame(uart, hook, img, image_width, image_height):
     debug_blob = None
     debug_yellow_ratio = None
     if MASTER_OBJECT_DEBUG_DRAW_ENABLED and not hook.is_return_line_context():
-        raw_candidates = build_blob_candidates(img)
+        raw_candidates = build_blob_candidates(img, yolo_net)
         draw_blob_candidates_debug(img, raw_candidates)
         target_x, target_y = build_search_target_point(
             image_width,
@@ -2130,6 +2275,7 @@ def process_search_frame(uart, hook, img, image_width, image_height):
                 img,
                 image_width,
                 image_height,
+                yolo_net,
             )
         )
     else:
@@ -2201,6 +2347,7 @@ def run():
 
     uart = init_uart()
     image_width, image_height = init_sensor()
+    yolo_net = load_yolo_model()
     hook = MasterVisionHook()
     rx_buffer = b""
 
@@ -2208,7 +2355,10 @@ def run():
         rx_buffer = process_uart_input(uart, rx_buffer, hook)
         img = sensor.snapshot()  # type: ignore
         apply_lens_correction(img)
-        process_search_frame(uart, hook, img, image_width, image_height)
+        if OBJECT_DETECTION_USE_YOLO:
+            process_search_frame(uart, hook, img, image_width, image_height, yolo_net)
+        else:
+            process_search_frame(uart, hook, img, image_width, image_height)
 
 
 if __name__ == "__main__":

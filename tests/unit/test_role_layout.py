@@ -1,8 +1,10 @@
 """! @brief 主辅视觉入口目录布局测试"""
 
+import json
 import os
 import subprocess
 
+from calibration.chromaforge_export_adapter import load_rules_json
 from tests.test_support import ROOT, load_role_main_module, role_main_path
 
 
@@ -24,11 +26,11 @@ def test_role_main_modules_expose_role_protocol_api() -> None:
     master_frame = master.decode_frame(master.format_search_velocity_frame(0, 0))
 
     assert assistant_frame is not None
-    assert assistant_frame["mode"] == assistant.MODE_UDP
-    assert assistant_frame["topic"] == assistant.TOPIC_LOCAL_VISION_VELOCITY
+    assert assistant_frame["mode"] == assistant.Mode.UDP
+    assert assistant_frame["topic"] == assistant.Topic.LOCAL_VISION_VELOCITY
     assert master_frame is not None
-    assert master_frame["mode"] == master.MODE_UDP
-    assert master_frame["topic"] == master.TOPIC_LOCAL_VISION_VELOCITY
+    assert master_frame["mode"] == master.Mode.UDP
+    assert master_frame["topic"] == master.Topic.LOCAL_VISION_VELOCITY
     assert not hasattr(master, "format_observation_frame")
 
 
@@ -80,3 +82,71 @@ def test_role_build_scripts_generate_and_upload_role_entry(tmp_path) -> None:
         finally:
             master_source.write_text(original_master, encoding="utf-8")
             assistant_source.write_text(original_assistant, encoding="utf-8")
+
+
+def test_role_build_scripts_copy_yolo_model_when_requested(tmp_path) -> None:
+    """! @brief 角色构建脚本传入 yolo 参数时同时复制模型文件"""
+
+    model_path = ROOT / "yolo" / "yolo.tflite"
+    original_model = model_path.read_bytes() if model_path.exists() else None
+    model_path.write_bytes(b"fake-yolo-model")
+
+    try:
+        for role in ("assistant", "master"):
+            target_dir = tmp_path / (role + "-yolo-device")
+            target_dir.mkdir()
+            script_path = ROOT / role / "build.sh"
+            env = dict(os.environ)
+            env["TARGET_DIR"] = str(target_dir)
+
+            subprocess.run(
+                ["bash", str(script_path), "yolo"],
+                cwd=str(ROOT),
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            assert (target_dir / "main.py").is_file()
+            assert (target_dir / "yolo.tflite").read_bytes() == model_path.read_bytes()
+    finally:
+        if original_model is None:
+            model_path.unlink()
+        else:
+            model_path.write_bytes(original_model)
+
+
+def test_role_build_v2_scripts_generate_and_upload_v2_entry(tmp_path) -> None:
+    """! @brief v2 构建脚本读取共享标定文件并上传对应 v2 入口"""
+
+    for role in ("assistant", "master"):
+        target_dir = tmp_path / (role + "-v2-device")
+        target_dir.mkdir()
+        script_path = ROOT / role / "build_v2.sh"
+        source = ROOT / role / "main_v2.py"
+        env = dict(os.environ)
+        env["TARGET_DIR"] = str(target_dir)
+
+        subprocess.run(
+            ["bash", str(script_path)],
+            cwd=str(ROOT),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        uploaded = target_dir / "main.py"
+        assert source.is_file()
+        assert uploaded.is_file()
+        source_text = source.read_text(encoding="utf-8")
+        uploaded_text = uploaded.read_text(encoding="utf-8")
+        rules_text = load_rules_json()
+        rules = json.loads(rules_text)
+        first_object_threshold = tuple(rules["objects"][0]["thresholds"][0])
+        formatted_threshold = "(" + ", ".join(str(value) for value in first_object_threshold) + ")"
+        assert source_text == uploaded_text
+        assert "threshold_index" not in uploaded_text
+        assert "OBJECT_TASKS = (" in uploaded_text
+        assert formatted_threshold in uploaded_text

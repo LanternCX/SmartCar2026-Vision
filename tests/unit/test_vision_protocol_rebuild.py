@@ -95,8 +95,8 @@ def assert_velocity_frame(module, frame_bytes, vx, vy):
 
     frame = module.decode_frame(frame_bytes)
     assert frame is not None
-    assert frame["mode"] == module.MODE_UDP
-    assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+    assert frame["mode"] == module.Mode.UDP
+    assert frame["topic"] == module.Topic.LOCAL_VISION_VELOCITY
     body = module.decode_velocity_body(frame["body"])
     assert body["vx"] == pytest.approx(vx)
     assert body["vy"] == pytest.approx(vy)

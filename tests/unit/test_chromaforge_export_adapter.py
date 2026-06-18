@@ -10,12 +10,14 @@ from calibration.chromaforge_export_adapter import (
 )
 
 
-def _run_role_build_script_preserving_sources(script_path, target_dir):
+def _run_role_build_script_preserving_sources(script_path, target_dir, preserved_sources=None):
     root_dir = DEFAULT_RULES_PATH.parent.parent
-    master_source = root_dir / "master" / "main.py"
-    assistant_source = root_dir / "assistant" / "main.py"
-    original_master = master_source.read_text(encoding="utf-8")
-    original_assistant = assistant_source.read_text(encoding="utf-8")
+    if preserved_sources is None:
+        preserved_sources = ("master/main.py", "assistant/main.py")
+    originals = {}
+    for relative_path in preserved_sources:
+        source_path = root_dir / relative_path
+        originals[source_path] = source_path.read_text(encoding="utf-8")
     try:
         return subprocess.run(
             ["bash", script_path],
@@ -29,8 +31,8 @@ def _run_role_build_script_preserving_sources(script_path, target_dir):
             text=True,
         )
     finally:
-        master_source.write_text(original_master, encoding="utf-8")
-        assistant_source.write_text(original_assistant, encoding="utf-8")
+        for source_path, original_text in originals.items():
+            source_path.write_text(original_text, encoding="utf-8")
 
 
 def _first_yellow_threshold(document):
@@ -322,6 +324,63 @@ def test_role_build_script_generates_master_output_from_shared_rules(tmp_path) -
     assert "threshold_index" not in uploaded
 
 
+def test_role_build_v2_script_generates_master_v2_output_from_shared_rules(tmp_path) -> None:
+    target_dir = tmp_path / "master-v2-device"
+    target_dir.mkdir()
+
+    _run_role_build_script_preserving_sources(
+        "master/build_v2.sh",
+        target_dir,
+        preserved_sources=("master/main_v2.py",),
+    )
+
+    uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+    rules = json.loads(load_rules_json())
+    yellow_threshold = _first_yellow_threshold(rules)
+
+    assert "OBJECT_TASKS = (" in uploaded
+    assert "('red'" in uploaded
+    assert "'yellow'" not in uploaded
+    if yellow_threshold is not None:
+        assert "FINISH_HOOK_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
+        assert "RETURN_GARAGE_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
+    assert "threshold_index" not in uploaded
+
+
+def test_role_build_v2_script_rewrites_master_v2_source_from_shared_rules(tmp_path) -> None:
+    target_dir = tmp_path / "master-v2-copy-only-device"
+    target_dir.mkdir()
+    root_dir = DEFAULT_RULES_PATH.parent.parent
+    source_path = root_dir / "master" / "main_v2.py"
+    original_text = source_path.read_text(encoding="utf-8")
+    modified_text = original_text.replace(
+        "OBJECT_TASKS = (",
+        "OBJECT_TASKS = (\n    ('runtime_only_marker', 1, 2, 3, 4, False),",
+        1,
+    )
+    source_path.write_text(modified_text, encoding="utf-8")
+    try:
+        subprocess.run(
+            ["bash", "master/build_v2.sh"],
+            check=True,
+            cwd=root_dir,
+            env={
+                "PATH": os.environ["PATH"],
+                "TARGET_DIR": str(target_dir),
+            },
+            capture_output=True,
+            text=True,
+        )
+        uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+        generated_source = source_path.read_text(encoding="utf-8")
+        assert generated_source != modified_text
+        assert uploaded == generated_source
+        assert "runtime_only_marker" not in generated_source
+        assert "threshold_index" not in generated_source
+    finally:
+        source_path.write_text(original_text, encoding="utf-8")
+
+
 def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path) -> None:
     target_dir = tmp_path / "assistant-device"
     target_dir.mkdir()
@@ -337,3 +396,59 @@ def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path
     assert "'yellow'" not in uploaded
     if yellow_threshold is not None:
         assert "RETURN_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
+
+
+def test_role_build_v2_script_generates_assistant_v2_output_from_shared_rules(tmp_path) -> None:
+    target_dir = tmp_path / "assistant-v2-device"
+    target_dir.mkdir()
+
+    _run_role_build_script_preserving_sources(
+        "assistant/build_v2.sh",
+        target_dir,
+        preserved_sources=("assistant/main_v2.py",),
+    )
+
+    uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+    rules = json.loads(load_rules_json())
+    yellow_threshold = _first_yellow_threshold(rules)
+
+    assert "OBJECT_TASKS = (" in uploaded
+    assert "('red'" in uploaded
+    assert "'yellow'" not in uploaded
+    if yellow_threshold is not None:
+        assert "RETURN_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
+    assert "threshold_index" not in uploaded
+
+
+def test_role_build_v2_script_rewrites_assistant_v2_source_from_shared_rules(tmp_path) -> None:
+    target_dir = tmp_path / "assistant-v2-copy-only-device"
+    target_dir.mkdir()
+    root_dir = DEFAULT_RULES_PATH.parent.parent
+    source_path = root_dir / "assistant" / "main_v2.py"
+    original_text = source_path.read_text(encoding="utf-8")
+    modified_text = original_text.replace(
+        "OBJECT_TASKS = (",
+        "OBJECT_TASKS = (\n    ('runtime_only_marker', 1, 2, 3, 4, False),",
+        1,
+    )
+    source_path.write_text(modified_text, encoding="utf-8")
+    try:
+        subprocess.run(
+            ["bash", "assistant/build_v2.sh"],
+            check=True,
+            cwd=root_dir,
+            env={
+                "PATH": os.environ["PATH"],
+                "TARGET_DIR": str(target_dir),
+            },
+            capture_output=True,
+            text=True,
+        )
+        uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+        generated_source = source_path.read_text(encoding="utf-8")
+        assert generated_source != modified_text
+        assert uploaded == generated_source
+        assert "runtime_only_marker" not in generated_source
+        assert "threshold_index" not in generated_source
+    finally:
+        source_path.write_text(original_text, encoding="utf-8")

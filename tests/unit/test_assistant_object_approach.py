@@ -35,10 +35,45 @@ class BadReadUART:
         return b"\xff"
 
 
+class FakeYoloTf:
+    """记录 YOLO 加载与检测调用的测试桩."""
+
+    def __init__(self):
+        self.loaded_paths = []
+        self.detect_calls = []
+
+    def load(self, path):
+        self.loaded_paths.append(path)
+        return "fake-yolo-net"
+
+    def detect(self, net, img):
+        self.detect_calls.append((net, img))
+        return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
+
+
 def load_assistant():
     """加载辅车视觉入口模块."""
 
     return load_main_module("assistant_object_approach_test_module")
+
+
+def test_assistant_exposes_grouped_enum_constants() -> None:
+    module = load_assistant()
+
+    assert module.Mode.UDP == 0x01
+    assert module.Topic.ASSISTANT_VISION_EVENT_REPORT == 0x13
+    assert module.RunMode.FOLLOW == "follow"
+    assert module.State.APPROACH_OBJECT == 2
+    assert module.Target.OBJECT == 1
+    assert module.Task.SEARCH == 1
+    assert module.Event.TARGET_FOUND == 6
+    assert not hasattr(module, "MODE_UDP")
+    assert not hasattr(module, "TOPIC_ASSISTANT_VISION_EVENT_REPORT")
+    assert not hasattr(module, "MODE_FOLLOW")
+    assert not hasattr(module, "STATE_APPROACH_OBJECT")
+    assert not hasattr(module, "TARGET_OBJECT")
+    assert not hasattr(module, "OBJECT_APPROACH_CONFIG_ID")
+    assert not hasattr(module, "EVENT_TARGET_FOUND")
 
 
 def yellow_pixel_for(module):
@@ -69,7 +104,7 @@ def assistant_target_point(module, config_id=None):
     """返回当前指定配置的找物体目标点."""
 
     if config_id is None:
-        config_id = module.OBJECT_APPROACH_CONFIG_ID
+        config_id = module.Task.SEARCH
     return module.build_object_target_point(IMAGE_WIDTH, IMAGE_HEIGHT, config_id)
 
 
@@ -92,7 +127,7 @@ def centered_transport_observation(module, area):
 
     target_x, target_y = assistant_target_point(
         module,
-        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
     return module.build_object_observation(
         1,
@@ -101,7 +136,7 @@ def centered_transport_observation(module, area):
         area,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
-        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
 
 
@@ -110,7 +145,7 @@ def centered_orbit_observation(module, area):
 
     target_x, target_y = assistant_target_point(
         module,
-        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+        module.Task.ORBIT,
     )
     return module.build_object_observation(
         1,
@@ -119,7 +154,7 @@ def centered_orbit_observation(module, area):
         area,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
-        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+        module.Task.ORBIT,
     )
 
 
@@ -231,8 +266,8 @@ def assert_velocity_frame(module, frame_bytes, vx, vy):
 
     frame = module.decode_frame(frame_bytes)
     assert frame is not None
-    assert frame["mode"] == module.MODE_UDP
-    assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+    assert frame["mode"] == module.Mode.UDP
+    assert frame["topic"] == module.Topic.LOCAL_VISION_VELOCITY
     body = module.decode_velocity_body(frame["body"])
     assert body["vx"] == pytest.approx(vx)
     assert body["vy"] == pytest.approx(vy)
@@ -246,7 +281,7 @@ def test_assistant_defaults_to_follow_mode() -> None:
     module = load_assistant()
     state = module.AssistantVisionState()
 
-    assert state.mode == module.MODE_FOLLOW
+    assert state.mode == module.RunMode.FOLLOW
 
 
 def test_assistant_sync_packet_switches_to_object_mode_and_replies_ack() -> None:
@@ -260,14 +295,14 @@ def test_assistant_sync_packet_switches_to_object_mode_and_replies_ack() -> None
         state.handle_control_line(
             assistant_sync_frame(
                 12,
-                module.STATE_APPROACH_OBJECT,
-                module.TARGET_OBJECT,
+                module.State.APPROACH_OBJECT,
+                module.Target.OBJECT,
                 pack_task_arg(1, 2),
             )
         ),
         12,
     )
-    assert state.mode == module.MODE_APPROACH_OBJECT
+    assert state.mode == module.RunMode.APPROACH_OBJECT
     assert state.current_object_config_id() == 1
 
 
@@ -278,8 +313,8 @@ def test_assistant_sync_packet_exposes_selected_object_id() -> None:
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_APPROACH_OBJECT,
-            module.TARGET_OBJECT,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
             pack_task_arg(1, 2),
         )
     )
@@ -293,9 +328,9 @@ def test_assistant_packed_approach_sync_still_emits_target_found_event() -> None
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_APPROACH_OBJECT,
-            module.TARGET_OBJECT,
-            pack_task_arg(module.OBJECT_APPROACH_CONFIG_ID, 2),
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            pack_task_arg(module.Task.SEARCH, 2),
         )
     )
 
@@ -305,7 +340,7 @@ def test_assistant_packed_approach_sync_still_emits_target_found_event() -> None
         module,
         state.next_event_frame(),
         12,
-        module.EVENT_TARGET_FOUND,
+        module.Event.TARGET_FOUND,
         180,
     )
 
@@ -316,9 +351,9 @@ def test_assistant_packed_transport_sync_still_emits_aligned_event() -> None:
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_APPROACH_OBJECT,
-            module.TARGET_OBJECT,
-            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 2),
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            pack_task_arg(module.Task.TRANSPORT, 2),
         )
     )
 
@@ -328,7 +363,7 @@ def test_assistant_packed_transport_sync_still_emits_aligned_event() -> None:
         module,
         state.next_event_frame(),
         12,
-        module.EVENT_ALIGNED,
+        module.Event.ALIGNED,
         180,
     )
 
@@ -344,14 +379,14 @@ def test_assistant_sync_packet_switches_to_orbit_correction_mode() -> None:
         state.handle_control_line(
             assistant_sync_frame(
                 12,
-                module.STATE_ORBIT,
-                module.TARGET_OBJECT,
-                pack_task_arg(module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID, 2),
+                module.State.ORBIT,
+                module.Target.OBJECT,
+                pack_task_arg(module.Task.ORBIT, 2),
             )
         ),
         12,
     )
-    assert state.mode == module.MODE_ORBIT_OBJECT
+    assert state.mode == module.RunMode.ORBIT_OBJECT
 
 
 def test_process_object_frame_filters_candidates_by_selected_object_id() -> None:
@@ -364,13 +399,13 @@ def test_process_object_frame_filters_candidates_by_selected_object_id() -> None
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_APPROACH_OBJECT,
-            module.TARGET_OBJECT,
-            pack_task_arg(module.OBJECT_APPROACH_CONFIG_ID, 2),
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            pack_task_arg(module.Task.SEARCH, 2),
         )
     )
 
-    target_x, target_y = assistant_target_point(module, module.OBJECT_APPROACH_CONFIG_ID)
+    target_x, target_y = assistant_target_point(module, module.Task.SEARCH)
 
     class RedBlob:
         def rect(self):
@@ -425,7 +460,7 @@ def test_process_object_frame_filters_candidates_by_selected_object_id() -> None
         0.0,
         0.0,
     )
-    assert state.current_object_config_id() == module.OBJECT_APPROACH_CONFIG_ID
+    assert state.current_object_config_id() == module.Task.SEARCH
     assert state.current_object_id() == 2
 
 
@@ -438,14 +473,14 @@ def test_process_object_frame_prefers_target_window_candidate_in_transport() -> 
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_TRANSPORT_OBJECT,
-            module.TARGET_OBJECT,
-            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+            module.State.TRANSPORT_OBJECT,
+            module.Target.OBJECT,
+            pack_task_arg(module.Task.TRANSPORT, 1),
         )
     )
     target_x, target_y = assistant_target_point(
         module,
-        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
 
     class FakeBlob:
@@ -520,14 +555,14 @@ def test_process_object_frame_transport_alignment_keeps_original_candidate_selec
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_APPROACH_OBJECT,
-            module.TARGET_OBJECT,
-            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            pack_task_arg(module.Task.TRANSPORT, 1),
         )
     )
     target_x, target_y = assistant_target_point(
         module,
-        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
 
     class FakeBlob:
@@ -585,9 +620,9 @@ def test_process_object_frame_marks_selected_object_and_target_point() -> None:
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_APPROACH_OBJECT,
-            module.TARGET_OBJECT,
-            pack_task_arg(module.OBJECT_APPROACH_CONFIG_ID, 1),
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            pack_task_arg(module.Task.SEARCH, 1),
         )
     )
     target_x, target_y = assistant_target_point(module)
@@ -658,14 +693,14 @@ def test_assistant_orbit_correction_uses_independent_velocity_params_without_eve
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_ORBIT,
-            module.TARGET_OBJECT,
-            module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+            module.State.ORBIT,
+            module.Target.OBJECT,
+            module.Task.ORBIT,
         )
     )
     target_x, target_y = assistant_target_point(
         module,
-        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+        module.Task.ORBIT,
     )
     err_x = 10.0
     err_y = 12.0
@@ -676,7 +711,7 @@ def test_assistant_orbit_correction_uses_independent_velocity_params_without_eve
         300,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
-        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+        module.Task.ORBIT,
     )
 
     velocity = module.build_object_orbit_velocity_from_observation(
@@ -705,7 +740,7 @@ def test_assistant_orbit_correction_missing_target_outputs_zero_velocity() -> No
         0,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
-        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+        module.Task.ORBIT,
     )
 
     assert module.build_object_orbit_velocity_from_observation(
@@ -722,7 +757,7 @@ def test_assistant_orbit_correction_zero_kp_outputs_zero_velocity() -> None:
     module.OBJECT_ORBIT_KP_Y = 0.0
     target_x, target_y = assistant_target_point(
         module,
-        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+        module.Task.ORBIT,
     )
     observation = module.build_object_observation(
         1,
@@ -731,7 +766,7 @@ def test_assistant_orbit_correction_zero_kp_outputs_zero_velocity() -> None:
         300,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
-        module.ASSISTANT_ORBIT_OBJECT_CONFIG_ID,
+        module.Task.ORBIT,
     )
 
     assert module.build_object_orbit_velocity_from_observation(
@@ -749,7 +784,7 @@ def test_assistant_older_sync_only_replies_ack_without_reverting_mode() -> None:
     assert_assistant_ack(
         module,
         state.handle_control_line(
-            assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+            assistant_sync_frame(12, module.State.APPROACH_OBJECT, module.Target.OBJECT, 1)
         ),
         12,
     )
@@ -758,7 +793,7 @@ def test_assistant_older_sync_only_replies_ack_without_reverting_mode() -> None:
         state.handle_control_line(assistant_sync_frame(11, 1, 0, 0)),
         11,
     )
-    assert state.mode == module.MODE_APPROACH_OBJECT
+    assert state.mode == module.RunMode.APPROACH_OBJECT
 
 
 def test_assistant_repeated_sync_replies_ack_without_clearing_pending_event() -> None:
@@ -775,7 +810,7 @@ def test_assistant_repeated_sync_replies_ack_without_clearing_pending_event() ->
     assert_assistant_ack(
         module,
         state.handle_control_line(
-            assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+            assistant_sync_frame(12, module.State.APPROACH_OBJECT, module.Target.OBJECT, 1)
         ),
         12,
     )
@@ -786,13 +821,13 @@ def test_assistant_repeated_sync_replies_ack_without_clearing_pending_event() ->
     assert_assistant_ack(
         module,
         state.handle_control_line(
-            assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+            assistant_sync_frame(12, module.State.APPROACH_OBJECT, module.Target.OBJECT, 1)
         ),
         12,
     )
     now_ms[0] += 20
 
-    assert_assistant_event(module, first, 12, module.EVENT_TARGET_FOUND, 180)
+    assert_assistant_event(module, first, 12, module.Event.TARGET_FOUND, 180)
     assert state.next_event_frame() == first
 
 
@@ -860,11 +895,11 @@ def test_assistant_transport_observation_uses_transport_target_point() -> None:
     module = load_assistant()
     search_target_x, search_target_y = assistant_target_point(
         module,
-        module.OBJECT_APPROACH_CONFIG_ID,
+        module.Task.SEARCH,
     )
     transport_target_x, transport_target_y = assistant_target_point(
         module,
-        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
 
     search_observation = module.build_object_observation(
@@ -874,7 +909,7 @@ def test_assistant_transport_observation_uses_transport_target_point() -> None:
         300,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
-        module.OBJECT_APPROACH_CONFIG_ID,
+        module.Task.SEARCH,
     )
     transport_observation = module.build_object_observation(
         1,
@@ -883,7 +918,7 @@ def test_assistant_transport_observation_uses_transport_target_point() -> None:
         300,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
-        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
 
     assert search_target_y == float(module.OBJECT_APPROACH_TARGET_Y_PX)
@@ -898,7 +933,7 @@ def test_assistant_transport_config_treats_search_target_as_not_aligned() -> Non
     module = load_assistant()
     search_target_x, search_target_y = assistant_target_point(
         module,
-        module.OBJECT_APPROACH_CONFIG_ID,
+        module.Task.SEARCH,
     )
 
     observation = module.build_object_observation(
@@ -908,7 +943,7 @@ def test_assistant_transport_config_treats_search_target_as_not_aligned() -> Non
         300,
         IMAGE_WIDTH,
         IMAGE_HEIGHT,
-        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
 
     expected_y = float(module.OBJECT_APPROACH_TARGET_Y_PX) - float(
@@ -951,7 +986,7 @@ def test_assistant_object_target_can_be_reconfigured(monkeypatch) -> None:
     assert_assistant_ack(
         module,
         state.handle_control_line(
-            assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+            assistant_sync_frame(12, module.State.APPROACH_OBJECT, module.Target.OBJECT, 1)
         ),
         12,
     )
@@ -1015,7 +1050,7 @@ def test_assistant_hook_waits_for_stable_target_before_event() -> None:
     assert_assistant_ack(
         module,
         state.handle_control_line(
-            assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+            assistant_sync_frame(12, module.State.APPROACH_OBJECT, module.Target.OBJECT, 1)
         ),
         12,
     )
@@ -1025,7 +1060,7 @@ def test_assistant_hook_waits_for_stable_target_before_event() -> None:
     assert state.next_event_frame() is None
     state.accept_object_observation(observation)
 
-    assert_assistant_event(module, state.next_event_frame(), 12, module.EVENT_TARGET_FOUND, 150)
+    assert_assistant_event(module, state.next_event_frame(), 12, module.Event.TARGET_FOUND, 150)
 
 
 def test_assistant_target_found_sends_stable_zero_before_event() -> None:
@@ -1038,7 +1073,7 @@ def test_assistant_target_found_sends_stable_zero_before_event() -> None:
     assert_assistant_ack(
         module,
         state.handle_control_line(
-            assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+            assistant_sync_frame(12, module.State.APPROACH_OBJECT, module.Target.OBJECT, 1)
         ),
         12,
     )
@@ -1050,7 +1085,7 @@ def test_assistant_target_found_sends_stable_zero_before_event() -> None:
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
     assert_velocity_frame(module, uart.writes[1], 0.0, 0.0)
-    assert_assistant_event(module, uart.writes[2], 12, module.EVENT_TARGET_FOUND, 300)
+    assert_assistant_event(module, uart.writes[2], 12, module.Event.TARGET_FOUND, 300)
 
 
 def test_assistant_pending_event_suppresses_velocity_between_retries() -> None:
@@ -1068,7 +1103,7 @@ def test_assistant_pending_event_suppresses_velocity_between_retries() -> None:
     assert_assistant_ack(
         module,
         state.handle_control_line(
-            assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+            assistant_sync_frame(12, module.State.APPROACH_OBJECT, module.Target.OBJECT, 1)
         ),
         12,
     )
@@ -1080,8 +1115,8 @@ def test_assistant_pending_event_suppresses_velocity_between_retries() -> None:
 
     assert len(uart.writes) == 3
     assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
-    assert_assistant_event(module, uart.writes[1], 12, module.EVENT_TARGET_FOUND, 300)
-    assert_assistant_event(module, uart.writes[2], 12, module.EVENT_TARGET_FOUND, 300)
+    assert_assistant_event(module, uart.writes[1], 12, module.Event.TARGET_FOUND, 300)
+    assert_assistant_event(module, uart.writes[2], 12, module.Event.TARGET_FOUND, 300)
 
 
 def test_assistant_hook_repeats_event_until_matching_ack() -> None:
@@ -1098,7 +1133,7 @@ def test_assistant_hook_repeats_event_until_matching_ack() -> None:
     assert_assistant_ack(
         module,
         state.handle_control_line(
-            assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+            assistant_sync_frame(12, module.State.APPROACH_OBJECT, module.Target.OBJECT, 1)
         ),
         12,
     )
@@ -1110,7 +1145,7 @@ def test_assistant_hook_repeats_event_until_matching_ack() -> None:
     second = state.next_event_frame()
     state.handle_control_line(assistant_event_ack_frame(12))
 
-    assert_assistant_event(module, first, 12, module.EVENT_TARGET_FOUND, 180)
+    assert_assistant_event(module, first, 12, module.Event.TARGET_FOUND, 180)
     assert second == first
     assert state.next_event_frame() is None
 
@@ -1126,9 +1161,9 @@ def test_assistant_transport_mode_emits_aligned_for_transport_config() -> None:
         state.handle_control_line(
             assistant_sync_frame(
                 12,
-                int(module.STATE_APPROACH_OBJECT),
+                int(module.State.APPROACH_OBJECT),
                 1,
-                int(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID),
+                int(module.Task.TRANSPORT),
             )
         ),
         12,
@@ -1136,7 +1171,7 @@ def test_assistant_transport_mode_emits_aligned_for_transport_config() -> None:
     observation = centered_transport_observation(module, 180)
     state.accept_object_observation(observation)
 
-    assert_assistant_event(module, state.next_event_frame(), 12, module.EVENT_ALIGNED, 180)
+    assert_assistant_event(module, state.next_event_frame(), 12, module.Event.ALIGNED, 180)
 
 
 def test_assistant_orbit_state_transport_config_aligns_to_transport_target() -> None:
@@ -1150,9 +1185,9 @@ def test_assistant_orbit_state_transport_config_aligns_to_transport_target() -> 
         state.handle_control_line(
             assistant_sync_frame(
                 12,
-                int(module.STATE_ORBIT),
-                int(module.TARGET_OBJECT),
-                pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 2),
+                int(module.State.ORBIT),
+                int(module.Target.OBJECT),
+                pack_task_arg(module.Task.TRANSPORT, 2),
             )
         ),
         12,
@@ -1160,9 +1195,9 @@ def test_assistant_orbit_state_transport_config_aligns_to_transport_target() -> 
     observation = centered_transport_observation(module, 180)
     state.accept_object_observation(observation)
 
-    assert state.mode == module.MODE_APPROACH_OBJECT
-    assert state.current_object_config_id() == module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID
-    assert_assistant_event(module, state.next_event_frame(), 12, module.EVENT_ALIGNED, 180)
+    assert state.mode == module.RunMode.APPROACH_OBJECT
+    assert state.current_object_config_id() == module.Task.TRANSPORT
+    assert_assistant_event(module, state.next_event_frame(), 12, module.Event.ALIGNED, 180)
 
 
 def test_assistant_transport_mode_keeps_object_velocity_output() -> None:
@@ -1176,9 +1211,9 @@ def test_assistant_transport_mode_keeps_object_velocity_output() -> None:
         state.handle_control_line(
             assistant_sync_frame(
                 12,
-                int(module.STATE_APPROACH_OBJECT),
+                int(module.State.APPROACH_OBJECT),
                 1,
-                int(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID),
+                int(module.Task.TRANSPORT),
             )
         ),
         12,
@@ -1222,8 +1257,8 @@ def test_assistant_transport_mode_keeps_object_velocity_output() -> None:
 
     frame = module.decode_frame(uart.writes[0])
     assert frame is not None
-    assert frame["mode"] == module.MODE_UDP
-    assert frame["topic"] == module.TOPIC_LOCAL_VISION_VELOCITY
+    assert frame["mode"] == module.Mode.UDP
+    assert frame["topic"] == module.Topic.LOCAL_VISION_VELOCITY
 
 
 def test_process_object_frame_accepts_x_outside_when_bottom_hits_target_window_in_transport() -> None:
@@ -1235,14 +1270,14 @@ def test_process_object_frame_accepts_x_outside_when_bottom_hits_target_window_i
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_TRANSPORT_OBJECT,
-            module.TARGET_OBJECT,
-            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+            module.State.TRANSPORT_OBJECT,
+            module.Target.OBJECT,
+            pack_task_arg(module.Task.TRANSPORT, 1),
         )
     )
     target_x, target_y = assistant_target_point(
         module,
-        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
 
     class FakeBlob:
@@ -1312,14 +1347,14 @@ def test_process_object_frame_prefers_largest_area_after_bottom_filter_in_transp
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_TRANSPORT_OBJECT,
-            module.TARGET_OBJECT,
-            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+            module.State.TRANSPORT_OBJECT,
+            module.Target.OBJECT,
+            pack_task_arg(module.Task.TRANSPORT, 1),
         )
     )
     target_x, target_y = assistant_target_point(
         module,
-        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
 
     class FakeBlob:
@@ -1382,6 +1417,43 @@ def test_process_object_frame_prefers_largest_area_after_bottom_filter_in_transp
     )
 
 
+def test_assistant_object_candidates_use_yolo_when_flag_enabled() -> None:
+    """打开开关后辅车找物体候选切换到 YOLO."""
+
+    module = load_assistant()
+    module.OBJECT_DETECTION_USE_YOLO = True
+    module.tf = FakeYoloTf()
+
+    class FakeImage:
+        def __init__(self):
+            self.copy_calls = []
+
+        def width(self):
+            return IMAGE_WIDTH
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def copy(self, scale, copy_to_fb):
+            self.copy_calls.append((scale, copy_to_fb))
+            return "detect-image"
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
+            raise AssertionError("打开 YOLO 后不应继续调用色块识别")
+
+    img = FakeImage()
+
+    candidates = module.build_object_blob_candidates(img)
+
+    assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
+    assert module.tf.detect_calls == [("fake-yolo-net", "detect-image")]
+    assert img.copy_calls == [(module.YOLO_IMAGE_COPY_SCALE, 1)]
+    assert candidates[0][0] == "red"
+    assert candidates[0][1] == pytest.approx(160.0)
+    assert candidates[0][3] == pytest.approx(210.0)
+    assert candidates[0][4] == pytest.approx(3200.0)
+
+
 def test_process_object_frame_ignores_candidates_when_bottom_outside_target_window_in_transport() -> None:
     """辅车推行阶段忽略底边未命中目标窗口的候选框."""
 
@@ -1391,14 +1463,14 @@ def test_process_object_frame_ignores_candidates_when_bottom_outside_target_wind
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_TRANSPORT_OBJECT,
-            module.TARGET_OBJECT,
-            pack_task_arg(module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID, 1),
+            module.State.TRANSPORT_OBJECT,
+            module.Target.OBJECT,
+            pack_task_arg(module.Task.TRANSPORT, 1),
         )
     )
     target_x, target_y = assistant_target_point(
         module,
-        module.ASSISTANT_TRANSPORT_OBJECT_CONFIG_ID,
+        module.Task.TRANSPORT,
     )
 
     class FakeBlob:
@@ -1462,7 +1534,7 @@ def test_assistant_process_uart_input_writes_local_ack() -> None:
     module = load_assistant()
     state = module.AssistantVisionState()
     uart = FakeUART(
-        assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+        assistant_sync_frame(12, module.State.APPROACH_OBJECT, module.Target.OBJECT, 1)
     )
 
     assert module.process_uart_input(uart, b"", state) == b""
@@ -1477,15 +1549,15 @@ def test_assistant_return_line_sync_switches_to_yellow_line_mode() -> None:
     uart = FakeUART(
         assistant_sync_frame(
             12,
-            module.STATE_RETURN_FOLLOW,
-            module.TARGET_NONE,
-            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+            module.State.RETURN_FOLLOW,
+            module.Target.NONE,
+            module.Task.RETURN_GARAGE_LINE,
         )
     )
 
     assert module.process_uart_input(uart, b"", state) == b""
     assert uart.writes == [module.format_ack_frame(12)]
-    assert state.mode == module.MODE_RETURN_LINE
+    assert state.mode == module.RunMode.RETURN_LINE
 
 
 def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
@@ -1501,9 +1573,9 @@ def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_RETURN_FOLLOW,
-            module.TARGET_NONE,
-            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+            module.State.RETURN_FOLLOW,
+            module.Target.NONE,
+            module.Task.RETURN_GARAGE_LINE,
         )
     )
     uart = FakeUART()
@@ -1562,9 +1634,9 @@ def test_assistant_return_line_does_not_filter_y_before_160() -> None:
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_RETURN_FOLLOW,
-            module.TARGET_NONE,
-            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+            module.State.RETURN_FOLLOW,
+            module.Target.NONE,
+            module.Task.RETURN_GARAGE_LINE,
         )
     )
     uart = FakeUART()
@@ -1678,9 +1750,9 @@ def test_assistant_return_line_missing_yellow_keeps_following_without_finished_e
     state.handle_control_line(
         assistant_sync_frame(
             30,
-            module.STATE_RETURN_FOLLOW,
-            module.TARGET_NONE,
-            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+            module.State.RETURN_FOLLOW,
+            module.Target.NONE,
+            module.Task.RETURN_GARAGE_LINE,
         )
     )
     uart = FakeUART()
@@ -1711,7 +1783,7 @@ def test_assistant_return_line_missing_yellow_keeps_following_without_finished_e
         module.decode_frame(frame)
         for frame in uart.writes
         if module.decode_frame(frame) is not None
-        and module.decode_frame(frame)["topic"] == module.TOPIC_ASSISTANT_VISION_EVENT_REPORT
+        and module.decode_frame(frame)["topic"] == module.Topic.ASSISTANT_VISION_EVENT_REPORT
     ]
     assert event_frames == []
 
@@ -1725,9 +1797,9 @@ def test_assistant_return_line_below_target_y_does_not_report_finished_event() -
     state.handle_control_line(
         assistant_sync_frame(
             30,
-            module.STATE_RETURN_FOLLOW,
-            module.TARGET_NONE,
-            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+            module.State.RETURN_FOLLOW,
+            module.Target.NONE,
+            module.Task.RETURN_GARAGE_LINE,
         )
     )
     uart = FakeUART()
@@ -1764,7 +1836,7 @@ def test_assistant_return_line_below_target_y_does_not_report_finished_event() -
         module.decode_frame(frame)
         for frame in uart.writes
         if module.decode_frame(frame) is not None
-        and module.decode_frame(frame)["topic"] == module.TOPIC_ASSISTANT_VISION_EVENT_REPORT
+        and module.decode_frame(frame)["topic"] == module.Topic.ASSISTANT_VISION_EVENT_REPORT
     ]
     assert event_frames == []
 
@@ -1777,9 +1849,9 @@ def test_assistant_return_line_runtime_does_not_use_blob_detection() -> None:
     state.handle_control_line(
         assistant_sync_frame(
             12,
-            module.STATE_RETURN_FOLLOW,
-            module.TARGET_NONE,
-            module.ASSISTANT_RETURN_GARAGE_LINE_CONFIG_ID,
+            module.State.RETURN_FOLLOW,
+            module.Target.NONE,
+            module.Task.RETURN_GARAGE_LINE,
         )
     )
     uart = FakeUART()
@@ -1855,12 +1927,12 @@ def test_assistant_process_uart_input_skips_crc_invalid_false_sync_frame() -> No
     state = module.AssistantVisionState()
     uart = FakeUART(
         b"\x02"
-        + assistant_sync_frame(12, module.STATE_APPROACH_OBJECT, module.TARGET_OBJECT, 1)
+        + assistant_sync_frame(12, module.State.APPROACH_OBJECT, module.Target.OBJECT, 1)
     )
 
     assert module.process_uart_input(uart, b"", state) == b""
     assert uart.writes == [module.format_ack_frame(12)]
-    assert state.mode == module.MODE_APPROACH_OBJECT
+    assert state.mode == module.RunMode.APPROACH_OBJECT
 
 
 def test_assistant_process_uart_input_ignores_bad_decode() -> None:
@@ -1870,4 +1942,4 @@ def test_assistant_process_uart_input_ignores_bad_decode() -> None:
     state = module.AssistantVisionState()
 
     assert module.process_uart_input(BadReadUART(), b"partial", state) == b"partial\xff"
-    assert state.mode == module.MODE_FOLLOW
+    assert state.mode == module.RunMode.FOLLOW

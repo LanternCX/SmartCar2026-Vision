@@ -27,3 +27,4 @@ env/
 .idea/
 *.log
 .DS_Store
+yolo/*.tflite
