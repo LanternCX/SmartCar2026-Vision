@@ -152,11 +152,57 @@ def test_master_main_v2_run_skips_yolo_after_entering_transport_finish() -> None
         )
     )
 
-    assert module.should_run_yolo_for_current_frame() is True
-
-    module.state.entry_yolo_pending = False
-
     assert module.should_run_yolo_for_current_frame() is False
+
+
+def test_master_main_v2_transport_finish_runtime_does_not_call_yolo_detect() -> None:
+    module = load_master_v2()
+    module.MASTER_DEBUG_DISPLAY_ENABLED = True
+
+    class StopLoop(Exception):
+        pass
+
+    image = FakeImage(yellow_area_by_roi={})
+
+    class Sensor:
+        def snapshot(self):
+            return image
+
+    uart = FakeUART()
+    module.sensor = Sensor()
+    module.init_uart = lambda: uart
+    module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
+
+    def prime_finish_task(rx_buffer):
+        module.state.current_task = {
+            "context_id": 25,
+            "state": int(module.State.TRANSPORT_OBJECT),
+            "target": int(module.Target.EDGE_LINE),
+            "arg": int(module.Task.TRANSPORT_FINISH),
+        }
+        return rx_buffer
+
+    def _forbidden_detect(net, img):
+        raise AssertionError("TRANSPORT_OBJECT 不应调用 YOLO")
+
+    module.tf.detect = _forbidden_detect
+    module.process_uart_input = prime_finish_task
+
+    def stop_after_velocity(frame_bytes):
+        uart.write(frame_bytes)
+        raise StopLoop()
+
+    module.write_data_line = stop_after_velocity
+
+    with pytest.raises(StopLoop):
+        module.run()
+
+    assert latest_velocity(uart) == {
+        "vx": 0.0,
+        "vy": 0.0,
+        "omega": 0.0,
+        "has_omega": False,
+    }
 
 
 def test_master_main_v2_run_repeats_yolo_after_entering_transport_align() -> None:
@@ -1273,6 +1319,52 @@ def test_master_main_v2_finish_observation_enters_contact_seen_and_pending_event
     module.accept_observation((21, 0.0, 0.0, 1.0), img, event_value=0.0)
 
     assert module.state.pending_event is not None
+
+
+def test_master_main_v2_finish_reports_arrived_after_contact_release_without_object_candidate() -> None:
+    module = load_master_v2()
+    module.state.yolo_net = "fake-net"
+    module.FINISH_HOOK_STABLE_FRAMES = 2
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=24,
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
+        )
+    )
+    uart = FakeUART()
+    module.state.uart_device = uart
+    fixed_roi = module.build_finish_task_fixed_object_roi(FakeImage())
+    touch_areas = {tuple(fixed_roi): max(1, int(fixed_roi[2]) * int(fixed_roi[3]))}
+    target_x, target_y = module.build_search_target_point(module.Task.TRANSPORT_FINISH)
+    module.tf.detect = lambda net, img: [
+        pixel_detection(
+            target_x - 10.0,
+            IMAGE_HEIGHT - target_y,
+            target_x + 10.0,
+            IMAGE_HEIGHT - target_y + 20.0,
+        )
+    ]
+
+    run_frame(module, FakeImage(yellow_area_by_roi=touch_areas))
+    module.tf.detect = lambda net, img: []
+    run_frame(module, FakeImage(yellow_area_by_roi={}))
+    run_frame(module, FakeImage(yellow_area_by_roi={}))
+    assert latest_velocity(uart) == {
+        "vx": 0.0,
+        "vy": 0.0,
+        "omega": 0.0,
+        "has_omega": False,
+    }
+    run_frame(module, FakeImage(yellow_area_by_roi={}))
+
+    assert latest_event(uart) == {
+        "context_id": 24,
+        "event": module.Event.ARRIVED,
+        "value": 0,
+    }
 
 
 def test_master_main_v2_finish_debug_touch_uses_same_ratio_as_finish_acceptance() -> None:

@@ -1134,6 +1134,12 @@ def should_run_yolo_for_current_frame():
     if is_return_line_task_context():
         return False
     current_task = state.current_task
+    if (
+        current_task is not None
+        and int(current_task["state"]) == int(State.TRANSPORT_OBJECT)
+        and int(current_task["target"]) == int(Target.EDGE_LINE)
+    ):
+        return False
     if current_task is not None and is_entry_yolo_only_task_context():
         return bool(state.entry_yolo_pending)
     if state.current_task is None and not MASTER_DEBUG_DISPLAY_ENABLED:
@@ -2731,6 +2737,23 @@ def _process_return_line_frame(img):
         img.flush()
 
 
+def _process_finish_task_frame(img):
+    current_task = state.current_task
+    if current_task is None:
+        return
+    yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
+    write_data_line(format_search_velocity_frame(0.0, 0.0))
+    _accept_finish_task_observation(
+        int(current_task["context_id"]),
+        1.0,
+        yellow_ratio,
+        current_event_type(),
+    )
+    if MASTER_DEBUG_DISPLAY_ENABLED:
+        draw_finish_task_debug(img, None, yellow_ratio)
+        img.flush()
+
+
 def process_task_frame(img):
     if state.current_task is None and MASTER_DEBUG_DISPLAY_ENABLED:
         _process_debug_finish_preview_frame(img)
@@ -2746,6 +2769,12 @@ def process_task_frame(img):
             yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
             draw_finish_task_debug(img, None, yellow_ratio)
             img.flush()
+        return
+    if (
+        int(state.current_task["state"]) == int(State.TRANSPORT_OBJECT)
+        and int(state.current_task["target"]) == int(Target.EDGE_LINE)
+    ):
+        _process_finish_task_frame(img)
         return
     if is_return_line_task_context():
         _process_return_line_frame(img)
