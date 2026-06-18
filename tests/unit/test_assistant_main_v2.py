@@ -970,6 +970,7 @@ def test_assistant_main_v2_build_object_observation_and_candidates_uses_current_
 
 def test_assistant_main_v2_runs_yolo_after_entering_transport_align() -> None:
     module = load_assistant_v2()
+    module.ASSISTANT_YOLO_ONLY_INTERVAL_FRAMES = 3
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -980,6 +981,41 @@ def test_assistant_main_v2_runs_yolo_after_entering_transport_align() -> None:
     )
 
     assert module.should_run_yolo_for_current_frame() is True
+
+    module.record_yolo_frame_run()
+
+    assert module.should_run_yolo_for_current_frame() is False
+    assert module.should_run_yolo_for_current_frame() is False
+    assert module.should_run_yolo_for_current_frame() is True
+
+
+def test_assistant_main_v2_transport_align_ignores_blob_tracking_candidates() -> None:
+    module = load_assistant_v2()
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+    _seed_assistant_short_track(module)
+
+    class BlobForbiddenImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(self, *args, **kwargs):
+            _ = (args, kwargs)
+            raise AssertionError("辅车搬运前对正阶段不应调用色块识别")
+
+    candidates = module.build_object_candidates(BlobForbiddenImage(), ())
+
+    assert candidates == ()
+    assert module.state.current_detection_source == "yolo"
 
 
 def test_assistant_main_v2_approach_object_without_master_threshold_requests_yolo() -> None:
@@ -1008,11 +1044,22 @@ def test_assistant_main_v2_runs_yolo_once_after_entering_transport_object() -> N
         )
     )
 
-    assert module.should_run_yolo_for_current_frame() is True
-
-    module.state.entry_yolo_pending = False
-
     assert module.should_run_yolo_for_current_frame() is False
+
+    class BlobForbiddenImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(self, *args, **kwargs):
+            _ = (args, kwargs)
+            raise AssertionError("辅车正式搬运阶段不应调用 YOLO")
+
+    candidates = module.build_object_candidates(BlobForbiddenImage(), ())
+
+    assert candidates == ()
 
 
 def test_assistant_main_v2_runs_yolo_once_after_entering_orbit() -> None:
@@ -1026,11 +1073,106 @@ def test_assistant_main_v2_runs_yolo_once_after_entering_orbit() -> None:
         )
     )
 
+    assert module.should_run_yolo_for_current_frame() is False
+
+    class BlobForbiddenImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(self, *args, **kwargs):
+            _ = (args, kwargs)
+            raise AssertionError("辅车绕行阶段不应调用 YOLO")
+
+    candidates = module.build_object_candidates(BlobForbiddenImage(), ())
+
+    assert candidates == ()
+
+
+def test_assistant_main_v2_orbit_transport_runs_yolo_without_blob_tracking() -> None:
+    module = load_assistant_v2()
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.ORBIT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+    _seed_assistant_short_track(module)
+
+    class BlobForbiddenImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(self, *args, **kwargs):
+            _ = (args, kwargs)
+            raise AssertionError("辅车绕后再次对正阶段不应调用色块识别")
+
     assert module.should_run_yolo_for_current_frame() is True
 
-    module.state.entry_yolo_pending = False
+    candidates = module.build_object_candidates(BlobForbiddenImage(), ())
+
+    assert candidates == ()
+    assert module.state.current_detection_source == "yolo"
+
+
+def test_assistant_main_v2_transport_object_blob_only_preserves_previous_track() -> None:
+    module = load_assistant_v2()
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            11,
+            module.State.ORBIT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+    _seed_assistant_short_track(module)
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.TRANSPORT_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+
+    class Blob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def cy(self):
+            return 30.0
+
+        def area(self):
+            return 240.0
+
+    class BlobImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=0):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
+            return [Blob()]
 
     assert module.should_run_yolo_for_current_frame() is False
+    assert module.state.track_task_name == "red"
+
+    candidates = module.build_object_candidates(BlobImage(), ())
+
+    assert module.state.current_detection_source == "roi"
+    assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 240.0)
 
 
 def test_assistant_main_v2_run_skips_yolo_when_blob_tracking_is_active() -> None:

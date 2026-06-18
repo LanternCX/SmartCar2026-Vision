@@ -205,8 +205,9 @@ def test_master_main_v2_transport_finish_runtime_does_not_call_yolo_detect() -> 
     }
 
 
-def test_master_main_v2_run_repeats_yolo_after_entering_transport_align() -> None:
+def test_master_main_v2_yolo_only_mode_runs_yolo_every_configured_interval() -> None:
     module = load_master_v2()
+    module.MASTER_YOLO_ONLY_INTERVAL_FRAMES = 3
     module.handle_control_frame(
         task_sync_frame(
             module,
@@ -219,9 +220,42 @@ def test_master_main_v2_run_repeats_yolo_after_entering_transport_align() -> Non
 
     assert module.should_run_yolo_for_current_frame() is True
 
-    module.state.entry_yolo_pending = False
+    module.record_yolo_frame_run()
 
+    assert module.should_run_yolo_for_current_frame() is False
+    assert module.should_run_yolo_for_current_frame() is False
     assert module.should_run_yolo_for_current_frame() is True
+
+
+def test_master_main_v2_transport_align_ignores_blob_tracking_candidates() -> None:
+    module = load_master_v2()
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=12,
+            state=int(module.State.SEARCH_OBJECT),
+            target=int(module.Target.OBJECT),
+            arg=int(module.Task.TRANSPORT),
+        )
+    )
+    _seed_master_short_track(module)
+
+    class BlobForbiddenImage:
+        def width(self):
+            return IMAGE_WIDTH
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(self, *args, **kwargs):
+            _ = (args, kwargs)
+            raise AssertionError("主车搬运前对正阶段不应调用色块识别")
+
+    img = BlobForbiddenImage()
+    candidates = module.build_object_candidates(img, ())
+
+    assert candidates == ()
+    assert module.state.current_detection_source == "yolo"
 
 
 def test_master_main_v2_yolo_miss_waits_configured_retry_frames() -> None:
@@ -242,6 +276,8 @@ def test_master_main_v2_yolo_miss_waits_configured_retry_frames() -> None:
 
 def test_master_main_v2_run_skips_yolo_after_entering_orbit() -> None:
     module = load_master_v2()
+    module.handle_control_frame(task_sync_frame(module, context_id=11))
+    _seed_master_short_track(module)
     module.handle_control_frame(
         task_sync_frame(
             module,
@@ -252,11 +288,60 @@ def test_master_main_v2_run_skips_yolo_after_entering_orbit() -> None:
         )
     )
 
-    assert module.should_run_yolo_for_current_frame() is True
+    assert module.should_run_yolo_for_current_frame() is False
 
-    module.state.entry_yolo_pending = False
+
+def test_master_main_v2_orbit_blob_only_preserves_previous_track() -> None:
+    module = load_master_v2()
+    module.handle_control_frame(task_sync_frame(module, context_id=11))
+    _seed_master_short_track(module)
+
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=12,
+            state=int(module.State.ORBITING),
+            target=int(module.Target.OBJECT),
+            arg=int(module.Task.ORBIT),
+        )
+    )
+
+    class OrbitBlob:
+        def rect(self):
+            return (150, 30, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def area(self):
+            return 260.0
+
+    class OrbitBlobImage:
+        def width(self):
+            return IMAGE_WIDTH
+
+        def height(self):
+            return IMAGE_HEIGHT
+
+        def find_blobs(
+            self,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge,
+            roi=None,
+            margin=None,
+        ):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
+            return [OrbitBlob()]
 
     assert module.should_run_yolo_for_current_frame() is False
+    assert module.state.track_task_name == "red"
+
+    candidates = module.build_object_candidates(OrbitBlobImage(), ())
+
+    assert module.state.current_detection_source == "roi"
+    assert candidates[0][:4] == ("red", 160.0, 210.0, 260.0)
 
 
 def test_master_main_v2_object_task_config_keeps_only_filter_parameters() -> None:

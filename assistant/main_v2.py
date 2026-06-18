@@ -96,6 +96,8 @@ YOLO_MODEL_PATH = "/sd/yolo.tflite"
 YOLO_IMAGE_COPY_SCALE = 0.75
 # YOLO 检测最小置信度阈值
 YOLO_MIN_SCORE = 0.50
+# 纯 YOLO 阶段两次检测之间跳过的帧数间隔
+ASSISTANT_YOLO_ONLY_INTERVAL_FRAMES = 5
 # YOLO 输出标签顺序, 需与模型保持一致
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
 # 视觉控制的参考帧率, 用于按时间尺度理解速度响应
@@ -111,10 +113,14 @@ OBJECT_BLOB_AREA_THRESHOLD = 200
 FOLLOW_TASKS = (("marker", (50, 100, 41, 127, -60, 127)),)
 # 目标相关任务的筛选参数配置
 OBJECT_TASKS = (
-    ('red', ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),
+    ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 90, True),
+    ('tennis', ((71, 95, -54, -33, 64, 95),), 5, 20, 30, 50, True),
+    ('blue', ((32, 70, -22, 14, -61, -33),), 5, 20, 25, 60, True),
+    ('white', ((33, 78, -11, 4, -22, 3),), 5, 20, 50, 80, True),
+    ('brown', ((16, 48, 0, 20, 10, 31),), 3, 20, 50, 100, True),
 )
 # 回库黄线识别阈值
-RETURN_LINE_YELLOW_THRESHOLD = (58, 87, -32, -12, 64, 84)
+RETURN_LINE_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
 
 # 跟随阶段的横向死区, 单位为 px
 FOLLOW_X_DEADZONE_PX = 5.0
@@ -929,6 +935,22 @@ def build_object_candidates(img, yolo_candidates):
     state.current_image = img
     state.current_image_width = int(img.width())
     state.current_image_height = int(img.height())
+    if current_sync_is_blob_only(state.current_sync):
+        if state.track_task_name is None:
+            state.current_detection_source = "miss"
+            state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+            return ()
+        candidates = _build_dynamic_blob_object_candidates(img)
+        if state.track_task_name is not None:
+            candidates = [candidate for candidate in candidates if candidate[0] == state.track_task_name]
+        if candidates:
+            state.current_detection_source = "roi"
+            state.track_failure_reason = TrackFailureReason.NONE
+            best = min(candidates, key=_tracked_candidate_sort_key)
+            return (_filter_candidate_by_track(best),)
+        state.current_detection_source = "miss"
+        state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+        return ()
     if should_use_blob_tracking():
         candidates = _build_tracked_blob_object_candidates(img)
         if candidates:
@@ -942,6 +964,10 @@ def build_object_candidates(img, yolo_candidates):
             state.track_confidence = max(0, int(state.track_confidence) - 20)
             return _build_predicted_object_candidates()
         state.record_roi_fallback()
+    if current_sync_is_yolo_only(state.current_sync):
+        state.current_detection_source = "yolo"
+        state.track_failure_reason = TrackFailureReason.NONE
+        return tuple(yolo_candidates)
     if state.track_rect is None and state.track_dynamic_threshold is not None:
         candidates = _build_dynamic_blob_object_candidates(img)
         if candidates:
@@ -1792,6 +1818,8 @@ class RuntimeState:
         self.current_image_height = PROTOCOL_IMAGE_HEIGHT
         self.current_frame_interval_ms = reference_frame_interval_ms()
         self.current_detection_source = "miss"
+        self.yolo_only_skip_frames_remaining = 0
+        self.yolo_only_skip_active_for_frame = False
         self.clear_track()
 
     def clear_track(self):
@@ -1902,6 +1930,12 @@ class RuntimeState:
     def _handle_sync_packet(self, packet):
         reliable_seq = int(packet["reliable_seq"])
         if self._should_apply_sync(reliable_seq):
+            preserve_track = (
+                self.track_task_name is not None
+                and int(packet["state"]) == int(State.TRANSPORT_OBJECT)
+                and int(packet["target"]) == int(Target.OBJECT)
+                and unpack_task_arg_config(packet["arg"]) == int(Task.TRANSPORT)
+            )
             self.current_sync = {
                 "reliable_seq": reliable_seq,
                 "state": int(packet["state"]),
@@ -1913,7 +1947,9 @@ class RuntimeState:
             self.mode = self._mode_from_sync(self.current_sync)
             self._stable_count = 0
             self._last_return_line_y = None
-            self.clear_track()
+            clear_yolo_only_skip()
+            if not preserve_track:
+                self.clear_track()
             self.entry_yolo_pending = current_sync_is_entry_yolo_only(self.current_sync)
         return format_ack_frame(reliable_seq)
 
@@ -2379,6 +2415,8 @@ def should_use_blob_tracking():
         and not (state.current_sync is None and ASSISTANT_DEBUG_DISPLAY_ENABLED)
     ):
         return False
+    if current_sync_is_yolo_only(state.current_sync):
+        return False
     if state.track_task_name is None or state.track_rect is None:
         return False
     if state.track_dynamic_threshold is None:
@@ -2398,6 +2436,10 @@ def should_run_yolo_for_current_frame():
         and not (state.current_sync is None and ASSISTANT_DEBUG_DISPLAY_ENABLED)
     ):
         return False
+    if current_sync_is_yolo_only(state.current_sync):
+        return not should_skip_yolo_only_frame()
+    if current_sync_is_blob_only(state.current_sync):
+        return False
     if state.current_sync is not None and current_sync_is_entry_yolo_only(state.current_sync):
         return bool(state.entry_yolo_pending)
     if state.current_sync is not None and not current_sync_allows_yolo():
@@ -2411,6 +2453,10 @@ def current_sync_allows_yolo():
     current_sync = state.current_sync
     if current_sync is None:
         return True
+    if current_sync_is_yolo_only(current_sync):
+        return True
+    if current_sync_is_blob_only(current_sync):
+        return False
     if current_sync_is_entry_yolo_only(current_sync):
         return bool(state.entry_yolo_pending)
     return (
@@ -2419,6 +2465,33 @@ def current_sync_allows_yolo():
 
 
 def current_sync_is_entry_yolo_only(current_sync):
+    return False
+
+
+def clear_yolo_only_skip():
+    state.yolo_only_skip_frames_remaining = 0
+    state.yolo_only_skip_active_for_frame = False
+
+
+def should_skip_yolo_only_frame():
+    state.yolo_only_skip_active_for_frame = False
+    if state.yolo_only_skip_frames_remaining <= 0:
+        return False
+    state.yolo_only_skip_frames_remaining -= 1
+    state.yolo_only_skip_active_for_frame = True
+    return True
+
+
+def record_yolo_frame_run():
+    clear_yolo_only_skip()
+    current_sync = state.current_sync
+    if current_sync is None or not current_sync_is_yolo_only(current_sync):
+        return
+    interval_frames = max(1, int(ASSISTANT_YOLO_ONLY_INTERVAL_FRAMES))
+    state.yolo_only_skip_frames_remaining = interval_frames - 1
+
+
+def current_sync_is_yolo_only(current_sync):
     if current_sync is None:
         return False
     sync_state = int(current_sync["state"])
@@ -2426,14 +2499,34 @@ def current_sync_is_entry_yolo_only(current_sync):
     config_id = unpack_task_arg_config(current_sync["arg"])
     return (
         (
-            sync_state == int(State.TRANSPORT_OBJECT)
+            sync_state == int(State.APPROACH_OBJECT)
             and target == int(Target.OBJECT)
             and config_id == int(Task.TRANSPORT)
         )
         or (
             sync_state == int(State.ORBIT)
             and target == int(Target.OBJECT)
+            and config_id == int(Task.TRANSPORT)
+        )
+    )
+
+
+def current_sync_is_blob_only(current_sync):
+    if current_sync is None:
+        return False
+    sync_state = int(current_sync["state"])
+    target = int(current_sync["target"])
+    config_id = unpack_task_arg_config(current_sync["arg"])
+    return (
+        (
+            sync_state == int(State.ORBIT)
+            and target == int(Target.OBJECT)
             and config_id == int(Task.ORBIT)
+        )
+        or (
+            sync_state == int(State.TRANSPORT_OBJECT)
+            and target == int(Target.OBJECT)
+            and config_id == int(Task.TRANSPORT)
         )
     )
 
@@ -2887,18 +2980,22 @@ def run():
         ):
             need_yolo = should_run_yolo_for_current_frame()
             if not need_yolo:
-                state.current_yolo_candidates = ()
-                state.current_object_candidates = tuple(build_object_candidates(img, ()))
-                if state.current_sync is not None:
-                    if current_sync_allows_yolo() and state.current_detection_source == "yolo":
-                        need_yolo = True
-                    elif state.current_detection_source == "yolo":
-                        state.current_detection_source = "miss"
-                        need_yolo = False
-                    else:
-                        need_yolo = False
+                if state.yolo_only_skip_active_for_frame and current_sync_is_yolo_only(state.current_sync):
+                    state.current_detection_source = "yolo"
+                    state.current_object_candidates = tuple(state.current_yolo_candidates)
                 else:
-                    need_yolo = state.current_detection_source == "yolo"
+                    state.current_yolo_candidates = ()
+                    state.current_object_candidates = tuple(build_object_candidates(img, ()))
+                    if state.current_sync is not None:
+                        if current_sync_allows_yolo() and state.current_detection_source == "yolo":
+                            need_yolo = True
+                        elif state.current_detection_source == "yolo":
+                            state.current_detection_source = "miss"
+                            need_yolo = False
+                        else:
+                            need_yolo = False
+                    else:
+                        need_yolo = state.current_detection_source == "yolo"
             if need_yolo:
                 yolo_requires_control = state.current_sync is not None
                 if yolo_requires_control and not ensure_yolo_control_paused():
@@ -2909,6 +3006,7 @@ def run():
                     raw_yolo_candidates = tuple(yolo_detect(img))
                     if raw_yolo_candidates:
                         state.current_detection_source = "yolo"
+                        record_yolo_frame_run()
                     state.current_yolo_candidates = raw_yolo_candidates
                     state.current_object_candidates = tuple(build_object_candidates(img, raw_yolo_candidates))
                     if (
