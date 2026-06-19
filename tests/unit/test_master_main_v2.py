@@ -17,7 +17,6 @@ from tests.test_support import (
 
 IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
-YELLOW_PIXEL = (70, -20, 70)
 
 
 def load_master_v2():
@@ -85,10 +84,6 @@ def test_master_main_v2_process_task_and_velocity_helpers_drop_frame_size_parame
     assert tuple(
         inspect.signature(module.build_orbit_correction_velocity_from_observation).parameters
     ) == ("observation",)
-    assert tuple(inspect.signature(module.build_return_line_y_from_image).parameters) == (
-        "img",
-        "previous_line_y",
-    )
     assert tuple(inspect.signature(module.build_finish_task_ring_rois).parameters) == ("blob", "img")
     assert tuple(inspect.signature(module.build_finish_task_fixed_object_roi).parameters) == ("img",)
     assert tuple(inspect.signature(module.build_finish_task_yellow_ratio_percent).parameters) == ("img", "blob")
@@ -97,21 +92,8 @@ def test_master_main_v2_process_task_and_velocity_helpers_drop_frame_size_parame
         "target_x",
         "target_y",
     )
-    assert tuple(inspect.signature(module.draw_return_line_debug).parameters) == (
-        "img",
-        "line_y",
-        "velocity",
-    )
     assert tuple(inspect.signature(module.draw_search_preview_debug).parameters) == ("img", "candidates")
     assert tuple(inspect.signature(module.draw_tracking_state_debug).parameters) == ("img",)
-    assert tuple(inspect.signature(module._return_line_pixel_matches).parameters) == ("img", "x", "y")
-    assert tuple(inspect.signature(module._return_line_has_horizontal_connected_at).parameters) == (
-        "img",
-        "x",
-        "y",
-        "required_connected",
-    )
-    assert tuple(inspect.signature(module._return_line_y_on_column).parameters) == ("img", "x")
     assert tuple(inspect.signature(module._count_yellow_pixels_in_roi).parameters) == ("img", "roi")
     assert tuple(inspect.signature(module.build_task_event_value).parameters) == (
         "img",
@@ -579,25 +561,6 @@ def pixel_detection(left, top, right, bottom, label=1, score=0.95):
     )
 
 
-def set_protocol_yellow(pixels, x, y):
-    pixels[(IMAGE_WIDTH - 1 - int(x), IMAGE_HEIGHT - 1 - int(y))] = YELLOW_PIXEL
-
-
-def build_return_line_pixels(y, start_x=90, end_x=230):
-    pixels = {}
-    for x in range(start_x, end_x + 1):
-        set_protocol_yellow(pixels, x, y)
-    return pixels
-
-
-def build_return_line_band_pixels(top, bottom, left=130, right=190):
-    pixels = {}
-    for y in range(int(top), int(bottom) + 1):
-        for x in range(int(left), int(right) + 1):
-            set_protocol_yellow(pixels, x, y)
-    return pixels
-
-
 def latest_velocity(uart):
     frame = decode_frame(uart.writes[-1])
     assert frame is not None
@@ -804,6 +767,45 @@ def test_master_main_v2_process_uart_input_ignores_bad_decode() -> None:
 
     assert rx_buffer == b"partial\xff"
     assert module.state.current_task is None
+
+
+def test_master_main_v2_process_uart_input_accepts_local_vision_control_tcp_frame() -> None:
+    module = load_master_v2()
+    frame = encode_frame(
+        MODE_TCP,
+        module.Topic.LOCAL_VISION_CONTROL,
+        23,
+        module.encode_local_vision_control_body(module.LocalVisionControl.RETURN_LINE_GATE_ON),
+    )
+    class ControlUart:
+        def __init__(self, incoming):
+            self._incoming = bytearray(incoming)
+            self.writes = []
+
+        def any(self):
+            return len(self._incoming)
+
+        def read(self, size):
+            data = bytes(self._incoming[:size])
+            del self._incoming[:size]
+            return data
+
+        def write(self, data):
+            self.writes.append(data)
+            return len(data)
+
+    uart = ControlUart(frame)
+    module.state.uart_device = uart
+
+    rx_buffer = module.process_uart_input(b"")
+
+    assert rx_buffer == b""
+    ack = decode_frame(uart.writes[-1])
+    assert ack is not None
+    assert ack["mode"] == MODE_ACK
+    assert ack["topic"] == module.Topic.LOCAL_VISION_CONTROL
+    assert ack["seq"] == 23
+    assert module.state.return_line_gate_enabled is True
 
 
 def test_master_main_v2_repeated_task_sync_replies_ack_without_reapplying() -> None:
@@ -1602,78 +1604,65 @@ def test_master_main_v2_return_retreat_reports_line_aligned() -> None:
     )
     uart = FakeUART()
     module.state.uart_device = uart
-    img = FakeImage(pixels=build_return_line_pixels(160))
+    img = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
 
     run_frame(module, img)
+
+    assert uart.writes == []
+
+    module.handle_control_frame(
+        encode_frame(
+            MODE_TCP,
+            module.Topic.LOCAL_VISION_CONTROL,
+            21,
+            module.encode_local_vision_control_body(module.LocalVisionControl.RETURN_LINE_GATE_ON),
+        )
+    )
+
     run_frame(module, img)
+    assert uart.writes == []
     run_frame(module, img)
 
     assert latest_event(uart) == {
         "context_id": 13,
         "event": module.Event.RETURN_LINE_ALIGNED,
-        "value": 160,
+        "value": 100,
     }
 
 
-def test_master_main_v2_return_line_y_uses_center_columns_bounds_average() -> None:
+def test_master_main_v2_return_line_current_event_type_only_reports_aligned() -> None:
     module = load_master_v2()
-    img = FakeImage(pixels=build_return_line_band_pixels(180, 200))
-    module.state.current_image = img
-    module.state.current_image_width = IMAGE_WIDTH
-    module.state.current_image_height = IMAGE_HEIGHT
-
-    line_y = module.build_return_line_y_from_image(img)
-
-    assert line_y == pytest.approx(190.0)
-
-
-def test_master_main_v2_return_line_velocity_uses_y_target_only() -> None:
-    module = load_master_v2()
-    module.RETURN_GARAGE_LINE_TARGET_Y_PX = 90.0
-    module.RETURN_GARAGE_LINE_DEADZONE_Y_PX = 2.0
-    module.RETURN_GARAGE_LINE_KP_Y = -0.5
-    module.RETURN_GARAGE_LINE_MAX_VY = 10.0
-    module.RETURN_GARAGE_LINE_MIN_SPEED = 0.0
-
-    assert module.build_return_line_velocity_from_y(None) == (0.0, 0.0)
-    assert module.build_return_line_velocity_from_y(80.0) == pytest.approx((0.0, 5.0))
-    assert module.build_return_line_velocity_from_y(90.0) == pytest.approx((0.0, 0.0))
-    assert module.build_return_line_velocity_from_y(100.0) == pytest.approx((0.0, -5.0))
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=13,
+            state=int(module.State.RETURN_GARAGE_RETREAT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.RETURN_GARAGE_LINE),
+        )
+    )
+    assert module.current_event_type() == module.Event.RETURN_LINE_ALIGNED
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=14,
+            state=int(module.State.RETURN_GARAGE_LINE),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.RETURN_GARAGE_LINE),
+        )
+    )
+    assert module.current_event_type() is None
 
 
-def test_master_main_v2_return_line_limits_wide_yellow_to_lower_30px() -> None:
-    module = load_master_v2()
-    module.RETURN_GARAGE_LINE_MAX_THICKNESS_PX = 30
-    img = FakeImage(pixels=build_return_line_band_pixels(80, 200))
-    module.state.current_image = img
-    module.state.current_image_width = IMAGE_WIDTH
-    module.state.current_image_height = IMAGE_HEIGHT
-
-    line_y = module.build_return_line_y_from_image(img)
-
-    assert line_y == pytest.approx(185.0)
-
-
-def test_master_main_v2_return_line_keeps_previous_when_horizontal_connected_is_too_short() -> None:
-    module = load_master_v2()
-    module.RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
-    img = FakeImage(pixels=build_return_line_band_pixels(180, 200, left=150, right=170))
-    module.state.current_image = img
-    module.state.current_image_width = IMAGE_WIDTH
-    module.state.current_image_height = IMAGE_HEIGHT
-
-    line_y = module.build_return_line_y_from_image(img, 188.0)
-
-    assert line_y == pytest.approx(188.0)
-
-
-def test_master_main_v2_return_line_runtime_does_not_use_blob_detection() -> None:
+def test_master_main_v2_return_line_runtime_uses_touch_roi_detection() -> None:
     module = load_master_v2()
     module.handle_control_frame(
         task_sync_frame(
             module,
             context_id=7,
-            state=int(module.State.RETURN_GARAGE_LINE),
+            state=int(module.State.RETURN_GARAGE_RETREAT),
             target=int(module.Target.EDGE_LINE),
             arg=int(module.Task.RETURN_GARAGE_LINE),
         )
@@ -1681,40 +1670,73 @@ def test_master_main_v2_return_line_runtime_does_not_use_blob_detection() -> Non
     uart = FakeUART()
     module.state.uart_device = uart
 
-    class RawPixelForbiddenImage(FakeImage):
-        def find_blobs(self, *args, **kwargs):
-            raise AssertionError("回库黄线算法不应调用 find_blobs")
+    class TouchDetectImage(FakeImage):
+        pass
 
-    run_frame(module, RawPixelForbiddenImage())
+    img = TouchDetectImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
+    run_frame(module, img)
 
-    assert len(uart.writes) == 1
+    assert uart.writes == []
 
-
-def test_master_main_v2_return_line_reports_finished_after_x270_missing_for_five_frames() -> None:
+def test_master_main_v2_return_line_does_not_report_finished_event() -> None:
     module = load_master_v2()
     module.state.yolo_net = "fake-net"
-    module.RETURN_LINE_MISSING_FINISH_FRAMES = 5
     module.handle_control_frame(
         task_sync_frame(
             module,
             context_id=15,
-            state=int(module.State.RETURN_GARAGE_LINE),
+            state=int(module.State.RETURN_GARAGE_RETREAT),
             target=int(module.Target.EDGE_LINE),
             arg=int(module.Task.RETURN_GARAGE_LINE),
         )
     )
     uart = FakeUART()
     module.state.uart_device = uart
-    img = FakeImage(pixels=build_return_line_pixels(160))
+    img = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
 
-    for _ in range(7):
-        run_frame(module, img)
+    module.handle_control_frame(
+        encode_frame(
+            MODE_TCP,
+            module.Topic.LOCAL_VISION_CONTROL,
+            21,
+            module.encode_local_vision_control_body(module.LocalVisionControl.RETURN_LINE_GATE_ON),
+        )
+    )
+    run_frame(module, img)
+    run_frame(module, img)
 
     assert latest_event(uart) == {
         "context_id": 15,
-        "event": module.Event.RETURN_GARAGE_FINISHED,
-        "value": 0,
+        "event": module.Event.RETURN_LINE_ALIGNED,
+        "value": 100,
     }
+
+
+def test_master_main_v2_return_line_gate_off_blocks_event() -> None:
+    module = load_master_v2()
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=16,
+            state=int(module.State.RETURN_GARAGE_RETREAT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.RETURN_GARAGE_LINE),
+        )
+    )
+    uart = FakeUART()
+    module.state.uart_device = uart
+    img = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
+
+    run_frame(module, img)
+    run_frame(module, img)
+
+    assert uart.writes == []
 
 
 def test_master_main_v2_pending_event_blocks_non_return_velocity_until_ack() -> None:
