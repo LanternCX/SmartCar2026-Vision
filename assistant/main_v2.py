@@ -36,6 +36,8 @@ class Topic:
 class LocalVisionControl:
     PAUSE = 1
     RESUME = 2
+    RETURN_LINE_GATE_ON = 3
+    RETURN_LINE_GATE_OFF = 4
 
 
 class RunMode:
@@ -67,7 +69,7 @@ class Task:
 class Event:
     TARGET_FOUND = 6
     ALIGNED = 7
-    RETURN_GARAGE_FINISHED = 12
+    RETURN_LINE_ALIGNED = 10
 
 
 # ROI 跟踪失败原因编号分组.
@@ -121,6 +123,14 @@ OBJECT_TASKS = (
 )
 # 回库黄线识别阈值
 RETURN_LINE_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
+# 回库 touch 固定物体区域左边界比例
+RETURN_LINE_TOUCH_ROI_LEFT_RATIO = 0.25
+# 回库 touch 固定物体区域右边界比例
+RETURN_LINE_TOUCH_ROI_RIGHT_RATIO = 0.75
+# 回库 touch 固定物体区域顶部比例
+RETURN_LINE_TOUCH_ROI_TOP_RATIO = 2.0 / 3.0
+# 回库 touch 黄色接触占比阈值
+RETURN_LINE_TOUCH_RATIO_THRESHOLD = 0.1
 
 # 跟随阶段的横向死区, 单位为 px
 FOLLOW_X_DEADZONE_PX = 5.0
@@ -196,24 +206,6 @@ DYNAMIC_THRESHOLD_REFRESH_FAILURE_FRAMES = 2
 # 新阈值连续通过确认达到该值后才正式替换
 DYNAMIC_THRESHOLD_REFRESH_CONFIRM_FRAMES = 2
 
-# 回库阶段采样窗口半宽, 单位为 px
-RETURN_LINE_SAMPLE_HALF_WIDTH_PX = 5
-# 回库阶段期望的图像纵向位置, 单位为 px
-RETURN_LINE_TARGET_Y_PX = 220.0
-# 回库阶段纵向死区, 单位为 px
-RETURN_LINE_DEADZONE_Y_PX = 4.0
-# 回库阶段纵向控制比例系数
-RETURN_LINE_KP_Y = -0.05
-# 回库阶段纵向速度上限
-RETURN_LINE_MAX_VY = 5.0
-# 回库阶段最小输出速度
-RETURN_LINE_MIN_SPEED = 0.0
-# 可接受的最大黄线厚度, 单位为 px
-RETURN_LINE_MAX_THICKNESS_PX = 30
-# 判定为有效横向连通线段的最小长度, 单位为 px
-RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
-# 黄线连续缺失达到该帧数后判定回库结束
-RETURN_LINE_MISSING_FINISH_FRAMES = 5
 # 协议约定的图像宽度, 单位为 px
 PROTOCOL_IMAGE_WIDTH = 320
 # 协议约定的图像高度, 单位为 px
@@ -360,6 +352,10 @@ def encode_local_vision_control_body(action):
     return bytes((_require_u8(action),))
 
 
+def decode_local_vision_control_body(body):
+    return {"action": int(body[0])}
+
+
 def format_local_vision_control_frame(reliable_seq, action):
     return encode_frame(
         Mode.TCP,
@@ -421,6 +417,10 @@ def format_ack_frame(reliable_seq):
     return encode_frame(Mode.ACK, Topic.ASSISTANT_VISION_TASK_SYNC, reliable_seq, b"")
 
 
+def format_local_vision_control_ack_frame(reliable_seq):
+    return encode_frame(Mode.ACK, Topic.LOCAL_VISION_CONTROL, reliable_seq, b"")
+
+
 def format_event_frame(reliable_seq, event, value):
     return encode_frame(
         Mode.TCP,
@@ -465,6 +465,20 @@ def parse_local_vision_control_ack_packet(frame_bytes):
     if frame["mode"] != Mode.ACK or frame["topic"] != Topic.LOCAL_VISION_CONTROL:
         return None
     return {"reliable_seq": int(frame["seq"])}
+
+
+def parse_local_vision_control_packet(frame_bytes):
+    frame = decode_frame(frame_bytes)
+    if frame is None:
+        return None
+    if frame["mode"] != Mode.TCP or frame["topic"] != Topic.LOCAL_VISION_CONTROL:
+        return None
+    body = frame["body"]
+    if len(body) < 1:
+        return None
+    packet = decode_local_vision_control_body(body)
+    packet["reliable_seq"] = int(frame["seq"])
+    return packet
 
 
 def is_newer_seq(seq, last_seq):
@@ -1339,102 +1353,50 @@ def _sample_roi_positions(start, end, sample_count):
     span = max(1, end - start)
     for index in range(count):
         yield start + (span * (index * 2 + 1)) // (count * 2)
-def _return_line_pixel_matches(img, x, y):
-    image_width = state.current_image_width
-    image_height = state.current_image_height
-    max_x = int(image_width) - 1
-    max_y = int(image_height) - 1
-    return _pixel_matches_threshold(
-        img.get_pixel(max_x - int(x), max_y - int(y)),
-        RETURN_LINE_YELLOW_THRESHOLD,
+def _build_return_line_touch_roi(img):
+    image_width = int(img.width())
+    image_height = int(img.height())
+    display_left = int(float(image_width) * float(RETURN_LINE_TOUCH_ROI_LEFT_RATIO))
+    display_right = int(float(image_width) * float(RETURN_LINE_TOUCH_ROI_RIGHT_RATIO))
+    display_top = int(float(image_height) * float(RETURN_LINE_TOUCH_ROI_TOP_RATIO))
+    display_left = max(0, min(int(image_width), int(display_left)))
+    display_right = max(int(display_left), min(int(image_width), int(display_right)))
+    display_top = max(0, min(int(image_height), int(display_top)))
+    left = int(image_width) - int(display_right)
+    right = int(image_width) - int(display_left)
+    top = 0
+    bottom = int(image_height) - int(display_top)
+    return (int(left), int(top), int(right) - int(left), int(bottom) - int(top))
+
+
+def _count_yellow_pixels_in_roi(img, roi):
+    roi_area = int(roi[2]) * int(roi[3])
+    if roi_area <= 0:
+        return 0
+    blobs = img.find_blobs(
+        [RETURN_LINE_YELLOW_THRESHOLD],
+        roi=roi,
+        pixels_threshold=1,
+        area_threshold=1,
+        merge=True,
     )
+    if not blobs:
+        return 0
+    yellow_pixels = 0.0
+    for blob in blobs:
+        yellow_pixels += blob_area(blob)
+    if yellow_pixels >= float(roi_area):
+        return roi_area
+    return int(yellow_pixels)
 
 
-def _return_line_has_horizontal_connected_at(img, x, y, required_connected):
-    image_width = state.current_image_width
-    if not _return_line_pixel_matches(img, x, y):
-        return False
-    connected = 0
-    left = int(x) - 1
-    while left >= 0 and _return_line_pixel_matches(img, left, y):
-        connected += 1
-        if connected >= int(required_connected):
-            return True
-        left -= 1
-    right = int(x) + 1
-    max_x = int(image_width) - 1
-    while right <= max_x and _return_line_pixel_matches(img, right, y):
-        connected += 1
-        if connected >= int(required_connected):
-            return True
-        right += 1
-    return False
-
-
-def _return_line_sample_columns(center_x, half_width):
-    yield int(center_x)
-    for offset in range(1, int(half_width) + 1):
-        yield int(center_x) - offset
-        yield int(center_x) + offset
-
-
-def _return_line_y_on_column(img, x):
-    image_width = state.current_image_width
-    image_height = state.current_image_height
-    top = None
-    bottom = None
-    for y in range(0, int(image_height)):
-        if not _return_line_pixel_matches(img, x, y):
-            continue
-        if top is None:
-            top = int(y)
-        bottom = int(y)
-    if top is None or bottom is None:
-        return None
-    max_thickness = int(RETURN_LINE_MAX_THICKNESS_PX)
-    if max_thickness > 0 and int(bottom) - int(top) > max_thickness:
-        top = int(bottom) - max_thickness
-    return (float(top) + float(bottom)) / 2.0
-
-
-def _build_return_line_y_from_pixels(img, previous_line_y=None):
-    image_width = state.current_image_width
-    image_height = state.current_image_height
-    get_pixel = getattr(img, "get_pixel", None)
-    if get_pixel is None:
-        return None
-    center_x = int(float(image_width) / 2.0)
-    half_width = int(RETURN_LINE_SAMPLE_HALF_WIDTH_PX)
-    saw_candidate = False
-    for x in _return_line_sample_columns(center_x, half_width):
-        if x < 0 or x >= int(image_width):
-            continue
-        line_y = _return_line_y_on_column(img, x)
-        if line_y is None:
-            continue
-        saw_candidate = True
-        if _return_line_has_horizontal_connected_at(img, x, int(round(line_y)), RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX):
-            return line_y
-    if saw_candidate:
-        return previous_line_y
-    return None
-
-
-def build_return_line_y_from_image(img, previous_line_y=None):
-    return _build_return_line_y_from_pixels(img, previous_line_y)
-
-
-def build_return_line_velocity_from_y(line_y):
-    if line_y is None:
-        return 0.0, 0.0
-    err_y = float(line_y) - float(RETURN_LINE_TARGET_Y_PX)
-    if abs(err_y) <= float(RETURN_LINE_DEADZONE_Y_PX):
-        return 0.0, 0.0
-    return 0.0, _apply_min_speed(
-        err_y * float(RETURN_LINE_KP_Y) * current_frame_time_scale(),
-        float(RETURN_LINE_MIN_SPEED) * current_frame_time_scale(),
-        float(RETURN_LINE_MAX_VY) * current_frame_time_scale(),
-    )
+def _build_return_line_touch_ratio_percent(img):
+    roi = _build_return_line_touch_roi(img)
+    roi_area = int(roi[2]) * int(roi[3])
+    if roi_area <= 0:
+        return 0.0
+    yellow_pixels = _count_yellow_pixels_in_roi(img, roi)
+    return float(yellow_pixels) * 100.0 / float(roi_area)
 
 
 def choose_best_candidate(candidates, target_x, target_y):
@@ -1805,8 +1767,8 @@ class RuntimeState:
         self.pending_local_vision_control_last_sent_ms = None
         self.next_local_vision_control_seq = 1
         self.local_vision_control_paused = False
+        self.return_line_gate_enabled = False
         self._completed_event_sync_seq = None
-        self._last_return_line_y = None
         self.entry_yolo_pending = False
         self.yolo_net = None
         self.uart_device = None
@@ -1922,6 +1884,14 @@ class RuntimeState:
         sync_packet = parse_task_sync_packet(line)
         if sync_packet is not None:
             return self._handle_sync_packet(sync_packet)
+        control_packet = parse_local_vision_control_packet(line)
+        if control_packet is not None:
+            action = int(control_packet["action"])
+            if action == int(LocalVisionControl.RETURN_LINE_GATE_ON):
+                self.return_line_gate_enabled = True
+            elif action == int(LocalVisionControl.RETURN_LINE_GATE_OFF):
+                self.return_line_gate_enabled = False
+            return format_local_vision_control_ack_frame(control_packet["reliable_seq"])
         ack_packet = parse_event_ack_packet(line)
         if ack_packet is not None:
             self._handle_ack_packet(ack_packet)
@@ -1947,7 +1917,7 @@ class RuntimeState:
             self._last_sync_seq = reliable_seq
             self.mode = self._mode_from_sync(self.current_sync)
             self._stable_count = 0
-            self._last_return_line_y = None
+            self.return_line_gate_enabled = False
             clear_yolo_only_skip()
             if not preserve_track:
                 self.clear_track()
@@ -2005,13 +1975,6 @@ class RuntimeState:
             return 0
         return unpack_task_arg_object_id(self.current_sync["arg"])
 
-    def last_return_line_y(self):
-        return self._last_return_line_y
-
-    def remember_return_line_y(self, line_y):
-        if line_y is not None:
-            self._last_return_line_y = float(line_y)
-
     def _handle_ack_packet(self, packet):
         if self._pending_event is None:
             return
@@ -2044,8 +2007,26 @@ class RuntimeState:
         if self._stable_count >= self.required_stable_frames:
             self._create_event(current_sync_seq, event_id, value)
 
-    def accept_return_line_observation(self, line_y):
-        _ = line_y
+    def accept_return_line_observation(self, img):
+        if self.current_sync is None:
+            self._stable_count = 0
+            return
+        current_sync_seq = int(self.current_sync["reliable_seq"])
+        if self._pending_event is not None:
+            return
+        if self._completed_event_sync_seq == current_sync_seq:
+            return
+        if self._current_event_id() != Event.RETURN_LINE_ALIGNED:
+            self._stable_count = 0
+            return
+        if not bool(self.return_line_gate_enabled):
+            self._stable_count = 0
+            return
+        yellow_ratio = _build_return_line_touch_ratio_percent(img)
+        if float(yellow_ratio) <= float(RETURN_LINE_TOUCH_RATIO_THRESHOLD) * 100.0:
+            self._stable_count = 0
+            return
+        self._create_event(current_sync_seq, Event.RETURN_LINE_ALIGNED, int(yellow_ratio))
         self._stable_count = 0
 
     def _observation_matches_target(self, x, y, value):
@@ -2068,7 +2049,7 @@ class RuntimeState:
         if sync_state == State.ORBIT and target == Target.OBJECT and config_id == Task.TRANSPORT:
             return Event.ALIGNED
         if sync_state == State.RETURN_FOLLOW and target == Target.NONE and config_id == Task.RETURN_GARAGE_LINE:
-            return Event.RETURN_GARAGE_FINISHED
+            return Event.RETURN_LINE_ALIGNED
         return None
 
     def _create_event(self, reliable_seq, event, value):
@@ -2115,8 +2096,6 @@ def required_stable_frames():
 
 def resolve_event_value(observation_value, event_value=None):
     _ = event_value
-    if current_event_type() == Event.RETURN_GARAGE_FINISHED:
-        return 0
     return int(float(observation_value))
 
 
@@ -2194,7 +2173,7 @@ def accept_observation(observation=None, line_y=None):
         state._stable_count = 0
         return
     if state.mode == RunMode.RETURN_LINE:
-        state.accept_return_line_observation(line_y)
+        state.accept_return_line_observation(state.current_image)
         return
     if observation is None:
         observation = build_object_observation(0, 0, 0, 0)
@@ -2717,6 +2696,8 @@ def _find_control_frame_start(rx_buffer):
         topic = frame["topic"]
         if mode == Mode.TCP and topic == Topic.ASSISTANT_VISION_TASK_SYNC:
             return index
+        if mode == Mode.TCP and topic == Topic.LOCAL_VISION_CONTROL:
+            return index
         if mode == Mode.ACK and topic == Topic.ASSISTANT_VISION_EVENT_REPORT:
             return index
         if mode == Mode.ACK and topic == Topic.LOCAL_VISION_CONTROL:
@@ -2836,68 +2817,7 @@ def _process_object_frame(img):
 
 
 def _process_return_line_frame(img):
-    image_width = state.current_image_width
-    image_height = state.current_image_height
-    line_y = build_return_line_y_from_image(img, state.last_return_line_y())
-    state.remember_return_line_y(line_y)
-    vx, vy = build_return_line_velocity_from_y(line_y)
-    frame_bytes = format_search_velocity_frame(vx, vy)
-    write_data_line(frame_bytes)
-    accept_observation(line_y=line_y)
-
-
-def draw_assistant_return_line_debug(img, line_y, vx, vy):
-    image_width = state.current_image_width
-    image_height = state.current_image_height
-    center_x = int(float(image_width) / 2.0)
-    half_width = int(RETURN_LINE_SAMPLE_HALF_WIDTH_PX)
-    max_thickness = int(RETURN_LINE_MAX_THICKNESS_PX)
-    target_y = int(RETURN_LINE_TARGET_Y_PX)
-    bottom_y = int(image_height) - 1
-
-    def flip_x(x):
-        return int(image_width) - 1 - int(x)
-
-    def flip_y(y):
-        return int(image_height) - 1 - int(y)
-
-    def draw_line(x0, y0, x1, y1):
-        _draw_debug_line(img, flip_x(x0), flip_y(y0), flip_x(x1), flip_y(y1))
-
-    draw_line(center_x - half_width, 0, center_x - half_width, bottom_y)
-    draw_line(center_x + half_width, 0, center_x + half_width, bottom_y)
-    draw_line(0, target_y, int(image_width) - 1, target_y)
-    if line_y is not None:
-        draw_line(0, int(line_y), int(image_width) - 1, int(line_y))
-        _draw_debug_cross(img, flip_x(center_x), flip_y(int(line_y)))
-        line_text = "line_y=%.1f" % float(line_y)
-    else:
-        line_text = "line_y=none"
-    _draw_debug_text(img, 2, 2, "assistant return line debug")
-    _draw_debug_text(
-        img,
-        2,
-        14,
-        "max h=%d x=%d..%d" % (max_thickness, center_x - half_width, center_x + half_width),
-    )
-    _draw_debug_text(img, 2, 26, "%s found=%d" % (line_text, 1 if line_y is not None else 0))
-    _draw_debug_text(img, 2, 38, "vx=%.1f vy=%.1f" % (float(vx), float(vy)))
-
-
-def run_assistant_return_line_debug():
-    image_width, image_height = init_sensor()
-    last_line_y = None
-    while True:
-        img = sensor.snapshot()
-        img.lens_corr(strength=2.8, zoom=1.0)
-        state.current_image = img
-        state.current_image_width = int(img.width())
-        state.current_image_height = int(img.height())
-        line_y = build_return_line_y_from_image(last_line_y)
-        if line_y is not None:
-            last_line_y = line_y
-        vx, vy = build_return_line_velocity_from_y(line_y)
-        draw_assistant_return_line_debug(img, line_y, vx, vy)
+    accept_observation()
 
 
 def process_task_frame(img):

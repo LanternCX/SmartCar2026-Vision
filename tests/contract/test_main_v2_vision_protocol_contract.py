@@ -98,19 +98,20 @@ def test_master_main_v2_missing_target_velocity_frame_uses_configured_search_spe
     }
 
 
-def test_master_main_v2_return_garage_events_use_reliable_event_topic() -> None:
+def test_master_main_v2_return_line_aligned_event_uses_reliable_event_topic() -> None:
     module = load_master_v2()
-    finished_frame = decode_frame(
-        module.format_event_frame(32, 7, module.Event.RETURN_GARAGE_FINISHED, 0)
+    assert int(module.Event.RETURN_LINE_ALIGNED) == 10
+    aligned_frame = decode_frame(
+        module.format_event_frame(32, 7, module.Event.RETURN_LINE_ALIGNED, 160)
     )
 
-    assert finished_frame is not None
-    assert finished_frame["mode"] == MODE_TCP
-    assert finished_frame["topic"] == module.Topic.MASTER_VISION_EVENT_REPORT
-    assert decode_master_vision_event_report_body(finished_frame["body"]) == {
+    assert aligned_frame is not None
+    assert aligned_frame["mode"] == MODE_TCP
+    assert aligned_frame["topic"] == module.Topic.MASTER_VISION_EVENT_REPORT
+    assert decode_master_vision_event_report_body(aligned_frame["body"]) == {
         "context_id": 7,
-        "event": module.Event.RETURN_GARAGE_FINISHED,
-        "value": 0,
+        "event": module.Event.RETURN_LINE_ALIGNED,
+        "value": 160,
     }
 
 
@@ -145,6 +146,22 @@ def test_assistant_main_v2_formats_velocity_and_reliable_event_frames_with_maste
     assert decode_assistant_vision_event_report_body(event_frame["body"]) == {
         "event": module.Event.TARGET_FOUND,
         "value": 300,
+    }
+
+
+def test_assistant_main_v2_return_line_aligned_event_uses_reliable_event_topic() -> None:
+    module = load_assistant_v2()
+    assert int(module.Event.RETURN_LINE_ALIGNED) == 10
+    aligned_frame = decode_frame(
+        module.format_event_frame(30, module.Event.RETURN_LINE_ALIGNED, 160)
+    )
+
+    assert aligned_frame is not None
+    assert aligned_frame["mode"] == MODE_TCP
+    assert aligned_frame["topic"] == module.Topic.ASSISTANT_VISION_EVENT_REPORT
+    assert decode_assistant_vision_event_report_body(aligned_frame["body"]) == {
+        "event": module.Event.RETURN_LINE_ALIGNED,
+        "value": 160,
     }
 
 

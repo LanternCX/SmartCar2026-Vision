@@ -156,23 +156,7 @@ def test_assistant_main_v2_exposes_master_style_runtime_api() -> None:
     assert tuple(
         inspect.signature(module.build_orbit_correction_velocity_from_observation).parameters
     ) == ("observation",)
-    assert tuple(inspect.signature(module.build_return_line_y_from_image).parameters) == (
-        "img",
-        "previous_line_y",
-    )
     assert tuple(inspect.signature(module.build_object_candidates).parameters) == ("img", "yolo_candidates")
-    assert tuple(inspect.signature(module._return_line_pixel_matches).parameters) == ("img", "x", "y")
-    assert tuple(inspect.signature(module._return_line_has_horizontal_connected_at).parameters) == (
-        "img",
-        "x",
-        "y",
-        "required_connected",
-    )
-    assert tuple(inspect.signature(module._return_line_y_on_column).parameters) == ("img", "x")
-    assert tuple(inspect.signature(module._build_return_line_y_from_pixels).parameters) == (
-        "img",
-        "previous_line_y",
-    )
     assert tuple(
         inspect.signature(module.build_object_approach_velocity_from_error).parameters
     ) == ("err_x", "err_y")
@@ -194,12 +178,6 @@ def test_assistant_main_v2_exposes_master_style_runtime_api() -> None:
         "pixel_y",
     )
     assert tuple(inspect.signature(module.draw_object_tracking_debug).parameters) == ("img",)
-    assert tuple(inspect.signature(module.draw_assistant_return_line_debug).parameters) == (
-        "img",
-        "line_y",
-        "vx",
-        "vy",
-    )
     assert not hasattr(module, "format_vision_frame")
     assert not hasattr(module, "parse_sync_packet")
     assert not hasattr(module, "parse_ack_packet")
@@ -2760,6 +2738,28 @@ def test_assistant_main_v2_single_arg_process_uart_input_calls_master_style_hand
     assert call_log == [frame]
 
 
+def test_assistant_main_v2_process_uart_input_accepts_local_vision_control_tcp_frame() -> None:
+    module = load_assistant_v2()
+    frame = module.encode_frame(
+        module.Mode.TCP,
+        module.Topic.LOCAL_VISION_CONTROL,
+        23,
+        module.encode_local_vision_control_body(module.LocalVisionControl.RETURN_LINE_GATE_ON),
+    )
+    uart = legacy_tests.FakeUART(frame)
+    module.state.uart_device = uart
+
+    remainder = module.process_uart_input(b"")
+
+    assert remainder == b""
+    ack = module.decode_frame(uart.writes[-1])
+    assert ack is not None
+    assert ack["mode"] == module.Mode.ACK
+    assert ack["topic"] == module.Topic.LOCAL_VISION_CONTROL
+    assert ack["seq"] == 23
+    assert module.state.return_line_gate_enabled is True
+
+
 def test_assistant_main_v2_process_uart_input_without_any_matches_master_behavior() -> None:
     """辅车 main_v2 不再为缺失 any 的串口对象静默返回."""
 
@@ -2813,6 +2813,169 @@ def test_assistant_main_v2_event_helpers_reflect_global_state() -> None:
         "event": module.Event.TARGET_FOUND,
         "value": 300,
     }
+
+
+def test_assistant_main_v2_return_line_event_helpers_use_aligned_event() -> None:
+    module = load_assistant_v2()
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.RETURN_FOLLOW,
+            module.Target.NONE,
+            legacy_tests.pack_task_arg(module.Task.RETURN_GARAGE_LINE, 0),
+        )
+    )
+
+    assert module.current_event_type() == module.Event.RETURN_LINE_ALIGNED
+    assert module.resolve_event_value(160.0, None) == 160
+
+
+def test_assistant_main_v2_return_line_reports_aligned_event_without_velocity_frame() -> None:
+    module = load_assistant_v2()
+    module.state.required_stable_frames = 1
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.RETURN_FOLLOW,
+            module.Target.NONE,
+            legacy_tests.pack_task_arg(module.Task.RETURN_GARAGE_LINE, 0),
+        )
+    )
+    uart = legacy_tests.FakeUART()
+    module.state.uart_device = uart
+
+    class FakeReturnBlob:
+        def __init__(self, x, y, w, h, area):
+            self._rect = (x, y, w, h)
+            self._area = area
+
+        def rect(self):
+            return self._rect
+
+        def area(self):
+            return self._area
+
+    class ReturnLineImage:
+        def __init__(self):
+            self.yellow_area_by_roi = {}
+
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(
+            self,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge,
+            roi=None,
+            margin=None,
+        ):
+                _ = thresholds, pixels_threshold, area_threshold, merge, margin
+                if roi is None:
+                    return []
+                area = self.yellow_area_by_roi.get(tuple(roi), 0)
+                if area <= 0:
+                    return []
+                return [FakeReturnBlob(roi[0], roi[1], roi[2], roi[3], area)]
+
+    img = ReturnLineImage()
+    module.state.current_image = img
+    module.state.current_image_width = img.width()
+    module.state.current_image_height = img.height()
+    fixed_roi = (80, 0, 160, 80)
+    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
+
+    module.process_task_frame(img)
+    assert uart.writes == []
+
+    module.handle_control_frame(
+        module.encode_frame(
+            module.Mode.TCP,
+            module.Topic.LOCAL_VISION_CONTROL,
+            21,
+            module.encode_local_vision_control_body(module.LocalVisionControl.RETURN_LINE_GATE_ON),
+        )
+    )
+
+    module.process_task_frame(img)
+    assert uart.writes == []
+    module.process_task_frame(img)
+
+    legacy_tests.assert_assistant_event(
+        module,
+        uart.writes[0],
+        12,
+        module.Event.RETURN_LINE_ALIGNED,
+        100,
+    )
+    assert len(uart.writes) == 1
+
+
+def test_assistant_main_v2_return_line_gate_off_blocks_event() -> None:
+    module = load_assistant_v2()
+    module.state.required_stable_frames = 1
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.RETURN_FOLLOW,
+            module.Target.NONE,
+            legacy_tests.pack_task_arg(module.Task.RETURN_GARAGE_LINE, 0),
+        )
+    )
+    uart = legacy_tests.FakeUART()
+    module.state.uart_device = uart
+
+    class FakeReturnBlob:
+        def __init__(self, x, y, w, h, area):
+            self._rect = (x, y, w, h)
+            self._area = area
+
+        def rect(self):
+            return self._rect
+
+        def area(self):
+            return self._area
+
+    class ReturnLineImage:
+        def __init__(self):
+            self.yellow_area_by_roi = {(80, 0, 160, 80): 160 * 80}
+
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(
+            self,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge,
+            roi=None,
+            margin=None,
+        ):
+            _ = thresholds, pixels_threshold, area_threshold, merge, margin
+            if roi is None:
+                return []
+            area = self.yellow_area_by_roi.get(tuple(roi), 0)
+            if area <= 0:
+                return []
+            return [FakeReturnBlob(roi[0], roi[1], roi[2], roi[3], area)]
+
+    img = ReturnLineImage()
+    module.state.current_image = img
+    module.state.current_image_width = img.width()
+    module.state.current_image_height = img.height()
+
+    module.process_task_frame(img)
+    module.process_task_frame(img)
+
+    assert uart.writes == []
 
 
 def test_assistant_run_applies_lens_correction_before_processing() -> None:
