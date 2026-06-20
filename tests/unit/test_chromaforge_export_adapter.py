@@ -343,7 +343,7 @@ def test_role_build_v2_script_generates_master_v2_output_from_shared_rules(tmp_p
     assert "'yellow'" not in uploaded
     if yellow_threshold is not None:
         assert "FINISH_HOOK_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
-        assert "RETURN_GARAGE_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
+        assert "RETURN_GARAGE_LINE_YELLOW_THRESHOLD" not in uploaded
     assert "threshold_index" not in uploaded
 
 
