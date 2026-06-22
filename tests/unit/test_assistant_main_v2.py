@@ -199,8 +199,8 @@ def test_assistant_main_v2_build_object_candidates_matches_master_style_signatur
 
 def test_assistant_main_v2_object_task_config_keeps_only_filter_parameters() -> None:
     module = load_assistant_v2()
-    for task_name in ("red", "tennis"):
-        task = next(task for task in module.OBJECT_TASKS if task[0] == task_name)
+    for task in module.OBJECT_TASKS:
+        task_name = task[0]
         expected = (
             task[0],
             int(task[2]),
@@ -1237,6 +1237,192 @@ def test_assistant_main_v2_transport_object_blob_only_preserves_previous_track()
 
     assert module.state.current_detection_source == "roi"
     assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 240.0)
+
+
+def test_assistant_main_v2_transport_object_inherits_track_after_transport_realign() -> None:
+    module = load_assistant_v2()
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            11,
+            module.State.ORBIT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.ORBIT, 1),
+        )
+    )
+    _seed_assistant_short_track(module)
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            13,
+            module.State.TRANSPORT_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+
+    class Blob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def cy(self):
+            return 30.0
+
+        def area(self):
+            return 240.0
+
+    class BlobImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=0):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
+            return [Blob()]
+
+    assert module.state.track_task_name == "red"
+
+    candidates = module.build_object_candidates(BlobImage(), ())
+
+    assert module.state.current_detection_source == "roi"
+    assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 240.0)
+
+
+def test_assistant_main_v2_transport_object_inherits_track_after_orbit_transport_realign() -> None:
+    module = load_assistant_v2()
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            11,
+            module.State.ORBIT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.ORBIT, 1),
+        )
+    )
+    _seed_assistant_short_track(module)
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.ORBIT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            13,
+            module.State.TRANSPORT_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+
+    assert module.state.track_task_name == "red"
+
+
+def test_assistant_main_v2_orbit_inherits_track_after_object_event() -> None:
+    module = load_assistant_v2()
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            11,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
+        )
+    )
+    _seed_assistant_short_track(module)
+    module.create_pending_event(11, module.Event.TARGET_FOUND, 300)
+    module.handle_control_frame(legacy_tests.assistant_event_ack_frame(11))
+
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.ORBIT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.ORBIT, 1),
+        )
+    )
+
+    class Blob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def cy(self):
+            return 30.0
+
+        def area(self):
+            return 240.0
+
+    class BlobImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=0):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
+            return [Blob()]
+
+    candidates = module.build_object_candidates(BlobImage(), ())
+
+    assert module.state.current_detection_source == "roi"
+    assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 240.0)
+
+
+def test_assistant_main_v2_blob_only_uses_full_image_blob_search() -> None:
+    module = load_assistant_v2()
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            11,
+            module.State.ORBIT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+    _seed_assistant_short_track(module)
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.TRANSPORT_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+
+    class BlobImage:
+        def __init__(self):
+            self.find_blobs_calls = []
+
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, roi=None, margin=0):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, margin)
+            self.find_blobs_calls.append(roi)
+            return []
+
+    img = BlobImage()
+
+    module.build_object_candidates(img, ())
+
+    assert img.find_blobs_calls == [None]
 
 
 def test_assistant_main_v2_run_skips_yolo_when_blob_tracking_is_active() -> None:
@@ -2459,6 +2645,84 @@ def test_assistant_main_v2_build_search_velocity_wrapper_matches_object_path() -
     assert module.build_search_velocity_from_observation(
         observation,
     ) == module.build_object_approach_velocity_from_observation(observation)
+
+
+def test_assistant_main_v2_orbit_outputs_independent_xy_velocity_correction() -> None:
+    """辅车绕行修正直接输出独立 vx/vy 平移修正."""
+
+    module = load_assistant_v2()
+    module.OBJECT_ORBIT_KP_X = 0.2
+    module.OBJECT_ORBIT_KP_Y = -0.3
+    module.OBJECT_ORBIT_MIN_SPEED = 0.0
+    module.OBJECT_ORBIT_MAX_VX = 9.0
+    module.OBJECT_ORBIT_MAX_VY = 9.0
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.ORBIT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.ORBIT, 1),
+        )
+    )
+    target_x, target_y = assistant_v2_target_point(module, module.Task.ORBIT)
+
+    class FakeBlob:
+        def rect(self):
+            return (target_x + 30.0, legacy_tests.IMAGE_HEIGHT - target_y, 20, 20)
+
+        def cx(self):
+            return target_x + 40.0
+
+        def cy(self):
+            return legacy_tests.IMAGE_HEIGHT - target_y + 10.0
+
+        def area(self):
+            return 300.0
+
+    class FakeImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def draw_cross(self, x, y):
+            _ = (x, y)
+
+        def draw_rectangle(self, *args):
+            _ = args
+
+        def draw_string(self, *args, **kwargs):
+            _ = (args, kwargs)
+
+    uart = legacy_tests.FakeUART()
+    module.state.uart_device = uart
+    module.state.current_object_candidates = (
+        (
+            "red",
+            target_x + 40.0,
+            legacy_tests.IMAGE_HEIGHT - target_y + 10.0,
+            target_y - 20.0,
+            300.0,
+            FakeBlob(),
+        ),
+    )
+    img = FakeImage()
+    module.state.current_image = img
+    module.state.current_image_width = img.width()
+    module.state.current_image_height = img.height()
+
+    module.process_task_frame(img)
+
+    frame = module.decode_frame(uart.writes[0])
+    body = module.decode_velocity_body(frame["body"])
+    expected_y = -20.0 * (
+        float(module.OBJECT_ORBIT_MAX_VY)
+        / abs(float(module.OBJECT_ORBIT_KP_Y))
+        / float(legacy_tests.IMAGE_HEIGHT)
+    ) * float(module.OBJECT_ORBIT_KP_Y)
+    assert body["vx"] == pytest.approx(40.0 * module.OBJECT_ORBIT_KP_X)
+    assert body["vy"] == pytest.approx(expected_y)
 
 
 def test_assistant_main_v2_object_target_helpers_drop_unused_size_parameters() -> None:

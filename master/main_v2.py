@@ -140,9 +140,9 @@ MASTER_SEARCH_MAX_VX = 5.0
 # 搜索阶段纵向速度上限
 MASTER_SEARCH_MAX_VY = 5.0
 
-# 绕目标阶段横向控制比例系数
+# 绕目标阶段横向速度修正比例系数
 MASTER_ORBIT_KP_X = 0.05
-# 绕目标阶段纵向控制比例系数
+# 绕目标阶段纵向速度修正比例系数
 MASTER_ORBIT_KP_Y = -0.30
 # 绕目标阶段最小输出速度
 MASTER_ORBIT_MIN_SPEED = 0.0
@@ -193,11 +193,7 @@ SEQ_HALF_RING = 128
 
 # 目标相关任务的筛选参数配置
 OBJECT_TASKS = (
-    ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 90, True),
-    ('tennis', ((71, 95, -54, -33, 64, 95),), 5, 20, 30, 50, True),
-    ('blue', ((32, 70, -22, 14, -61, -33),), 5, 20, 25, 60, True),
-    ('white', ((33, 78, -11, 4, -22, 3),), 5, 20, 50, 80, True),
-    ('brown', ((16, 48, 0, 20, 10, 31),), 3, 20, 50, 100, True),
+    ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 220, True),
 )
 
 # 有符号 16 位整数下界
@@ -902,7 +898,7 @@ def _tracked_search_roi():
     return (roi_left, roi_top, roi_right - roi_left, roi_bottom - roi_top)
 
 
-def _build_dynamic_blob_object_candidates(img):
+def _build_dynamic_blob_object_candidates(img, use_tracking_roi=True):
     task_name = state.track_task_name
     if task_name is None:
         return ()
@@ -928,7 +924,7 @@ def _build_dynamic_blob_object_candidates(img):
         pixels_threshold,
         area_threshold,
         merge_margin,
-        _tracked_search_roi(),
+        _tracked_search_roi() if use_tracking_roi else None,
     )
     candidates = []
     for blob in blobs:
@@ -1184,6 +1180,8 @@ def should_run_yolo_for_current_frame():
     if is_return_line_task_context():
         return False
     current_task = state.current_task
+    if current_task is None and MASTER_DEBUG_DISPLAY_ENABLED:
+        return False
     if (
         current_task is not None
         and int(current_task["state"]) == int(State.TRANSPORT_OBJECT)
@@ -1260,7 +1258,7 @@ def build_object_candidates(img, yolo_candidates):
     if is_blob_only_task_context():
         state.current_detection_source = "roi"
         state.track_failure_reason = TrackFailureReason.NONE
-        return tuple(_build_dynamic_blob_object_candidates(img))
+        return tuple(_build_dynamic_blob_object_candidates(img, use_tracking_roi=False))
     if is_yolo_only_task_context():
         state.current_detection_source = "yolo"
         state.track_failure_reason = TrackFailureReason.NONE
@@ -1311,6 +1309,50 @@ def build_object_candidates(img, yolo_candidates):
             return (_filter_candidate_by_track(best),)
     state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
     return candidates
+
+
+def build_debug_threshold_candidates(img):
+    state.current_image = img
+    state.current_image_width = int(img.width())
+    state.current_image_height = int(img.height())
+    candidates = []
+    for task in OBJECT_TASKS:
+        (
+            task_name,
+            merge_margin,
+            pixels_threshold,
+            area_threshold,
+            max_side_length,
+            _require_all_thresholds,
+        ) = object_task_parts(task)
+        thresholds = object_task_thresholds(task)
+        if not thresholds:
+            continue
+        blobs = _find_blobs_with_task_config(
+            img,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge_margin,
+            None,
+        )
+        for blob in blobs:
+            area = blob_area(blob)
+            if area < float(area_threshold):
+                continue
+            if int(max_side_length) > 0 and blob_max_side_length(blob) > float(max_side_length):
+                continue
+            left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+            _, _, _, protocol_bottom = normalize_bbox_for_protocol(left, top, right, bottom)
+            center_x = (float(left) + float(right)) / 2.0
+            candidates.append((task_name, center_x, protocol_bottom, area, blob))
+    if candidates:
+        state.current_detection_source = "roi"
+        state.track_failure_reason = TrackFailureReason.NONE
+    else:
+        state.current_detection_source = "miss"
+        state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+    return tuple(candidates)
 
 
 def remember_object_tracking(task_name, blob, center_x, bottom_y, area, source):
@@ -2350,7 +2392,6 @@ def create_pending_event(context_id, event, value):
     }
     state.pending_event_last_sent_ms = None
     state.last_event_context_id = int(context_id)
-    state.clear_track()
 
 
 def next_event_frame():
@@ -2474,22 +2515,25 @@ def _accept_return_line_observation(context_id, img, event_type):
         return
 
 
-def _process_debug_finish_preview_frame(img):
-    debug_task = {
-        "context_id": 0,
-        "state": int(State.TRANSPORT_OBJECT),
-        "target": int(Target.EDGE_LINE),
-        "arg": int(Task.TRANSPORT_FINISH),
-    }
-    previous_task = state.current_task
-    state.current_task = debug_task
-    try:
-        yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
-        accept_observation((0, 0.0, 0.0, 1.0), img, event_value=yellow_ratio)
-        draw_finish_task_debug(img, None, yellow_ratio)
-        img.flush()
-    finally:
-        state.current_task = previous_task
+def _process_debug_threshold_preview_frame(img):
+    candidates = build_debug_threshold_candidates(img)
+    state.current_yolo_candidates = ()
+    state.current_object_candidates = candidates
+    draw_object_candidates_debug(img, candidates)
+    if candidates:
+        target_x, target_y = build_search_target_point(Task.SEARCH)
+        task_name, _, _, _, best_blob = choose_best_candidate(candidates, target_x, target_y)
+        draw_selected_candidate_debug(img, task_name, best_blob)
+        draw_protocol_target_point_debug(img, target_x, target_y)
+    img.draw_string(
+        2,
+        50,
+        "threshold cand=%d" % int(len(candidates)),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+    img.flush()
 
 
 def accept_observation(observation, img, event_value=None):
@@ -2547,11 +2591,14 @@ def handle_control_frame(frame_bytes):
     if packet is not None:
         context_id = int(packet["context_id"])
         if is_newer_seq(context_id, state.last_task_context_id):
-            preserve_track = (
-                state.track_task_name is not None
-                and int(packet["state"]) == int(State.ORBITING)
+            next_is_orbit = (
+                int(packet["state"]) == int(State.ORBITING)
                 and int(packet["target"]) == int(Target.OBJECT)
                 and int(packet["arg"]) == int(Task.ORBIT)
+            )
+            preserve_track = (
+                state.track_task_name is not None
+                and next_is_orbit
             )
             clear_local_vision_control_state()
             state.current_task = {
@@ -2659,7 +2706,7 @@ def _process_finish_task_frame(img):
 
 def process_task_frame(img):
     if state.current_task is None and MASTER_DEBUG_DISPLAY_ENABLED:
-        _process_debug_finish_preview_frame(img)
+        _process_debug_threshold_preview_frame(img)
         return
     if state.pending_event is not None:
         event_frame = next_event_frame()

@@ -107,11 +107,11 @@ def test_master_main_v2_process_task_and_velocity_helpers_drop_frame_size_parame
     )
 
 
-def test_master_main_v2_run_uses_yolo_gate_for_debug_preview_without_track() -> None:
+def test_master_main_v2_run_skips_yolo_gate_for_debug_threshold_preview_without_track() -> None:
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
 
-    assert module.should_run_yolo_for_current_frame() is True
+    assert module.should_run_yolo_for_current_frame() is False
 
 
 def test_master_main_v2_run_skips_yolo_gate_when_short_tracking_is_active() -> None:
@@ -326,10 +326,95 @@ def test_master_main_v2_orbit_blob_only_preserves_previous_track() -> None:
     assert candidates[0][:4] == ("red", 160.0, 210.0, 260.0)
 
 
+def test_master_main_v2_orbit_inherits_track_after_search_event() -> None:
+    module = load_master_v2()
+    module.handle_control_frame(task_sync_frame(module, context_id=11))
+    _seed_master_short_track(module)
+    module.create_pending_event(11, module.Event.TARGET_FOUND, module.object_task_id("red"))
+    module.handle_control_frame(event_ack_frame(module, 1))
+
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=12,
+            state=int(module.State.ORBITING),
+            target=int(module.Target.OBJECT),
+            arg=int(module.Task.ORBIT),
+        )
+    )
+
+    class OrbitBlob:
+        def rect(self):
+            return (150, 30, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def area(self):
+            return 260.0
+
+    class OrbitBlobImage(FakeImage):
+        def find_blobs(
+            self,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge,
+            roi=None,
+            margin=None,
+        ):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, roi, margin)
+            return [OrbitBlob()]
+
+    candidates = module.build_object_candidates(OrbitBlobImage(), ())
+
+    assert module.state.current_detection_source == "roi"
+    assert candidates[0][:4] == ("red", 160.0, 210.0, 260.0)
+
+
+def test_master_main_v2_orbit_blob_only_uses_full_image_blob_search() -> None:
+    module = load_master_v2()
+    module.handle_control_frame(task_sync_frame(module, context_id=11))
+    _seed_master_short_track(module, rect=(10, 10, 30, 30))
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=12,
+            state=int(module.State.ORBITING),
+            target=int(module.Target.OBJECT),
+            arg=int(module.Task.ORBIT),
+        )
+    )
+
+    class OrbitBlobImage(FakeImage):
+        def __init__(self):
+            super().__init__()
+            self.find_blobs_calls = []
+
+        def find_blobs(
+            self,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge,
+            roi=None,
+            margin=None,
+        ):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, margin)
+            self.find_blobs_calls.append(roi)
+            return []
+
+    img = OrbitBlobImage()
+
+    module.build_object_candidates(img, ())
+
+    assert img.find_blobs_calls == [None]
+
+
 def test_master_main_v2_object_task_config_keeps_only_filter_parameters() -> None:
     module = load_master_v2()
-    for task_name in ("red", "tennis"):
-        task = next(task for task in module.OBJECT_TASKS if task[0] == task_name)
+    for task in module.OBJECT_TASKS:
+        task_name = task[0]
         expected = (
             task[0],
             int(task[2]),
@@ -467,6 +552,30 @@ class FakeImage:
         return self.pixels.get((x, y), (0, 0, 0))
 
 
+class FixedThresholdPreviewImage(FakeImage):
+    def __init__(self, expected_threshold, blob=None):
+        super().__init__()
+        self.expected_threshold = tuple(expected_threshold)
+        self.preview_blob = blob or FakeBlob(120, 30, 30, 20, 900)
+        self.find_blobs_calls = []
+
+    def find_blobs(
+        self,
+        thresholds,
+        pixels_threshold,
+        area_threshold,
+        merge,
+        roi=None,
+        margin=None,
+    ):
+        _ = pixels_threshold, area_threshold, merge, margin
+        threshold = tuple(thresholds[0])
+        self.find_blobs_calls.append((threshold, roi))
+        if threshold == self.expected_threshold and roi is None:
+            return [self.preview_blob]
+        return []
+
+
 class DynamicThresholdCalibrationImage:
     def __init__(self, bbox, foreground, background, fragment=None):
         self.left, self.top, self.right, self.bottom = bbox
@@ -523,7 +632,14 @@ class DynamicThresholdRoiImage:
         return []
 
 
-def task_sync_frame(module, seq=12, context_id=7, state=None, target=None, arg=None):
+def task_sync_frame(
+    module,
+    seq=12,
+    context_id=7,
+    state=None,
+    target=None,
+    arg=None,
+):
     if state is None:
         state = int(module.State.SEARCH_OBJECT)
     if target is None:
@@ -994,37 +1110,38 @@ def test_master_main_v2_process_task_frame_prints_object_debug_log_when_enabled(
     assert any("cand=1" in line for line in logs)
 
 
-def test_master_main_v2_debug_display_shows_finish_yellow_without_task_sync() -> None:
+def test_master_main_v2_debug_display_shows_threshold_blobs_without_task_sync() -> None:
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
+    red_threshold = module.OBJECT_TASKS[0][1][0]
     uart = FakeUART()
     module.state.uart_device = uart
-    img = FakeImage()
-    fixed_roi = module.build_finish_task_fixed_object_roi(img)
-    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
+    img = FixedThresholdPreviewImage(red_threshold)
 
-    run_frame(module, img)
+    module.process_task_frame(img)
 
+    assert module.MASTER_DEBUG_DISPLAY_ENABLED is True
+    assert any(call == (tuple(red_threshold), None) for call in img.find_blobs_calls)
     assert img.rectangles
-    assert any("finish ratio=" in entry[2] for entry in img.strings)
-    assert any("touch=" in entry[2] for entry in img.strings)
-    assert any("stable=" in entry[2] for entry in img.strings)
+    assert any(entry[2] == "red" for entry in img.strings)
+    assert not any("finish ratio=" in entry[2] for entry in img.strings)
+    assert img.copy_calls == []
     assert img.flush_count == 1
     assert uart.writes == []
 
 
-def test_master_main_v2_debug_display_reports_finish_yellow_ratio_without_task_sync() -> None:
+def test_master_main_v2_debug_display_reports_threshold_blob_without_task_sync() -> None:
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
-    img = FakeImage()
-    fixed_roi = module.build_finish_task_fixed_object_roi(img)
-    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
+    red_threshold = module.OBJECT_TASKS[0][1][0]
+    img = FixedThresholdPreviewImage(red_threshold)
     set_current_image(module, img)
 
     module.process_task_frame(img)
 
-    assert any("finish ratio=100.0" in entry[2] for entry in img.strings)
-    assert any("touch=1" in entry[2] for entry in img.strings)
+    assert any(call == (tuple(red_threshold), None) for call in img.find_blobs_calls)
+    assert any(entry[2] == "red" for entry in img.strings)
+    assert not any("touch=" in entry[2] for entry in img.strings)
     assert img.flush_count == 1
 
 
@@ -1164,13 +1281,13 @@ def test_master_main_v2_search_y_velocity_decreases_when_target_gets_closer() ->
     assert close_velocity[1] < far_velocity[1]
 
 
-def test_master_main_v2_orbit_outputs_only_velocity_correction_without_event() -> None:
+def test_master_main_v2_orbit_outputs_independent_xy_velocity_correction() -> None:
     module = load_master_v2()
-    module.state.yolo_net = "fake-net"
     module.MASTER_ORBIT_KP_X = 0.2
     module.MASTER_ORBIT_KP_Y = -0.3
     module.MASTER_ORBIT_MIN_SPEED = 0.0
-    module.tf.detect = lambda net, img: [search_aligned_detection()]
+    module.MASTER_ORBIT_MAX_VX = 9.0
+    module.MASTER_ORBIT_MAX_VY = 9.0
     module.handle_control_frame(
         task_sync_frame(
             module,
@@ -1181,12 +1298,30 @@ def test_master_main_v2_orbit_outputs_only_velocity_correction_without_event() -
     uart = FakeUART()
     module.state.uart_device = uart
     img = FakeImage()
+    target_x, target_y = module.build_search_target_point(module.Task.ORBIT)
+    blob = module.YoloDetectionBlob(
+        target_x + 30.0,
+        IMAGE_HEIGHT - target_y,
+        target_x + 50.0,
+        IMAGE_HEIGHT - target_y + 20.0,
+        1,
+        0.95,
+    )
+    module.state.current_image = img
+    module.state.current_image_width = img.width()
+    module.state.current_image_height = img.height()
+    module.state.current_object_candidates = (("red", target_x + 40.0, target_y - 20.0, 400.0, blob),)
 
-    run_frame(module, img)
+    module.process_task_frame(img)
 
     velocity = latest_velocity(uart)
-    assert velocity["vx"] == pytest.approx(0.0)
-    assert velocity["vy"] == pytest.approx(0.0)
+    expected_y = -20.0 * (
+        float(module.MASTER_ORBIT_MAX_VY)
+        / abs(float(module.MASTER_ORBIT_KP_Y))
+        / float(IMAGE_HEIGHT)
+    ) * float(module.MASTER_ORBIT_KP_Y)
+    assert velocity["vx"] == pytest.approx(40.0 * module.MASTER_ORBIT_KP_X)
+    assert velocity["vy"] == pytest.approx(expected_y)
     assert len(uart.writes) == 1
 
 
@@ -1558,21 +1693,18 @@ def test_master_main_v2_finish_process_task_frame_consumes_touch_into_finish_sta
     assert module.state.stable_frame_count == 0
 
 
-def test_master_main_v2_debug_finish_without_task_sync_emits_local_pending_event_after_release() -> None:
+def test_master_main_v2_threshold_debug_without_task_sync_does_not_emit_finish_event() -> None:
     module = load_master_v2()
-    module.MASTER_DEBUG_DISPLAY_ENABLED = True
-    module.FINISH_HOOK_STABLE_FRAMES = 2
     module.state.uart_device = FakeUART()
-    touch_img = FakeImage()
-    fixed_roi = module.build_finish_task_fixed_object_roi(touch_img)
-    touch_img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
+    red_threshold = module.OBJECT_TASKS[0][1][0]
+    touch_img = FixedThresholdPreviewImage(red_threshold)
 
     module.process_task_frame(touch_img)
     module.process_task_frame(FakeImage())
     module.process_task_frame(FakeImage())
 
-    assert module.state.finish_contact_seen is True
-    assert module.state.pending_event is not None
+    assert module.state.finish_contact_seen is False
+    assert module.state.pending_event is None
 
 def test_master_main_v2_finish_yellow_ratio_uses_fixed_object_roi() -> None:
     module = load_master_v2()
@@ -1759,20 +1891,22 @@ def test_master_main_v2_pending_event_blocks_non_return_velocity_until_ack() -> 
     assert decode_frame(uart.writes[-1])["topic"] == module.Topic.LOCAL_VISION_VELOCITY
 
 
-def test_master_main_v2_run_applies_lens_correction_and_shows_finish_yellow_debug_without_task_sync() -> None:
-    """主车调试模式下没有任务同步时显示搬运结束黄线判定结果."""
+def test_master_main_v2_run_applies_lens_correction_and_shows_threshold_debug_without_task_sync() -> None:
+    """主车调试模式下没有任务同步时显示固定阈值结果."""
 
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
+    red_threshold = module.OBJECT_TASKS[0][1][0]
     logs = []
     module.print = lambda *args: logs.append(" ".join(str(arg) for arg in args))
 
     class StopLoop(Exception):
         pass
 
-    class SnapshotImage(FakeImage):
+    class SnapshotImage(FixedThresholdPreviewImage):
         def __init__(self, pixels=None):
-            super().__init__(pixels=pixels)
+            super().__init__(red_threshold)
+            _ = pixels
             self.lens_corr_called = False
 
         def lens_corr(self, strength, zoom):
@@ -1786,8 +1920,6 @@ def test_master_main_v2_run_applies_lens_correction_and_shows_finish_yellow_debu
             raise StopLoop()
 
     image = SnapshotImage()
-    fixed_roi = module.build_finish_task_fixed_object_roi(image)
-    image.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
     class Sensor:
         def snapshot(self):
             return image
@@ -1799,7 +1931,7 @@ def test_master_main_v2_run_applies_lens_correction_and_shows_finish_yellow_debu
 
     def fake_yolo_detect(img):
         _ = img
-        raise AssertionError("上电黄线调试不应调用 yolo_detect")
+        raise AssertionError("上电阈值调试不应调用 yolo_detect")
 
     module.yolo_detect = fake_yolo_detect
     module.write_reliable_line = lambda _frame_bytes: (_ for _ in ()).throw(
@@ -1814,11 +1946,11 @@ def test_master_main_v2_run_applies_lens_correction_and_shows_finish_yellow_debu
     assert module.state.current_image is image
     assert image.lens_corr_called is True
     assert tuple(module.state.current_yolo_candidates) == ()
-    assert tuple(module.state.current_object_candidates) == ()
+    assert tuple(module.state.current_object_candidates[:1])[0][:4] == ("red", 135.0, 210.0, 900.0)
     assert image.flush_count == 1
-    assert any("finish ratio=" in entry[2] for entry in image.strings)
-    assert any("touch=" in entry[2] for entry in image.strings)
-    assert any("stable=" in entry[2] for entry in image.strings)
+    assert any(call == (tuple(red_threshold), None) for call in image.find_blobs_calls)
+    assert any(entry[2] == "red" for entry in image.strings)
+    assert any("threshold cand=1" in entry[2] for entry in image.strings)
     assert any("[master_v2][boot]" in line for line in logs)
     assert any("debug=1" in line for line in logs)
 
@@ -2007,12 +2139,11 @@ def test_master_main_v2_transport_finish_retries_pending_resume_control() -> Non
         module.run()
 
 
-def test_master_main_v2_finish_debug_ignores_cached_object_tracking_without_task_sync() -> None:
+def test_master_main_v2_threshold_debug_replaces_cached_object_tracking_without_task_sync() -> None:
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
-    image = FakeImage()
-    fixed_roi = module.build_finish_task_fixed_object_roi(image)
-    image.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
+    red_threshold = module.OBJECT_TASKS[0][1][0]
+    image = FixedThresholdPreviewImage(red_threshold)
     set_current_image(module, image)
     _seed_master_short_track(module)
     yolo_blob = module.YoloDetectionBlob(150.0, 30.0, 170.0, 50.0, 1, 0.95)
@@ -2022,28 +2153,30 @@ def test_master_main_v2_finish_debug_ignores_cached_object_tracking_without_task
 
     module.process_task_frame(image)
 
-    assert tuple(module.state.current_yolo_candidates[:1])[0][:4] == ("red", 160.0, 210.0, 400.0)
-    assert tuple(module.state.current_object_candidates[:1])[0][:4] == ("red", 160.0, 210.0, 400.0)
-    assert module.state.track_source == "yolo"
-    assert any("finish ratio=" in entry[2] for entry in image.strings)
+    assert tuple(module.state.current_yolo_candidates) == ()
+    assert tuple(module.state.current_object_candidates[:1])[0][:4] == ("red", 135.0, 210.0, 900.0)
+    assert any(call == (tuple(red_threshold), None) for call in image.find_blobs_calls)
+    assert any(entry[2] == "red" for entry in image.strings)
     assert image.flush_count == 1
 
 
-def test_master_main_v2_run_shows_finish_debug_when_blob_tracking_is_active() -> None:
+def test_master_main_v2_run_shows_threshold_debug_when_blob_tracking_is_active() -> None:
     module = load_master_v2()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
+    red_threshold = module.OBJECT_TASKS[0][1][0]
 
     class StopLoop(Exception):
         pass
 
-    class SnapshotImage(FakeImage):
+    class SnapshotImage(FixedThresholdPreviewImage):
+        def __init__(self):
+            super().__init__(red_threshold)
+
         def flush(self):
             super().flush()
             raise StopLoop()
 
     image = SnapshotImage()
-    fixed_roi = module.build_finish_task_fixed_object_roi(image)
-    image.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
 
     class Sensor:
         def snapshot(self):
@@ -2071,8 +2204,9 @@ def test_master_main_v2_run_shows_finish_debug_when_blob_tracking_is_active() ->
         module.run()
 
     assert tuple(module.state.current_yolo_candidates) == ()
-    assert tuple(module.state.current_object_candidates) == ()
-    assert any("finish ratio=" in entry[2] for entry in image.strings)
+    assert tuple(module.state.current_object_candidates[:1])[0][:4] == ("red", 135.0, 210.0, 900.0)
+    assert any(call == (tuple(red_threshold), None) for call in image.find_blobs_calls)
+    assert any(entry[2] == "red" for entry in image.strings)
     assert yolo_call_count == 0
 
 

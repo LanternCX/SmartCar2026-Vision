@@ -115,11 +115,7 @@ OBJECT_BLOB_AREA_THRESHOLD = 200
 FOLLOW_TASKS = (("marker", (50, 100, 41, 127, -60, 127)),)
 # 目标相关任务的筛选参数配置
 OBJECT_TASKS = (
-    ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 90, True),
-    ('tennis', ((71, 95, -54, -33, 64, 95),), 5, 20, 30, 50, True),
-    ('blue', ((32, 70, -22, 14, -61, -33),), 5, 20, 25, 60, True),
-    ('white', ((33, 78, -11, 4, -22, 3),), 5, 20, 50, 80, True),
-    ('brown', ((16, 48, 0, 20, 10, 31),), 3, 20, 50, 100, True),
+    ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 220, True),
 )
 # 回库黄线识别阈值
 RETURN_LINE_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
@@ -165,9 +161,9 @@ OBJECT_APPROACH_DEADZONE_Y_PX = 8.0
 OBJECT_APPROACH_MAX_VX = 5.0
 # 接近目标阶段纵向速度上限
 OBJECT_APPROACH_MAX_VY = 5.0
-# 绕目标阶段横向控制比例系数
+# 绕目标阶段横向速度修正比例系数
 OBJECT_ORBIT_KP_X = 0.05
-# 绕目标阶段纵向控制比例系数
+# 绕目标阶段纵向速度修正比例系数
 OBJECT_ORBIT_KP_Y = -0.15
 # 绕目标阶段最小输出速度
 OBJECT_ORBIT_MIN_SPEED = 0
@@ -905,7 +901,7 @@ def _tracked_search_roi():
     return (roi_left, roi_top, roi_right - roi_left, roi_bottom - roi_top)
 
 
-def _build_dynamic_blob_object_candidates(img):
+def _build_dynamic_blob_object_candidates(img, use_tracking_roi=True):
     task_name = state.track_task_name
     if task_name is None:
         return ()
@@ -931,7 +927,7 @@ def _build_dynamic_blob_object_candidates(img):
         pixels_threshold,
         area_threshold,
         merge_margin,
-        _tracked_search_roi(),
+        _tracked_search_roi() if use_tracking_roi else None,
     )
     candidates = []
     for blob in blobs:
@@ -954,7 +950,7 @@ def build_object_candidates(img, yolo_candidates):
             state.current_detection_source = "miss"
             state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
             return ()
-        candidates = _build_dynamic_blob_object_candidates(img)
+        candidates = _build_dynamic_blob_object_candidates(img, use_tracking_roi=False)
         if state.track_task_name is not None:
             candidates = [candidate for candidate in candidates if candidate[0] == state.track_task_name]
         if candidates:
@@ -1900,11 +1896,25 @@ class RuntimeState:
     def _handle_sync_packet(self, packet):
         reliable_seq = int(packet["reliable_seq"])
         if self._should_apply_sync(reliable_seq):
+            sync_state = int(packet["state"])
+            config_id = unpack_task_arg_config(packet["arg"])
             preserve_track = (
                 self.track_task_name is not None
-                and int(packet["state"]) == int(State.TRANSPORT_OBJECT)
                 and int(packet["target"]) == int(Target.OBJECT)
-                and unpack_task_arg_config(packet["arg"]) == int(Task.TRANSPORT)
+                and (
+                    (
+                        sync_state == int(State.TRANSPORT_OBJECT)
+                        and config_id == int(Task.TRANSPORT)
+                    )
+                    or (
+                        sync_state == int(State.APPROACH_OBJECT)
+                        and config_id == int(Task.TRANSPORT)
+                    )
+                    or (
+                        sync_state == int(State.ORBIT)
+                        and config_id in (int(Task.ORBIT), int(Task.TRANSPORT))
+                    )
+                )
             )
             clear_local_vision_control_state()
             self.current_sync = {
@@ -2060,7 +2070,6 @@ class RuntimeState:
         }
         self._pending_event_last_sent_ms = None
         self._completed_event_sync_seq = int(reliable_seq)
-        self.clear_track()
 
     def next_event_frame(self):
         if self._pending_event is None:
