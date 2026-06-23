@@ -14,3 +14,5 @@ PYTHONPATH=. uv run pytest tests/unit -q
 PYTHONPATH=. uv run pytest tests/contract -q
 PYTHONPATH=. uv run pytest tests/unit tests/contract -q
 ```
+
+其中 `tests/contract/` 包含 LSP 契约测试，会调用 `npx pyright` 检查仓库类型状态。
