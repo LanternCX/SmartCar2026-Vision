@@ -25,6 +25,7 @@ venv/
 ENV/
 env/
 .idea/
+.serena/
 *.log
 .DS_Store
 yolo/*.tflite
