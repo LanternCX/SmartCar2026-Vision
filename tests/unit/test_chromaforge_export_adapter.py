@@ -1,3 +1,7 @@
+"""ChromaForge 导出适配器测试."""
+
+# pyright: reportAttributeAccessIssue=false
+
 import json
 import os
 import subprocess

@@ -1,5 +1,7 @@
 """主车 OpenART 视觉入口 v2."""
 
+# pyright: reportAttributeAccessIssue=false
+
 import image
 import sensor
 import tf
@@ -649,6 +651,8 @@ def _write_all(frame_bytes):
         frame_bytes = bytes(frame_bytes)
     remaining = frame_bytes
     uart_device = state.uart_device
+    if uart_device is None:
+        return False
     while remaining:
         written = uart_device.write(remaining)
         if written is None:
@@ -785,6 +789,7 @@ def object_task_parts(task):
         0,
         0,
         0,
+        0,
         True,
     )
 
@@ -871,7 +876,7 @@ def yolo_detect(img):
     image_height = float(img.height())
     allowed_task_names = {task[0] for task in OBJECT_TASKS}
     candidates = []
-    for detected in tf.detect(net, detect_img):
+    for detected in tf.detect(net, detect_img):  # pyright: ignore[reportCallIssue]
         x1, y1, x2, y2, label, score = detected
         if float(score) <= float(YOLO_MIN_SCORE):
             continue
@@ -954,13 +959,15 @@ def _tracked_rect():
     rect = state.track_rect
     if rect is None:
         return None
-    left, top, right, bottom = rect
+    left, top, right, bottom = rect  # pyright: ignore[reportGeneralTypeIssues]
     return float(left), float(top), float(right), float(bottom)
 
 
 def _tracked_target_window():
     rect = _tracked_rect()
     if rect is None:
+        return None
+    if state.track_center_x is None or state.track_bottom_y is None:
         return None
     left, top, right, bottom = rect
     width = max(1.0, float(right) - float(left))
@@ -1007,8 +1014,9 @@ def _candidate_tracking_failure_reason(candidate):
         return TrackFailureReason.OUT_OF_WINDOW
     if abs(float(bottom_y) - predicted_bottom_y) > tolerance_y:
         return TrackFailureReason.OUT_OF_WINDOW
-    if float(state.track_area) > 0.0:
-        area_ratio = float(area) / float(state.track_area)
+    track_area = state.track_area
+    if track_area is not None and float(track_area) > 0.0:
+        area_ratio = float(area) / float(track_area)
         if area_ratio < 0.5 or area_ratio > 2.0:
             return TrackFailureReason.AREA_JUMP
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
@@ -1027,11 +1035,17 @@ def _candidate_hits_roi_window(candidate):
 
 
 def _tracked_candidate_sort_key(candidate):
-    predicted_center_x, predicted_bottom_y, _, _, _, _, _, _ = _tracked_target_window()
+    window = _tracked_target_window()
+    if window is None:
+        return 0.0, 0.0
+    predicted_center_x, predicted_bottom_y, _, _, _, _, _, _ = window
     _task_name, center_x, bottom_y, area, _blob = candidate
+    track_area = state.track_area
+    if track_area is None:
+        track_area = 0.0
     return (
         abs(float(center_x) - predicted_center_x) + abs(float(bottom_y) - predicted_bottom_y),
-        abs(float(area) - float(state.track_area)),
+        abs(float(area) - float(track_area)),
     )
 
 
@@ -1228,6 +1242,8 @@ def should_refresh_dynamic_threshold_from_yolo():
 def _build_predicted_object_candidates():
     rect = _tracked_rect()
     if rect is None or state.track_task_name is None:
+        return ()
+    if state.track_center_x is None or state.track_bottom_y is None or state.track_area is None:
         return ()
     left, top, right, bottom = rect
     width = float(right) - float(left)
@@ -1755,7 +1771,7 @@ def debug_log(tag, text):
 def draw_tracking_state_debug(img):
     predicted_roi = state.track_predicted_roi
     if predicted_roi is not None:
-        left, top, right, bottom = predicted_roi
+        left, top, right, bottom = predicted_roi  # pyright: ignore[reportGeneralTypeIssues]
         width = int(right) - int(left)
         height = int(bottom) - int(top)
         if width > 0 and height > 0:
@@ -2668,6 +2684,8 @@ def handle_control_frame(frame_bytes):
 
 def process_uart_input(rx_buffer):
     uart_device = state.uart_device
+    if uart_device is None:
+        return rx_buffer
     size = uart_device.any()
     if not size:
         return rx_buffer
@@ -2698,6 +2716,8 @@ def process_uart_input(rx_buffer):
 
 
 def _process_return_line_frame(img):
+    if state.current_task is None:
+        return
     accept_observation((int(state.current_task["context_id"]), 0.0, 0.0, 1.0), img)
     if MASTER_DEBUG_DISPLAY_ENABLED:
         draw_finish_task_debug(img, None, build_finish_task_yellow_ratio_percent(img, None))
@@ -2801,8 +2821,8 @@ def init_sensor():
     sensor.set_framesize(sensor.QVGA)
     sensor.set_vflip(True)
     sensor.set_hmirror(True)
-    sensor.skip_frames(time=2000)
-    sensor.set_auto_gain(False)
+    sensor.skip_frames(0, time=2000)
+    sensor.set_auto_gain(False)  # pyright: ignore[reportCallIssue]
     sensor.set_auto_whitebal(False)
     sensor.set_auto_exposure(False, exposure_us=EXP_TIME_US)
     return sensor.width(), sensor.height()

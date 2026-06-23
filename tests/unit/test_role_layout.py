@@ -1,5 +1,7 @@
 """! @brief 主辅视觉入口目录布局测试"""
 
+# pyright: reportAttributeAccessIssue=false
+
 import json
 import os
 import subprocess

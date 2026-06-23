@@ -1,5 +1,7 @@
 """测试辅助函数."""
 
+# pyright: reportAttributeAccessIssue=false, reportArgumentType=false
+
 import importlib.util
 import sys
 import types

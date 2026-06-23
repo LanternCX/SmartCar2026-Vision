@@ -1,5 +1,7 @@
 """辅车视觉默认入口行为测试."""
 
+# pyright: reportAttributeAccessIssue=false
+
 import inspect
 import pytest
 

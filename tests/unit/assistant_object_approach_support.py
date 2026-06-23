@@ -1,5 +1,7 @@
 """辅车视觉找物体模式单元测试."""
 
+# pyright: reportAttributeAccessIssue=false
+
 import pytest
 
 from tests.test_support import assistant_event_ack_frame, assistant_sync_frame, load_main_module
