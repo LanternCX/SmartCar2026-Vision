@@ -1,5 +1,7 @@
 """! @brief 主辅视觉入口目录布局测试"""
 
+# pyright: reportAttributeAccessIssue=false
+
 import json
 import os
 import subprocess
@@ -13,6 +15,9 @@ def test_role_main_files_are_maintained_under_role_directories() -> None:
 
     assert role_main_path("assistant").is_file()
     assert role_main_path("master").is_file()
+    for role in ("assistant", "master"):
+        assert not any(path.stem.endswith("_" + "v" + "2") for path in (ROOT / role).glob("main*.py"))
+        assert not any(path.stem.endswith("_" + "v" + "2") for path in (ROOT / role).glob("build*.sh"))
     assert not (ROOT / "main.py").exists()
 
 
@@ -22,7 +27,7 @@ def test_role_main_modules_expose_role_protocol_api() -> None:
     assistant = load_role_main_module("assistant", "assistant_role_main_module")
     master = load_role_main_module("master", "master_role_main_module")
 
-    assistant_frame = assistant.decode_frame(assistant.format_vision_frame(0, 0))
+    assistant_frame = assistant.decode_frame(assistant.format_search_velocity_frame(0, 0))
     master_frame = master.decode_frame(master.format_search_velocity_frame(0, 0))
 
     assert assistant_frame is not None
@@ -75,10 +80,7 @@ def test_role_build_scripts_generate_and_upload_role_entry(tmp_path) -> None:
             uploaded_text = uploaded.read_text(encoding="utf-8")
             assert built_text == uploaded_text
             assert "threshold_index" not in built_text
-            if role == "master":
-                assert "TASKS = (" in built_text
-            else:
-                assert "OBJECT_TASKS = (" in built_text
+            assert "OBJECT_TASKS = (" in built_text
         finally:
             master_source.write_text(original_master, encoding="utf-8")
             assistant_source.write_text(original_assistant, encoding="utf-8")
@@ -117,14 +119,14 @@ def test_role_build_scripts_copy_yolo_model_when_requested(tmp_path) -> None:
             model_path.write_bytes(original_model)
 
 
-def test_role_build_v2_scripts_generate_and_upload_v2_entry(tmp_path) -> None:
-    """! @brief v2 构建脚本读取共享标定文件并上传对应 v2 入口"""
+def test_role_build_scripts_generate_default_entry_from_shared_rules(tmp_path) -> None:
+    """! @brief 默认构建脚本读取共享标定文件并上传正式入口"""
 
     for role in ("assistant", "master"):
-        target_dir = tmp_path / (role + "-v2-device")
+        target_dir = tmp_path / (role + "-default-device")
         target_dir.mkdir()
-        script_path = ROOT / role / "build_v2.sh"
-        source = ROOT / role / "main_v2.py"
+        script_path = ROOT / role / "build.sh"
+        source = ROOT / role / "main.py"
         env = dict(os.environ)
         env["TARGET_DIR"] = str(target_dir)
 

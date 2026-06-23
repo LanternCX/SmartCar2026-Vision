@@ -1,0 +1,16 @@
+{
+    "typeCheckingMode": "basic",
+    "stubPath": "./stubs",
+    "extraPaths": [
+        "./stubs"
+    ],
+    "exclude": [
+        "stubs"
+    ],
+    "ignore": [
+        "stubs"
+    ],
+    "pythonVersion": "3.7",
+    "reportMissingModuleSource": "none",
+    "reportUnusedImport": "none"
+}

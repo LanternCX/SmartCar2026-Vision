@@ -1,54 +1,48 @@
-"""! @file main.py
-@brief OpenART Vision master 主车物体搜索视觉入口
-@details 负责接收 RT1021 视觉上下文, 输出搜索速度, 并在 hook 条件满足时可靠回报事件
-"""
+"""主车 OpenART 视觉入口 v2."""
 
+# pyright: reportAttributeAccessIssue=false
+
+import image
+import sensor
+import tf
 import time
+from machine import UART
+import gc
 
-try:
-    import image as omv_image
-except ImportError:
-    omv_image = None
+# 是否启用主车调试画面显示
+MASTER_DEBUG_DISPLAY_ENABLED = False
 
-try:
-    import sensor
-except ImportError:
-    sensor = None
-
-try:
-    import tf
-except ImportError:
-    tf = None
-
-try:
-    from machine import UART
-except ImportError:
-    UART = None
-
-
-# OpenART 与 RT1021 通信使用的串口编号。
+# 板载串口编号, 用于和主控通信
 UART_ID = 2
-# 串口波特率，需要与车端 UART6 保持一致。
+# 串口波特率, 单位为 bit/s
 UART_BAUDRATE = 115200
-# 摄像头固定曝光时间，单位为微秒。
+# 图像曝光时间, 单位为 us
 EXP_TIME_US = 500
-# TARGET_FOUND 未确认时的重复发送间隔，单位为毫秒。
+# 可靠消息重发间隔, 单位为 ms
 RELIABLE_RESEND_INTERVAL_MS = 100
 
-# 固定帧模式编号分组。
+# 高频速度数据流与可靠协议模式编号分组
 class Mode:
     UDP = 0x01
     TCP = 0x02
     ACK = 0x03
 
 
-# 主车视觉协议 topic 编号分组。
+# 主车视觉协议 topic 编号分组
 class Topic:
     LOCAL_VISION_VELOCITY = 0x01
-    MASTER_VISION_HOOK_SYNC = 0x10
+    LOCAL_VISION_CONTROL = 0x04
+    MASTER_VISION_TASK_SYNC = 0x10
     MASTER_VISION_EVENT_REPORT = 0x12
 
-# 主车状态编号分组。
+
+class LocalVisionControl:
+    PAUSE = 1
+    RESUME = 2
+    RETURN_LINE_GATE_ON = 3
+    RETURN_LINE_GATE_OFF = 4
+
+# 主车状态编号分组
 class State:
     SEARCH_OBJECT = 1
     ORBITING = 2
@@ -57,13 +51,13 @@ class State:
     RETURN_GARAGE_LINE = 7
 
 
-# 主车目标编号分组。
+# 主车目标编号分组
 class Target:
     OBJECT = 1
     EDGE_LINE = 3
 
 
-# 主车任务编号分组。
+# 主车任务配置编号分组
 class Task:
     SEARCH = 1
     TRANSPORT = 2
@@ -72,132 +66,314 @@ class Task:
     RETURN_GARAGE_LINE = 5
 
 
-# 主车事件编号分组。
+# 主车事件编号分组
 class Event:
     TARGET_FOUND = 6
     ALIGNED = 7
     ARRIVED = 8
     RETURN_LINE_ALIGNED = 10
-    RETURN_GARAGE_FINISHED = 12
 
 
-# 固定帧 body 槽位长度。
+# ROI 跟踪失败原因编号分组
+class TrackFailureReason:
+    NONE = 0
+    NO_CANDIDATE = 1
+    OUT_OF_WINDOW = 2
+    AREA_JUMP = 3
+    EDGE_TOUCH = 4
+    POOR_SEPARATION = 5
+
+
+# 协议消息体长度, 单位为 byte
 FRAME_BODY_SIZE = 10
+# 协议帧头标记
 FRAME_HEAD = 0xA5
-# 固定帧总长度。
+# 协议整帧长度, 单位为 byte
 FRAME_SIZE = 15
-# 物体识别开关。False 使用色块阈值，True 使用 YOLO。
+
+# 是否启用 YOLO。False 时目标相关流程统一使用色块识别。
 OBJECT_DETECTION_USE_YOLO = False
-# YOLO 模型文件路径，对应部署到 OpenART SD 卡根目录的模型文件。
+# YOLO 模型文件路径
 YOLO_MODEL_PATH = "/sd/yolo.tflite"
-# YOLO 检测前对图像做缩放复制，与模型验证脚本保持一致。
+# YOLO 输入图像复制缩放比例
 YOLO_IMAGE_COPY_SCALE = 0.75
-# 物体识别最低置信度。
-YOLO_MIN_SCORE = 0.90
-# YOLO 标签编号映射。
+# YOLO 检测最小置信度阈值
+YOLO_MIN_SCORE = 0.50
+# 纯 YOLO 阶段两次检测之间跳过的帧数间隔
+MASTER_YOLO_ONLY_INTERVAL_FRAMES = 5
+# YOLO 未命中后跳过重新尝试的帧数
+MASTER_YOLO_RETRY_SKIP_FRAMES = 10
+# YOLO 输出标签顺序, 需与模型保持一致
 YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
-# 红色候选目标的最小面积，小于该值不会触发找到事件。
+# 视觉控制的参考帧率, 用于按时间尺度理解速度响应
+VISION_REFERENCE_FPS = 25
+
+# 目标最小有效面积阈值
 OBJECT_MIN_AREA = 50.0
-# 主车搜索目标丢失时输出的配置横向速度。
+# 搜索阶段无目标时的默认横向速度
 MASTER_MISSING_SEARCH_VX = 0.0
-# 主车搜索目标丢失时输出的配置纵向速度。
-MASTER_MISSING_SEARCH_VY = 2
-# 主车搜索横向速度 P 环增益。
+# 搜索阶段无目标时的默认纵向速度
+MASTER_MISSING_SEARCH_VY = 2.0
+# 搜索阶段横向控制比例系数
 MASTER_SEARCH_KP_X = 0.05
-# 主车搜索纵向速度 P 环增益。
+# 搜索阶段纵向控制比例系数
 MASTER_SEARCH_KP_Y = -0.15
-# 主车搜索误差超出死区后的最小有效速度量。
+# 搜索阶段最小输出速度
 MASTER_SEARCH_MIN_SPEED = 2.0
-# 主车搜索横向误差死区, 单位为像素。
+# 搜索阶段横向死区, 单位为 px
 MASTER_SEARCH_DEADZONE_X_PX = 15.0
-# 主车搜索纵向误差死区, 单位为像素。
+# 搜索阶段纵向死区, 单位为 px
 MASTER_SEARCH_DEADZONE_Y_PX = 8.0
-# 目标中心允许偏离搜索目标点的最大横向像素误差。
+# 目标横向对齐容差, 单位为 px
 OBJECT_X_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_X_PX
-# 目标底边允许偏离搜索目标点的最大纵向像素误差。
+# 目标纵向对齐容差, 单位为 px
 OBJECT_Y_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_Y_PX
-# 连续满足面积与位置条件多少帧后确认找到目标。
+# 判定目标稳定所需连续帧数
 OBJECT_STABLE_FRAMES = 3
-# 主车搜索横向速度限幅。
+
+# 允许在两次 YOLO 之间连续使用 ROI 的最大帧数。
+ROI_TRACKING_MAX_FRAMES = 60
+# ROI 连续失手达到该值后立即回退到 YOLO。
+ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 3
+# 动态阈值健康检查连续失败达到该值后才触发重标定。
+DYNAMIC_THRESHOLD_REFRESH_FAILURE_FRAMES = 2
+# 新阈值连续通过确认达到该值后才正式替换。
+DYNAMIC_THRESHOLD_REFRESH_CONFIRM_FRAMES = 2
+# 搜索阶段横向速度上限
 MASTER_SEARCH_MAX_VX = 5.0
-# 主车搜索纵向速度限幅。
+# 搜索阶段纵向速度上限
 MASTER_SEARCH_MAX_VY = 5.0
-# 主车绕行修正横向速度 P 环增益。
+
+# 绕目标阶段横向速度修正比例系数
 MASTER_ORBIT_KP_X = 0.05
-# 主车绕行修正纵向速度 P 环增益。
+# 绕目标阶段纵向速度修正比例系数
 MASTER_ORBIT_KP_Y = -0.30
-# 主车绕行修正误差超出死区后的最小有效速度量。
-MASTER_ORBIT_MIN_SPEED = 0
-# 主车绕行修正横向误差死区, 单位为像素。
+# 绕目标阶段最小输出速度
+MASTER_ORBIT_MIN_SPEED = 0.0
+# 绕目标阶段横向死区, 单位为 px
 MASTER_ORBIT_DEADZONE_X_PX = 15.0
-# 主车绕行修正纵向误差死区, 单位为像素。
+# 绕目标阶段纵向死区, 单位为 px
 MASTER_ORBIT_DEADZONE_Y_PX = 8.0
-# 主车绕行修正横向速度限幅。
+# 绕目标阶段横向速度上限
 MASTER_ORBIT_MAX_VX = 5.0
-# 主车绕行修正纵向速度限幅。
+# 绕目标阶段纵向速度上限
 MASTER_ORBIT_MAX_VY = 5.0
-# 主车搜索目标点横向像素坐标。当前图像为 QVGA 320x240, 默认中线 x=160; 若修改图像宽度请同步调整。
+
+# 搜索阶段期望的图像横向位置, 单位为 px
 MASTER_SEARCH_TARGET_X_PX = 160.0
-# 主车搜索目标点纵向像素坐标。当前图像为 QVGA 320x240, 默认底边 y=240; 若修改图像高度请同步调整。
+# 搜索阶段期望的图像纵向位置, 单位为 px
 MASTER_SEARCH_TARGET_Y_PX = 210.0
-# 主车绕行修正目标点横向像素坐标。
+# 绕目标阶段期望的图像横向位置, 单位为 px
 MASTER_ORBIT_TARGET_X_PX = 160.0
-# 主车绕行修正目标点纵向像素坐标。
+# 绕目标阶段期望的图像纵向位置, 单位为 px
 MASTER_ORBIT_TARGET_Y_PX = 210.0
-# 主车搬运入口目标点纵向像素坐标。当前图像为 QVGA 320x240, 推行前对正使用底边 y=240。
+# 主车运输阶段期望的图像纵向位置, 单位为 px
 MASTER_TRANSPORT_TARGET_Y_PX = 240.0
-# 主车收尾判定环带外扩像素。
+
+# 搬运收尾环带外扩边距, 单位为 px
 FINISH_HOOK_RING_EXPAND_PX = 5
-# 主车收尾判定黄色占比阈值。
+# 搬运收尾黄线识别阈值
+FINISH_HOOK_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
+# 搬运收尾固定物体区域左边界比例, 以反转矫正后的图像宽度为基准
+FINISH_HOOK_FIXED_OBJECT_ROI_LEFT_RATIO = 0.25
+# 搬运收尾固定物体区域右边界比例, 以反转矫正后的图像宽度为基准
+FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO = 0.75
+# 搬运收尾固定物体区域顶部比例, 区域覆盖反转矫正后图像的底部三分之一
+FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO = 2.0 / 3.0
+# 搬运收尾黄色接触占比阈值
 FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.1
+# 搬运收尾脱离接触后的稳定帧数
 FINISH_HOOK_STABLE_FRAMES = 2
-# 可靠包序号的环形范围大小。
+
+# 协议约定的图像宽度, 单位为 px
+PROTOCOL_IMAGE_WIDTH = 320
+# 协议约定的图像高度, 单位为 px
+PROTOCOL_IMAGE_HEIGHT = 240
+
+# 帧序号环形空间大小, 取满 1 字节范围
 SEQ_RING_SIZE = 256
-# 判断环形序号新旧关系使用的半环长度。
+# 半环阈值, 用于比较环形序号前后关系
 SEQ_HALF_RING = 128
 
-# ChromaForge 导出的色块合并间距。
-OBJECT_BLOB_MERGE_MARGIN = 0
-# ChromaForge 导出的最小识别色块面积。
-OBJECT_BLOB_PIXELS_THRESHOLD = 200
-# ChromaForge 导出的最小识别目标面积。
-OBJECT_BLOB_AREA_THRESHOLD = 200
-# 红色沙包候选目标的颜色阈值，格式为 OpenART LAB 阈值。
-TASKS = (
-    ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 90, True),
-    ('tennis', ((71, 95, -54, -33, 64, 95),), 5, 20, 30, 50, True),
-    ('blue', ((32, 70, -22, 14, -61, -33),), 5, 20, 25, 60, True),
-    ('white', ((33, 78, -11, 4, -22, 3),), 5, 20, 50, 80, True),
-    ('brown', ((16, 48, 0, 20, 10, 31),), 3, 20, 50, 100, True),
+# 目标相关任务的筛选参数配置
+OBJECT_TASKS = (
+    ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 220, True),
 )
-# 收尾判定使用的黄色阈值，格式为 OpenART LAB 阈值。
-FINISH_HOOK_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
-# 回库黄线使用的黄色阈值，格式为 OpenART LAB 阈值。
-RETURN_GARAGE_LINE_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
-# 回库黄线采样半宽, 单位像素。
-RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX = 5
-# 回库黄线目标 Y 坐标。
-RETURN_GARAGE_LINE_TARGET_Y_PX = 220.0
-# 回库黄线 Y 死区, 单位像素。
-RETURN_GARAGE_LINE_DEADZONE_Y_PX = 4.0
-# 回库黄线对正容差, 单位像素。
-RETURN_GARAGE_LINE_ALIGN_TOLERANCE_PX = 4.0
-# 回库黄线纵向速度 P 环增益。
-RETURN_GARAGE_LINE_KP_Y = -0.05
-# 回库黄线纵向速度限幅。
-RETURN_GARAGE_LINE_MAX_VY = 5.0
-# 回库黄线纵向最小有效速度。
-RETURN_GARAGE_LINE_MIN_SPEED = 0.0
-# 回库黄线参与中心计算的最大厚度, 单位像素。
-RETURN_GARAGE_LINE_MAX_THICKNESS_PX = 30
-# 回库黄线候选点左右水平联通黄线的最小合计长度, 单位像素。
-RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
-# 主车物体识别调试绘制总开关。
-MASTER_OBJECT_DEBUG_DRAW_ENABLED = True
 
+# 有符号 16 位整数下界
 _I16_MIN = -32768
+# 有符号 16 位整数上界
 _I16_MAX = 32767
+# 浮点数打包为定点数时使用的缩放倍数
 _SCALE = 1000
+
+
+# 当前主车视觉运行态统一集中在单一状态对象里.
+class RuntimeState:
+    def __init__(self):
+        self.current_task = None
+        self.last_task_context_id = None
+        self.stable_frame_count = 0
+        self.next_event_seq = 1
+        self.pending_event = None
+        self.pending_event_last_sent_ms = None
+        self.pending_local_vision_control = None
+        self.pending_local_vision_control_last_sent_ms = None
+        self.next_local_vision_control_seq = 1
+        self.local_vision_control_paused = False
+        self.return_line_gate_enabled = False
+        self.last_event_context_id = None
+        self.finish_contact_seen = False
+        self.entry_yolo_pending = False
+        self.rx_buffer = b""
+        self.yolo_net = None
+        self.uart_device = None
+        self.current_yolo_candidates = ()
+        self.current_object_candidates = ()
+        self.current_image = None
+        self.current_image_width = PROTOCOL_IMAGE_WIDTH
+        self.current_image_height = PROTOCOL_IMAGE_HEIGHT
+        self.current_frame_interval_ms = 0.0
+        self.current_detection_source = "miss"
+        self.yolo_only_skip_frames_remaining = 0
+        self.yolo_only_skip_active_for_frame = False
+        self.yolo_retry_skip_frames_remaining = 0
+        self.yolo_retry_skip_active_for_frame = False
+        self.clear_track()
+
+    def clear_track(self):
+        self.track_task_name = None
+        self.track_object_id = 0
+        self.track_center_x = None
+        self.track_bottom_y = None
+        self.track_area = None
+        self.track_rect = None
+        self.track_velocity_x = 0.0
+        self.track_velocity_bottom_y = 0.0
+        self.track_source = None
+        self.track_roi_success_frames = 0
+        self.track_roi_failure_frames = 0
+        self.track_frames_since_yolo = 0
+        self.track_confidence = 0
+        self.track_failure_reason = TrackFailureReason.NONE
+        self.track_predicted_center_x = None
+        self.track_predicted_bottom_y = None
+        self.track_predicted_roi = None
+        self.track_dynamic_threshold = None
+        self.track_dynamic_threshold_rect = None
+        self.track_dynamic_threshold_generation = 0
+        self.track_dynamic_threshold_failure = None
+        self.track_dynamic_threshold_health_failures = 0
+        self.track_pending_dynamic_threshold = None
+        self.track_pending_dynamic_threshold_ok_frames = 0
+        self.current_second_total_frames = 0
+        self.current_second_yolo_frames = 0
+        self.current_second_roi_frames = 0
+        self.current_second_predict_frames = 0
+        self.current_second_miss_frames = 0
+        self.current_second_roi_fallbacks = 0
+        self.current_second_roi_attempt_frames = 0
+        self.current_second_roi_success_frames = 0
+        self.last_second_total_frames = 0
+        self.last_second_yolo_frames = 0
+        self.last_second_roi_frames = 0
+        self.last_second_predict_frames = 0
+        self.last_second_miss_frames = 0
+        self.last_second_roi_fallbacks = 0
+        self.last_second_roi_attempt_frames = 0
+        self.last_second_roi_success_frames = 0
+        self.frame_stats_window_start_ms = None
+
+    def _roll_frame_stats(self, now_ms):
+        if self.frame_stats_window_start_ms is None:
+            self.frame_stats_window_start_ms = int(now_ms)
+            return
+        if int(now_ms) - int(self.frame_stats_window_start_ms) < 1000:
+            return
+        self.last_second_total_frames = int(self.current_second_total_frames)
+        self.last_second_yolo_frames = int(self.current_second_yolo_frames)
+        self.last_second_roi_frames = int(self.current_second_roi_frames)
+        self.last_second_predict_frames = int(self.current_second_predict_frames)
+        self.last_second_miss_frames = int(self.current_second_miss_frames)
+        self.last_second_roi_fallbacks = int(self.current_second_roi_fallbacks)
+        self.last_second_roi_attempt_frames = int(self.current_second_roi_attempt_frames)
+        self.last_second_roi_success_frames = int(self.current_second_roi_success_frames)
+        self.current_second_total_frames = 0
+        self.current_second_yolo_frames = 0
+        self.current_second_roi_frames = 0
+        self.current_second_predict_frames = 0
+        self.current_second_miss_frames = 0
+        self.current_second_roi_fallbacks = 0
+        self.current_second_roi_attempt_frames = 0
+        self.current_second_roi_success_frames = 0
+        self.frame_stats_window_start_ms = int(now_ms)
+
+    def record_frame_source(self, source, now_ms=None):
+        if now_ms is None:
+            now_ms = default_now_ms()
+        self._roll_frame_stats(now_ms)
+        self.current_second_total_frames += 1
+        if source == "yolo":
+            self.current_second_yolo_frames += 1
+        elif source == "roi":
+            self.current_second_roi_frames += 1
+        elif source == "predict":
+            self.current_second_predict_frames += 1
+        else:
+            self.current_second_miss_frames += 1
+
+    def record_roi_fallback(self, now_ms=None):
+        if now_ms is None:
+            now_ms = default_now_ms()
+        self._roll_frame_stats(now_ms)
+        self.current_second_roi_fallbacks += 1
+
+    def record_roi_attempt(self, success, now_ms=None):
+        if now_ms is None:
+            now_ms = default_now_ms()
+        self._roll_frame_stats(now_ms)
+        self.current_second_roi_attempt_frames += 1
+        if success:
+            self.current_second_roi_success_frames += 1
+
+    def reset(self, next_event_seq=1):
+        self.current_task = None
+        self.last_task_context_id = None
+        self.stable_frame_count = 0
+        self.next_event_seq = int(next_event_seq) % SEQ_RING_SIZE
+        self.pending_event = None
+        self.pending_event_last_sent_ms = None
+        self.pending_local_vision_control = None
+        self.pending_local_vision_control_last_sent_ms = None
+        self.next_local_vision_control_seq = 1
+        self.local_vision_control_paused = False
+        self.return_line_gate_enabled = False
+        self.last_event_context_id = None
+        self.finish_contact_seen = False
+        self.entry_yolo_pending = False
+        self.rx_buffer = b""
+        self.yolo_net = None
+        self.uart_device = None
+        self.current_yolo_candidates = ()
+        self.current_object_candidates = ()
+        self.current_image = None
+        self.current_image_width = PROTOCOL_IMAGE_WIDTH
+        self.current_image_height = PROTOCOL_IMAGE_HEIGHT
+        self.current_frame_interval_ms = reference_frame_interval_ms()
+        self.current_detection_source = "miss"
+        self.yolo_only_skip_frames_remaining = 0
+        self.yolo_only_skip_active_for_frame = False
+        self.yolo_retry_skip_frames_remaining = 0
+        self.yolo_retry_skip_active_for_frame = False
+        self.clear_track()
+
+
+state = RuntimeState()
+
+
+def reset_runtime_state(next_event_seq=1):
+    """重置主车视觉运行态."""
+    state.reset(next_event_seq)
 
 
 def _require_u8(value):
@@ -229,6 +405,34 @@ def _unpack_i16(body, offset):
     return value
 
 
+def _pack_i8(value):
+    value = int(value)
+    if value < -128 or value > 127:
+        raise ValueError("i8 out of range")
+    if value < 0:
+        value += 0x100
+    return value
+
+
+def _unpack_i8(body, offset):
+    value = int(body[offset])
+    if value >= 0x80:
+        value -= 0x100
+    return value
+
+
+def _pack_threshold(threshold):
+    if threshold is None:
+        threshold = (0, 0, 0, 0, 0, 0)
+    if len(threshold) != 6:
+        raise ValueError("threshold must have 6 values")
+    return bytes(_pack_i8(value) for value in threshold)
+
+
+def _unpack_threshold(body, offset):
+    return tuple(_unpack_i8(body, offset + index) for index in range(6))
+
+
 def _pack_scaled(value):
     return _pack_i16(round(float(value) * _SCALE))
 
@@ -238,8 +442,6 @@ def _unpack_scaled(body, offset):
 
 
 def encode_frame(mode, topic, seq, body):
-    """! @brief 编码固定长度短帧"""
-
     mode = _require_u8(mode)
     topic = _require_u8(topic)
     seq = _require_u8(seq)
@@ -252,8 +454,6 @@ def encode_frame(mode, topic, seq, body):
 
 
 def decode_frame(frame_bytes):
-    """! @brief 解码固定长度短帧"""
-
     if isinstance(frame_bytes, memoryview):
         frame_bytes = frame_bytes.tobytes()
     elif isinstance(frame_bytes, bytearray):
@@ -276,8 +476,6 @@ def decode_frame(frame_bytes):
 
 
 def _crc8(data):
-    """! @brief 计算固定帧 CRC8"""
-
     crc = 0
     for value in data:
         crc ^= int(value)
@@ -290,8 +488,6 @@ def _crc8(data):
 
 
 def encode_velocity_body(vx, vy, omega=0.0, has_omega=False):
-    """! @brief 编码本地视觉速度 body"""
-
     return (
         _pack_scaled(vx)
         + _pack_scaled(vy)
@@ -301,8 +497,6 @@ def encode_velocity_body(vx, vy, omega=0.0, has_omega=False):
 
 
 def decode_velocity_body(body):
-    """! @brief 解码本地视觉速度 body"""
-
     return {
         "vx": _unpack_scaled(body, 0),
         "vy": _unpack_scaled(body, 2),
@@ -311,15 +505,11 @@ def decode_velocity_body(body):
     }
 
 
-def encode_master_vision_hook_sync_body(context_id, state, target, arg):
-    """! @brief 编码主车视觉同步 body"""
-
+def encode_master_vision_task_sync_body(context_id, state, target, arg):
     return bytes([_require_u8(context_id), _require_u8(state), _require_u8(target)]) + _pack_i16(arg)
 
 
-def decode_master_vision_hook_sync_body(body):
-    """! @brief 解码主车视觉同步 body"""
-
+def decode_master_vision_task_sync_body(body):
     return {
         "context_id": int(body[0]),
         "state": int(body[1]),
@@ -328,35 +518,26 @@ def decode_master_vision_hook_sync_body(body):
     }
 
 
-def encode_master_vision_event_report_body(context_id, event, value):
-    """! @brief 编码主车视觉事件回报 body"""
-
-    return bytes([_require_u8(context_id), _require_u8(event)]) + _pack_i16(value)
+def encode_master_vision_event_report_body(context_id, event, value, threshold=None):
+    return bytes([_require_u8(context_id), _require_u8(event)]) + _pack_i16(value) + _pack_threshold(threshold)
 
 
 def decode_master_vision_event_report_body(body):
-    """! @brief 解码主车视觉事件回报 body"""
-
     return {
         "context_id": int(body[0]),
         "event": int(body[1]),
         "value": _unpack_i16(body, 2),
+        "threshold": _unpack_threshold(body, 4),
     }
 
 
-def parse_sync_packet(frame_bytes):
-    """! @brief 解析 RT1021 下发的视觉上下文同步帧
-
-    @param frame_bytes 原始固定帧
-    @return 同步包字段字典, 输入无效时返回 None
-    """
-
+def parse_task_sync_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
-    if frame["mode"] != Mode.TCP or frame["topic"] != Topic.MASTER_VISION_HOOK_SYNC:
+    if frame["mode"] != Mode.TCP or frame["topic"] != Topic.MASTER_VISION_TASK_SYNC:
         return None
-    packet = decode_master_vision_hook_sync_body(frame["body"])
+    packet = decode_master_vision_task_sync_body(frame["body"])
     return {
         "reliable_seq": int(frame["seq"]),
         "context_id": int(packet["context_id"]),
@@ -366,13 +547,7 @@ def parse_sync_packet(frame_bytes):
     }
 
 
-def parse_ack_packet(frame_bytes):
-    """! @brief 解析可靠事件确认帧
-
-    @param frame_bytes 原始固定帧
-    @return 确认包字段字典, 输入无效时返回 None
-    """
-
+def parse_event_ack_packet(frame_bytes):
     frame = decode_frame(frame_bytes)
     if frame is None:
         return None
@@ -381,14 +556,30 @@ def parse_ack_packet(frame_bytes):
     return {"reliable_seq": int(frame["seq"])}
 
 
+def parse_local_vision_control_ack_packet(frame_bytes):
+    frame = decode_frame(frame_bytes)
+    if frame is None:
+        return None
+    if frame["mode"] != Mode.ACK or frame["topic"] != Topic.LOCAL_VISION_CONTROL:
+        return None
+    return {"reliable_seq": int(frame["seq"])}
+
+
+def parse_local_vision_control_packet(frame_bytes):
+    frame = decode_frame(frame_bytes)
+    if frame is None:
+        return None
+    if frame["mode"] != Mode.TCP or frame["topic"] != Topic.LOCAL_VISION_CONTROL:
+        return None
+    body = frame["body"]
+    if len(body) < 1:
+        return None
+    packet = decode_local_vision_control_body(body)
+    packet["reliable_seq"] = int(frame["seq"])
+    return packet
+
+
 def is_newer_seq(seq, last_seq):
-    """! @brief 按 0..255 半环规则判断序号是否更新
-
-    @param seq 待判断序号
-    @param last_seq 已记录序号, None 表示没有历史序号
-    @return seq 是否新于 last_seq
-    """
-
     if last_seq is None:
         return True
     diff = (int(seq) - int(last_seq)) % SEQ_RING_SIZE
@@ -396,56 +587,31 @@ def is_newer_seq(seq, last_seq):
 
 
 def default_now_ms():
-    """! @brief 读取毫秒时间戳
-
-    @return 当前毫秒时间戳
-    """
-
-    ticks_ms = getattr(time, "ticks_ms", None)
-    if ticks_ms is not None:
-        return int(ticks_ms())
+    if hasattr(time, "ticks_ms"):
+        return int(time.ticks_ms())
     return int(time.time() * 1000)
 
 
 def should_resend(now_ms, last_sent_ms, interval_ms):
-    """! @brief 判断可靠包是否到达重复发送时间
-
-    @param now_ms 当前毫秒时间戳
-    @param last_sent_ms 上次发送毫秒时间戳, None 表示尚未发送
-    @param interval_ms 重发间隔, 单位毫秒
-    @return 是否应该发送或重发
-    """
-
     if last_sent_ms is None:
         return True
     interval_ms = int(interval_ms)
     if interval_ms <= 0:
         return True
-    now_ms = int(now_ms)
-    last_sent_ms = int(last_sent_ms)
-    if now_ms < last_sent_ms:
+    if int(now_ms) < int(last_sent_ms):
         return True
-    return now_ms - last_sent_ms >= interval_ms
+    return int(now_ms) - int(last_sent_ms) >= interval_ms
 
 
 def format_ack_frame(reliable_seq):
-    """! @brief 格式化可靠包确认帧
+    return encode_frame(Mode.ACK, Topic.MASTER_VISION_TASK_SYNC, reliable_seq, b"")
 
-    @param reliable_seq 被确认的可靠包序号
-    @return ACK 短帧
-    """
 
-    return encode_frame(Mode.ACK, Topic.MASTER_VISION_HOOK_SYNC, reliable_seq, b"")
+def format_local_vision_control_ack_frame(reliable_seq):
+    return encode_frame(Mode.ACK, Topic.LOCAL_VISION_CONTROL, reliable_seq, b"")
 
 
 def format_search_velocity_frame(vx, vy):
-    """! @brief 格式化主车搜索速度数据流帧
-
-    @param vx 主车搜索横向速度控制量
-    @param vy 主车搜索纵向速度控制量
-    @return 速度短帧
-    """
-
     return encode_frame(
         Mode.UDP,
         Topic.LOCAL_VISION_VELOCITY,
@@ -454,37 +620,41 @@ def format_search_velocity_frame(vx, vy):
     )
 
 
-def format_event_frame(reliable_seq, context_id, event, value):
-    """! @brief 格式化可靠事件回报帧
+def encode_local_vision_control_body(action):
+    return bytes([_require_u8(action)])
 
-    @param reliable_seq 可靠包序号
-    @param context_id 视觉上下文编号
-    @param event 事件编号
-    @param value 事件附加值
-    @return 事件短帧
-    """
 
+def decode_local_vision_control_body(body):
+    return {"action": int(body[0])}
+
+
+def format_local_vision_control_frame(reliable_seq, action):
+    return encode_frame(
+        Mode.TCP,
+        Topic.LOCAL_VISION_CONTROL,
+        reliable_seq,
+        encode_local_vision_control_body(action),
+    )
+
+
+def format_event_frame(reliable_seq, context_id, event, value, threshold=None):
     return encode_frame(
         Mode.TCP,
         Topic.MASTER_VISION_EVENT_REPORT,
         reliable_seq,
-        encode_master_vision_event_report_body(context_id, event, value),
+        encode_master_vision_event_report_body(context_id, event, value, threshold),
     )
 
 
-def _write_all(uart, line):
-    """! @brief 向串口完整写出一帧 bytes
-
-    @param uart 目标串口对象
-    @param line 固定长度短帧
-    @return 是否完整写出整帧
-    """
-
-    if not isinstance(line, bytes):
-        line = bytes(line)
-    remaining = line
+def _write_all(frame_bytes):
+    if not isinstance(frame_bytes, bytes):
+        frame_bytes = bytes(frame_bytes)
+    remaining = frame_bytes
+    uart_device = state.uart_device
+    if uart_device is None:
+        return False
     while remaining:
-        written = uart.write(remaining)
+        written = uart_device.write(remaining)
         if written is None:
             written = len(remaining)
         written = int(written)
@@ -494,80 +664,34 @@ def _write_all(uart, line):
     return True
 
 
-def write_data_line(uart, line):
-    """! @brief 写出速度数据流短帧
-
-    @param uart 目标串口对象
-    @param line 固定长度速度短帧
-    """
-
-    _write_all(uart, line)
+def write_data_line(frame_bytes):
+    if state.local_vision_control_paused:
+        return False
+    _write_all(frame_bytes)
 
 
-def write_reliable_line(uart, line):
-    """! @brief 写出可靠短帧
-
-    @param uart 目标串口对象
-    @param line 固定长度可靠短帧
-    @return 是否完整写出整帧
-    """
-
-    return _write_all(uart, line)
+def write_reliable_line(frame_bytes):
+    return _write_all(frame_bytes)
 
 
 def _find_control_frame_start(rx_buffer):
-    """! @brief 查找视觉控制链路合法帧起点"""
-
     limit = len(rx_buffer) - FRAME_SIZE + 1
     for index in range(limit):
         frame = decode_frame(rx_buffer[index : index + FRAME_SIZE])
         if frame is None:
             continue
-        mode = frame["mode"]
-        topic = frame["topic"]
-        if mode == Mode.TCP and topic == Topic.MASTER_VISION_HOOK_SYNC:
+        if frame["mode"] == Mode.TCP and frame["topic"] == Topic.MASTER_VISION_TASK_SYNC:
             return index
-        if mode == Mode.ACK and topic == Topic.MASTER_VISION_EVENT_REPORT:
+        if frame["mode"] == Mode.TCP and frame["topic"] == Topic.LOCAL_VISION_CONTROL:
+            return index
+        if frame["mode"] == Mode.ACK and frame["topic"] == Topic.MASTER_VISION_EVENT_REPORT:
+            return index
+        if frame["mode"] == Mode.ACK and frame["topic"] == Topic.LOCAL_VISION_CONTROL:
             return index
     return -1
 
 
-def blob_rect_to_bbox(rect):
-    """! @brief 将 OpenMV 的 x,y,w,h 矩形转换为边界框
-
-    @param rect blob.rect() 返回的矩形元组
-    @return left, top, right, bottom 边界框
-    """
-
-    left, top, width, height = rect
-    return left, top, left + width, top + height
-
-
-def normalize_bbox_for_protocol(left, top, right, bottom, img_height):
-    """! @brief 将色块边界框转换到主车搜索使用的位置坐标"""
-
-    normalized_top = img_height - bottom
-    normalized_bottom = img_height - top
-    return left, normalized_top, right, normalized_bottom
-
-
-def blob_area(blob):
-    """! @brief 读取候选物体面积
-
-    @param blob 候选色块对象
-    @return 候选目标面积
-    """
-
-    area_fn = getattr(blob, "area", None)
-    if area_fn is not None:
-        return float(area_fn())
-    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-    return float((right - left) * (bottom - top))
-
-
 class YoloDetectionBlob:
-    """! @brief 让模型检测框复用现有候选接口"""
-
     def __init__(self, left, top, right, bottom, label, score):
         self._left = float(left)
         self._top = float(top)
@@ -586,53 +710,56 @@ class YoloDetectionBlob:
     def cx(self):
         return (self._left + self._right) / 2.0
 
-    def cy(self):
-        return (self._top + self._bottom) / 2.0
+    def area(self):
+        return max(0.0, self._right - self._left) * max(0.0, self._bottom - self._top)
+
+
+class PredictedBlob:
+    def __init__(self, left, top, right, bottom):
+        self._left = float(left)
+        self._top = float(top)
+        self._right = float(right)
+        self._bottom = float(bottom)
+
+    def rect(self):
+        left = int(round(self._left))
+        top = int(round(self._top))
+        right = int(round(self._right))
+        bottom = int(round(self._bottom))
+        return left, top, right - left, bottom - top
+
+    def cx(self):
+        return (self._left + self._right) / 2.0
 
     def area(self):
         return max(0.0, self._right - self._left) * max(0.0, self._bottom - self._top)
 
-    def min_corners(self):
-        return (
-            (self._left, self._top),
-            (self._right, self._top),
-            (self._right, self._bottom),
-            (self._left, self._bottom),
-        )
+
+def blob_rect_to_bbox(rect):
+    left, top, width, height = rect
+    return left, top, left + width, top + height
 
 
-def blob_center_y(blob):
-    """! @brief 读取候选物体中心 y 坐标"""
+def normalize_bbox_for_protocol(left, top, right, bottom):
+    image_height = state.current_image_height
+    normalized_top = image_height - bottom
+    normalized_bottom = image_height - top
+    return left, normalized_top, right, normalized_bottom
 
-    cy_fn = getattr(blob, "cy", None)
-    if cy_fn is not None:
-        return float(cy_fn())
-    _, top, _, bottom = blob_rect_to_bbox(blob.rect())
-    return (float(top) + float(bottom)) / 2.0
+
+def blob_area(blob):
+    return float(blob.area())
 
 
 def blob_max_side_length(blob):
-    """! @brief 读取候选物体外接框的最大边长"""
-
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     return max(float(right - left), float(bottom - top))
 
 
-def task_thresholds(thresholds):
-    """! @brief 统一读取单 LAB 与多 LAB 任务配置"""
-
-    if len(thresholds) == 6 and not isinstance(thresholds[0], (tuple, list)):
-        return (thresholds,)
-    return thresholds
-
-
 def object_task_parts(task):
-    """! @brief 兼容读取旧版与新版找物体任务配置"""
-
-    if len(task) >= 7:
+    if len(task) >= 7 and isinstance(task[1], (tuple, list)):
         return (
             task[0],
-            task_thresholds(task[1]),
             int(task[2]),
             int(task[3]),
             int(task[4]),
@@ -642,107 +769,118 @@ def object_task_parts(task):
     if len(task) >= 6:
         return (
             task[0],
-            task_thresholds(task[1]),
+            int(task[1]),
             int(task[2]),
             int(task[3]),
-            int(task[4]),
-            0,
+            max(0, int(task[4])),
             bool(task[5]),
         )
     if len(task) >= 5:
         return (
             task[0],
-            task_thresholds(task[1]),
+            int(task[1]),
             int(task[2]),
             int(task[3]),
-            int(task[4]),
             0,
-            True,
+            bool(task[4]),
         )
     return (
         task[0],
-        task_thresholds(task[1]),
-        OBJECT_BLOB_MERGE_MARGIN,
-        OBJECT_BLOB_PIXELS_THRESHOLD,
-        OBJECT_BLOB_AREA_THRESHOLD,
+        0,
+        0,
+        0,
         0,
         True,
     )
 
 
-def object_task_id(task_name):
-    """! @brief 根据任务名称返回物体编号"""
+def object_task_thresholds(task):
+    if len(task) < 7 or not isinstance(task[1], (tuple, list)):
+        return ()
+    thresholds = task[1]
+    if len(thresholds) == 6 and not isinstance(thresholds[0], (tuple, list)):
+        return (tuple(thresholds),)
+    return tuple(tuple(threshold) for threshold in thresholds)
 
-    index = 1
-    for task in TASKS:
+
+def object_task_id(task_name):
+    for index, task in enumerate(OBJECT_TASKS, 1):
         if task[0] == task_name:
             return index
-        index += 1
     return 0
 
 
-def load_yolo_model():
-    """! @brief 在开启开关时加载 YOLO 模型"""
-
-    if not OBJECT_DETECTION_USE_YOLO or tf is None:
-        return None
-    return tf.load(YOLO_MODEL_PATH)
-
-
-def _copy_image_for_yolo(img):
-    """! @brief 生成 YOLO 推理使用的图像副本"""
-
-    copy_fn = getattr(img, "copy", None)
-    if copy_fn is None:
-        return img
-    return copy_fn(YOLO_IMAGE_COPY_SCALE, 1)
+def current_blob_task_name():
+    if state.track_task_name is not None:
+        return state.track_task_name
+    if OBJECT_TASKS:
+        return OBJECT_TASKS[0][0]
+    return None
 
 
-def _image_width(img):
-    """! @brief 读取图像宽度"""
-
-    width_fn = getattr(img, "width", None)
-    if width_fn is not None:
-        return float(width_fn())
-    return 320.0
+def _object_task_thresholds(task_name):
+    for task in OBJECT_TASKS:
+        if task[0] == task_name:
+            return object_task_thresholds(task)
+    return ()
 
 
-def _image_height(img):
-    """! @brief 读取图像高度"""
-
-    height_fn = getattr(img, "height", None)
-    if height_fn is not None:
-        return float(height_fn())
-    return 240.0
+def _object_task_config(task_name):
+    for task in OBJECT_TASKS:
+        if task[0] == task_name:
+            return object_task_parts(task)
+    return None
 
 
-def _label_name(label):
-    """! @brief 返回 YOLO 标签名"""
+def _find_blobs_with_task_config(img, thresholds, pixels_threshold, area_threshold, merge_margin, roi=None):
+    try:
+        return img.find_blobs(
+            list(thresholds),
+            pixels_threshold=pixels_threshold,
+            area_threshold=1,
+            merge=True,
+            roi=roi,
+            margin=max(0, int(merge_margin)),
+        )
+    except TypeError:
+        try:
+            return img.find_blobs(
+                list(thresholds),
+                pixels_threshold=pixels_threshold,
+                area_threshold=1,
+                merge=True,
+                roi=roi,
+            )
+        except TypeError:
+            return img.find_blobs(
+                list(thresholds),
+                pixels_threshold=pixels_threshold,
+                area_threshold=1,
+                merge=True,
+            )
 
+
+def label_name(label):
     label = int(label)
     if 0 <= label < len(YOLO_LABELS):
         return YOLO_LABELS[label]
     return "unknown"
 
 
-def _build_yolo_candidates(img, yolo_net=None):
-    """! @brief 从 YOLO 检测结果生成物体候选"""
-
-    net = yolo_net
+def yolo_detect(img):
+    net = state.yolo_net
     if net is None:
-        net = load_yolo_model()
-    if net is None or tf is None:
-        return []
-    detect_img = _copy_image_for_yolo(img)
-    image_width = _image_width(img)
-    image_height = _image_height(img)
-    allowed_task_names = {task[0] for task in TASKS}
+        raise RuntimeError("yolo_net not loaded")
+    detect_img = img.copy(YOLO_IMAGE_COPY_SCALE, 1)
+    image_width = float(img.width())
+    image_height = float(img.height())
+    allowed_task_names = {task[0] for task in OBJECT_TASKS}
     candidates = []
-    for detected in tf.detect(net, detect_img):
+    for detected in tf.detect(net, detect_img):  # pyright: ignore[reportCallIssue]
         x1, y1, x2, y2, label, score = detected
         if float(score) <= float(YOLO_MIN_SCORE):
             continue
-        task_name = _label_name(label)
+        task_name = label_name(label)
         if task_name not in allowed_task_names:
             continue
         left = float(x1) * image_width
@@ -752,113 +890,476 @@ def _build_yolo_candidates(img, yolo_net=None):
         if right <= left or bottom <= top:
             continue
         blob = YoloDetectionBlob(left, top, right, bottom, label, score)
+        if blob.area() < float(OBJECT_MIN_AREA):
+            continue
         _, _, _, protocol_bottom = normalize_bbox_for_protocol(
-            left, top, right, bottom, image_height
+            left,
+            top,
+            right,
+            bottom,
         )
         candidates.append((task_name, blob.cx(), protocol_bottom, blob.area(), blob))
     return candidates
-
-
-def _find_blobs_with_task_config(
-    img, thresholds, pixels_threshold, area_threshold, merge_margin
-):
-    """! @brief 按当前任务配置调用板端找色块接口"""
-
-    try:
-        return img.find_blobs(
-            list(thresholds),
-            pixels_threshold=pixels_threshold,
-            area_threshold=1,
-            merge=True,
-            margin=max(0, int(merge_margin)),
-        )
-    except TypeError:
-        return img.find_blobs(
-            list(thresholds),
-            pixels_threshold=pixels_threshold,
-            area_threshold=1,
-            merge=True,
-        )
-
-
-def _blob_code(blob):
-    """! @brief 读取合并色块的颜色码"""
-
-    code_fn = getattr(blob, "code", None)
-    if code_fn is not None:
-        return int(code_fn())
-    try:
-        return int(blob[8])
-    except Exception:
+def _tracked_search_roi():
+    window = _tracked_target_window()
+    if window is None:
         return None
+    roi_left = max(0, int(window[4]))
+    roi_top = max(0, int(window[5]))
+    roi_right = min(int(state.current_image_width), int(window[6]))
+    roi_bottom = min(int(state.current_image_height), int(window[7]))
+    if roi_right <= roi_left or roi_bottom <= roi_top:
+        return None
+    return (roi_left, roi_top, roi_right - roi_left, roi_bottom - roi_top)
 
 
-def _blob_matches_required_thresholds(blob, threshold_count, require_all_thresholds):
-    """! @brief 判断色块是否满足当前任务的颜色簇命中要求"""
+def _build_dynamic_blob_object_candidates(img, use_tracking_roi=True):
+    task_name = state.track_task_name
+    if task_name is None and not use_tracking_roi:
+        task_name = current_blob_task_name()
+    if task_name is None:
+        return ()
+    config = _object_task_config(task_name)
+    if config is None:
+        return ()
+    (
+        _task_name,
+        merge_margin,
+        pixels_threshold,
+        area_threshold,
+        max_side_length,
+        _require_all_thresholds,
+    ) = config
+    thresholds = _object_task_thresholds(task_name)
+    if not thresholds and state.track_dynamic_threshold is not None:
+        thresholds = (state.track_dynamic_threshold,)
+    if not thresholds:
+        return ()
+    blobs = _find_blobs_with_task_config(
+        img,
+        thresholds,
+        pixels_threshold,
+        area_threshold,
+        merge_margin,
+        _tracked_search_roi() if use_tracking_roi else None,
+    )
+    candidates = []
+    for blob in blobs:
+        if blob_area(blob) < float(area_threshold):
+            continue
+        if int(max_side_length) > 0 and blob_max_side_length(blob) > float(max_side_length):
+            continue
+        left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+        _, _, _, protocol_bottom = normalize_bbox_for_protocol(left, top, right, bottom)
+        candidates.append((task_name, blob.cx(), protocol_bottom, blob_area(blob), blob))
+    return tuple(candidates)
 
-    if int(threshold_count) <= 1 or not bool(require_all_thresholds):
-        return True
-    code = _blob_code(blob)
-    if code is None:
-        return True
-    expected_code = (1 << int(threshold_count)) - 1
-    return (code & expected_code) == expected_code
+
+def _tracked_rect():
+    rect = state.track_rect
+    if rect is None:
+        return None
+    left, top, right, bottom = rect  # pyright: ignore[reportGeneralTypeIssues]
+    return float(left), float(top), float(right), float(bottom)
 
 
-def blob_bbox_overlaps(left, top, right, bottom, other_blob):
-    """! @brief 判断两个候选框是否存在有效重叠"""
+def _tracked_target_window():
+    rect = _tracked_rect()
+    if rect is None:
+        return None
+    if state.track_center_x is None or state.track_bottom_y is None:
+        return None
+    left, top, right, bottom = rect
+    width = max(1.0, float(right) - float(left))
+    height = max(1.0, float(bottom) - float(top))
+    predicted_center_x = float(state.track_center_x) + float(state.track_velocity_x)
+    predicted_bottom_y = float(state.track_bottom_y) + float(state.track_velocity_bottom_y)
+    tolerance_x = max(float(OBJECT_X_TOLERANCE_PX) * 2.0, width)
+    tolerance_y = max(float(OBJECT_Y_TOLERANCE_PX) * 2.0, height)
+    roi_left = predicted_center_x - width * 1.5
+    roi_right = predicted_center_x + width * 1.5
+    roi_top = float(state.current_image_height) - predicted_bottom_y - height * 1.5
+    roi_bottom = roi_top + height * 3.0
+    state.track_predicted_center_x = predicted_center_x
+    state.track_predicted_bottom_y = predicted_bottom_y
+    state.track_predicted_roi = (roi_left, roi_top, roi_right, roi_bottom)
+    return (
+        predicted_center_x,
+        predicted_bottom_y,
+        tolerance_x,
+        tolerance_y,
+        roi_left,
+        roi_top,
+        roi_right,
+        roi_bottom,
+    )
 
-    other_left, other_top, other_right, other_bottom = blob_rect_to_bbox(
-        other_blob.rect()
+
+def _candidate_tracking_failure_reason(candidate):
+    window = _tracked_target_window()
+    if window is None:
+        return TrackFailureReason.OUT_OF_WINDOW
+    (
+        predicted_center_x,
+        predicted_bottom_y,
+        tolerance_x,
+        tolerance_y,
+        roi_left,
+        roi_top,
+        roi_right,
+        roi_bottom,
+    ) = window
+    _task_name, center_x, bottom_y, area, blob = candidate
+    if abs(float(center_x) - predicted_center_x) > tolerance_x:
+        return TrackFailureReason.OUT_OF_WINDOW
+    if abs(float(bottom_y) - predicted_bottom_y) > tolerance_y:
+        return TrackFailureReason.OUT_OF_WINDOW
+    track_area = state.track_area
+    if track_area is not None and float(track_area) > 0.0:
+        area_ratio = float(area) / float(track_area)
+        if area_ratio < 0.5 or area_ratio > 2.0:
+            return TrackFailureReason.AREA_JUMP
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    if (
+        float(left) <= roi_left
+        or float(right) >= roi_right
+        or float(top) <= roi_top
+        or float(bottom) >= roi_bottom
+    ):
+        return TrackFailureReason.EDGE_TOUCH
+    return TrackFailureReason.NONE
+
+
+def _candidate_hits_roi_window(candidate):
+    return _candidate_tracking_failure_reason(candidate) == TrackFailureReason.NONE
+
+
+def _tracked_candidate_sort_key(candidate):
+    window = _tracked_target_window()
+    if window is None:
+        return 0.0, 0.0
+    predicted_center_x, predicted_bottom_y, _, _, _, _, _, _ = window
+    _task_name, center_x, bottom_y, area, _blob = candidate
+    track_area = state.track_area
+    if track_area is None:
+        track_area = 0.0
+    return (
+        abs(float(center_x) - predicted_center_x) + abs(float(bottom_y) - predicted_bottom_y),
+        abs(float(area) - float(track_area)),
+    )
+
+
+def _clamp_tracking_value(value, previous_value, max_delta):
+    value = float(value)
+    previous_value = float(previous_value)
+    max_delta = abs(float(max_delta))
+    if value > previous_value + max_delta:
+        return previous_value + max_delta
+    if value < previous_value - max_delta:
+        return previous_value - max_delta
+    return value
+
+
+def _filter_candidate_by_track(candidate):
+    if state.track_rect is None:
+        return candidate
+    task_name, center_x, bottom_y, area, blob = candidate
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    width = max(1.0, float(right) - float(left))
+    height = max(1.0, float(bottom) - float(top))
+    filtered_center_x = _clamp_tracking_value(
+        center_x,
+        state.track_center_x,
+        max(float(OBJECT_X_TOLERANCE_PX) * 2.0, width),
+    )
+    filtered_bottom_y = _clamp_tracking_value(
+        bottom_y,
+        state.track_bottom_y,
+        max(float(OBJECT_Y_TOLERANCE_PX) * 2.0, height),
+    )
+    filtered_area = float(area)
+    if state.track_area is not None and float(state.track_area) > 0.0:
+        min_area = float(state.track_area) * 0.5
+        max_area = float(state.track_area) * 2.0
+        if filtered_area < min_area:
+            filtered_area = min_area
+        if filtered_area > max_area:
+            filtered_area = max_area
+    filtered_top = float(state.current_image_height) - filtered_bottom_y
+    filtered_left = filtered_center_x - width / 2.0
+    filtered_blob = PredictedBlob(
+        filtered_left,
+        filtered_top,
+        filtered_left + width,
+        filtered_top + height,
     )
     return (
-        min(float(right), float(other_right)) > max(float(left), float(other_left))
-        and min(float(bottom), float(other_bottom)) > max(float(top), float(other_top))
+        task_name,
+        filtered_center_x,
+        filtered_bottom_y,
+        filtered_area,
+        filtered_blob,
     )
 
 
-def blob_matches_all_thresholds(img, blob, thresholds, pixels_threshold, area_threshold, merge):
-    """! @brief 判断候选色块是否被同一目标的全部 LAB 阈值命中"""
-
-    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-    for threshold in thresholds[1:]:
-        blobs = img.find_blobs(
-            [threshold],
-            pixels_threshold=pixels_threshold,
-            area_threshold=area_threshold,
-            merge=merge,
-        )
-        matched = False
-        for other_blob in blobs:
-            if blob_bbox_overlaps(left, top, right, bottom, other_blob):
-                matched = True
-                break
-        if not matched:
-            return False
+def should_use_blob_tracking():
+    if state.current_task is None and not MASTER_DEBUG_DISPLAY_ENABLED:
+        return False
+    if is_return_line_task_context():
+        return False
+    if bool(OBJECT_DETECTION_USE_YOLO) and is_yolo_only_task_context():
+        return False
+    if state.track_task_name is None or state.track_rect is None:
+        return False
+    if state.track_dynamic_threshold is None:
+        return False
+    if (
+        bool(OBJECT_DETECTION_USE_YOLO)
+        and state.track_frames_since_yolo >= int(ROI_TRACKING_MAX_FRAMES)
+    ):
+        return False
+    if state.track_roi_failure_frames >= int(ROI_TRACKING_FAILURE_TO_YOLO_FRAMES):
+        return False
     return True
 
 
-def build_blob_candidates(img, yolo_net=None):
-    """! @brief 提取物体候选目标, 面积作为目标强度
+def is_entry_yolo_only_task_context():
+    return False
 
-    @param img 当前图像对象
-    @return 候选目标列表, 元素格式为 task_name, cx, bottom, area, blob
-    """
 
-    if OBJECT_DETECTION_USE_YOLO:
-        return _build_yolo_candidates(img, yolo_net)
+def is_yolo_only_task_context():
+    current_task = state.current_task
+    if current_task is None:
+        return False
+    task_state = int(current_task["state"])
+    target = int(current_task["target"])
+    arg = int(current_task["arg"])
+    return (
+        task_state == int(State.SEARCH_OBJECT)
+        and target == int(Target.OBJECT)
+        and arg == int(Task.TRANSPORT)
+    )
+
+
+def is_blob_only_task_context():
+    current_task = state.current_task
+    if current_task is None:
+        return False
+    task_state = int(current_task["state"])
+    target = int(current_task["target"])
+    arg = int(current_task["arg"])
+    return (
+        (
+            task_state == int(State.ORBITING)
+            and target == int(Target.OBJECT)
+            and arg == int(Task.ORBIT)
+        )
+        or (
+            task_state == int(State.TRANSPORT_OBJECT)
+            and target == int(Target.EDGE_LINE)
+            and arg == int(Task.TRANSPORT_FINISH)
+        )
+    )
+
+
+def record_yolo_retry_miss():
+    state.yolo_retry_skip_frames_remaining = max(0, int(MASTER_YOLO_RETRY_SKIP_FRAMES))
+
+
+def clear_yolo_retry_skip():
+    state.yolo_retry_skip_frames_remaining = 0
+    state.yolo_retry_skip_active_for_frame = False
+
+
+def clear_yolo_only_skip():
+    state.yolo_only_skip_frames_remaining = 0
+    state.yolo_only_skip_active_for_frame = False
+
+
+def should_skip_yolo_only_frame():
+    state.yolo_only_skip_active_for_frame = False
+    if state.yolo_only_skip_frames_remaining <= 0:
+        return False
+    state.yolo_only_skip_frames_remaining -= 1
+    state.yolo_only_skip_active_for_frame = True
+    return True
+
+
+def record_yolo_frame_run():
+    clear_yolo_only_skip()
+    current_task = state.current_task
+    if current_task is None or not is_yolo_only_task_context():
+        return
+    interval_frames = max(1, int(MASTER_YOLO_ONLY_INTERVAL_FRAMES))
+    state.yolo_only_skip_frames_remaining = interval_frames - 1
+
+
+def should_skip_yolo_retry_frame():
+    state.yolo_retry_skip_active_for_frame = False
+    if state.yolo_retry_skip_frames_remaining <= 0:
+        return False
+    state.yolo_retry_skip_frames_remaining -= 1
+    state.yolo_retry_skip_active_for_frame = True
+    return True
+
+
+def should_run_yolo_for_current_frame():
+    if not bool(OBJECT_DETECTION_USE_YOLO):
+        return False
+    if state.pending_event is not None:
+        return False
+    if is_return_line_task_context():
+        return False
+    current_task = state.current_task
+    if current_task is None and MASTER_DEBUG_DISPLAY_ENABLED:
+        return False
+    if (
+        current_task is not None
+        and int(current_task["state"]) == int(State.TRANSPORT_OBJECT)
+        and int(current_task["target"]) == int(Target.EDGE_LINE)
+    ):
+        return False
+    if current_task is not None and is_yolo_only_task_context():
+        return not should_skip_yolo_only_frame()
+    if current_task is not None and is_blob_only_task_context():
+        return False
+    if current_task is not None and is_entry_yolo_only_task_context():
+        return bool(state.entry_yolo_pending)
+    if state.current_task is None and not MASTER_DEBUG_DISPLAY_ENABLED:
+        return False
+    if current_task is not None and should_skip_yolo_retry_frame():
+        return False
+    return not should_use_blob_tracking()
+
+
+def should_refresh_dynamic_threshold_from_yolo():
+    current_task = state.current_task
+    if current_task is None:
+        return False
+    return int(current_task["state"]) == int(State.SEARCH_OBJECT)
+
+
+def _build_predicted_object_candidates():
+    rect = _tracked_rect()
+    if rect is None or state.track_task_name is None:
+        return ()
+    if state.track_center_x is None or state.track_bottom_y is None or state.track_area is None:
+        return ()
+    left, top, right, bottom = rect
+    width = float(right) - float(left)
+    height = float(bottom) - float(top)
+    predicted_center_x = float(state.track_center_x) + float(state.track_velocity_x)
+    predicted_bottom_y = float(state.track_bottom_y) + float(state.track_velocity_bottom_y)
+    predicted_left = predicted_center_x - width / 2.0
+    predicted_top = float(state.current_image_height) - predicted_bottom_y - height
+    state.track_frames_since_yolo += 1
+    return (
+        (
+            state.track_task_name,
+            predicted_center_x,
+            predicted_bottom_y,
+            float(state.track_area),
+            PredictedBlob(
+                predicted_left,
+                predicted_top,
+                predicted_left + width,
+                predicted_top + height,
+            ),
+        ),
+    )
+
+
+def _prefer_tracked_yolo_candidates(candidates):
+    if state.track_task_name is not None:
+        candidates = [candidate for candidate in candidates if candidate[0] == state.track_task_name]
+    tracked_candidates = [candidate for candidate in candidates if _candidate_hits_roi_window(candidate)]
+    if not tracked_candidates:
+        return None
+    best = min(tracked_candidates, key=_tracked_candidate_sort_key)
+    return (_filter_candidate_by_track(best),)
+
+
+def build_object_candidates(img, yolo_candidates):
+    current_task = state.current_task
+    state.current_image = img
+    state.current_image_width = int(img.width())
+    state.current_image_height = int(img.height())
+    if current_task is not None and int(current_task["target"]) != int(Target.OBJECT):
+        state.current_detection_source = "miss"
+        state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+        return ()
+    if not bool(OBJECT_DETECTION_USE_YOLO) or is_blob_only_task_context():
+        state.current_detection_source = "roi"
+        state.track_failure_reason = TrackFailureReason.NONE
+        return tuple(_build_dynamic_blob_object_candidates(img, use_tracking_roi=False))
+    if is_yolo_only_task_context():
+        state.current_detection_source = "yolo"
+        state.track_failure_reason = TrackFailureReason.NONE
+        return tuple(yolo_candidates)
+    if should_use_blob_tracking():
+        candidates = _build_dynamic_blob_object_candidates(img)
+        if state.track_task_name is not None:
+            candidates = [candidate for candidate in candidates if candidate[0] == state.track_task_name]
+        filtered_candidates = []
+        failure_reason = TrackFailureReason.NO_CANDIDATE
+        if candidates:
+            for candidate in candidates:
+                reason = _candidate_tracking_failure_reason(candidate)
+                if reason == TrackFailureReason.NONE:
+                    filtered_candidates.append(candidate)
+                    continue
+                if failure_reason == TrackFailureReason.NO_CANDIDATE:
+                    failure_reason = reason
+        candidates = filtered_candidates
+        if candidates:
+            state.current_detection_source = "roi"
+            best = min(candidates, key=_tracked_candidate_sort_key)
+            state.record_roi_attempt(True)
+            state.track_failure_reason = TrackFailureReason.NONE
+            return (_filter_candidate_by_track(best),)
+        state.track_failure_reason = failure_reason
+        state.record_roi_attempt(False)
+        state.track_roi_failure_frames += 1
+        if state.track_roi_failure_frames < int(ROI_TRACKING_FAILURE_TO_YOLO_FRAMES):
+            state.current_detection_source = "predict"
+            state.track_confidence = max(0, int(state.track_confidence) - 20)
+            return _build_predicted_object_candidates()
+        state.record_roi_fallback()
+    state.current_detection_source = "yolo"
+    candidates = tuple(yolo_candidates)
+    if state.track_rect is None:
+        state.track_failure_reason = TrackFailureReason.NONE
+        return candidates
+    tracked_candidates = _prefer_tracked_yolo_candidates(candidates)
+    if tracked_candidates is not None:
+        state.track_failure_reason = TrackFailureReason.NONE
+        return tracked_candidates
+    if state.track_task_name is not None:
+        same_task_candidates = [candidate for candidate in candidates if candidate[0] == state.track_task_name]
+        if same_task_candidates:
+            best = min(same_task_candidates, key=_tracked_candidate_sort_key)
+            state.track_failure_reason = TrackFailureReason.OUT_OF_WINDOW
+            return (_filter_candidate_by_track(best),)
+    state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+    return candidates
+
+
+def build_debug_threshold_candidates(img):
+    state.current_image = img
+    state.current_image_width = int(img.width())
+    state.current_image_height = int(img.height())
     candidates = []
-    for task in TASKS:
+    for task in OBJECT_TASKS:
         (
             task_name,
-            thresholds,
             merge_margin,
             pixels_threshold,
             area_threshold,
             max_side_length,
-            require_all_thresholds,
+            _require_all_thresholds,
         ) = object_task_parts(task)
-        if len(thresholds) <= 0:
+        thresholds = object_task_thresholds(task)
+        if not thresholds:
             continue
         blobs = _find_blobs_with_task_config(
             img,
@@ -866,40 +1367,134 @@ def build_blob_candidates(img, yolo_net=None):
             pixels_threshold,
             area_threshold,
             merge_margin,
+            None,
         )
-        if not blobs:
-            continue
-        img_height = img.height()
         for blob in blobs:
-            if not _blob_matches_required_thresholds(
-                blob,
-                len(thresholds),
-                require_all_thresholds,
-            ):
+            area = blob_area(blob)
+            if area < float(area_threshold):
                 continue
-            if blob_area(blob) < float(area_threshold):
-                continue
-            if int(max_side_length) > 0 and blob_max_side_length(blob) > float(
-                max_side_length
-            ):
+            if int(max_side_length) > 0 and blob_max_side_length(blob) > float(max_side_length):
                 continue
             left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-            _, _, _, bottom = normalize_bbox_for_protocol(
-                left, top, right, bottom, img_height
-            )
-            candidates.append((task_name, blob.cx(), bottom, blob_area(blob), blob))
-    return candidates
+            _, _, _, protocol_bottom = normalize_bbox_for_protocol(left, top, right, bottom)
+            center_x = (float(left) + float(right)) / 2.0
+            candidates.append((task_name, center_x, protocol_bottom, area, blob))
+    if candidates:
+        state.current_detection_source = "roi"
+        state.track_failure_reason = TrackFailureReason.NONE
+    else:
+        state.current_detection_source = "miss"
+        state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+    return tuple(candidates)
 
+
+def remember_object_tracking(task_name, blob, center_x, bottom_y, area, source):
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    previous_task_name = state.track_task_name
+    previous_threshold = state.track_dynamic_threshold
+    previous_pending_threshold = state.track_pending_dynamic_threshold
+    previous_center_x = state.track_center_x
+    previous_bottom_y = state.track_bottom_y
+    state.track_task_name = task_name
+    state.track_object_id = object_task_id(task_name)
+    state.track_center_x = float(center_x)
+    state.track_bottom_y = float(bottom_y)
+    state.track_area = float(area)
+    state.track_rect = (float(left), float(top), float(right), float(bottom))
+    if previous_center_x is None:
+        state.track_velocity_x = 0.0
+    else:
+        state.track_velocity_x = float(center_x) - float(previous_center_x)
+    if previous_bottom_y is None:
+        state.track_velocity_bottom_y = 0.0
+    else:
+        state.track_velocity_bottom_y = float(bottom_y) - float(previous_bottom_y)
+    state.track_source = str(source)
+    if source == "yolo":
+        state.track_frames_since_yolo = 0
+    else:
+        state.track_frames_since_yolo += 1
+    state.track_roi_failure_frames = 0
+    if source == "roi":
+        state.track_roi_success_frames += 1
+    else:
+        state.track_roi_success_frames = 0
+    if source == "yolo":
+        state.track_confidence = 80
+        same_lock = previous_task_name == task_name and previous_threshold is not None
+        if not same_lock:
+            next_threshold = _build_dynamic_threshold_for_blob(state.current_image, blob)
+            state.track_dynamic_threshold = next_threshold
+            state.track_pending_dynamic_threshold = None
+            state.track_pending_dynamic_threshold_ok_frames = 0
+            state.track_dynamic_threshold_health_failures = 0
+        elif not should_refresh_dynamic_threshold_from_yolo():
+            next_threshold = previous_threshold
+            state.track_dynamic_threshold = next_threshold
+            state.track_pending_dynamic_threshold = None
+            state.track_pending_dynamic_threshold_ok_frames = 0
+            state.track_dynamic_threshold_health_failures = 0
+            state.track_dynamic_threshold_failure = None
+        elif _dynamic_threshold_center_is_healthy(state.current_image, blob, previous_threshold):
+            next_threshold = previous_threshold
+            state.track_dynamic_threshold = next_threshold
+            state.track_pending_dynamic_threshold = None
+            state.track_pending_dynamic_threshold_ok_frames = 0
+            state.track_dynamic_threshold_health_failures = 0
+            state.track_dynamic_threshold_failure = None
+        else:
+            next_threshold = previous_threshold
+            state.track_dynamic_threshold = next_threshold
+            state.track_dynamic_threshold_health_failures += 1
+            if state.track_dynamic_threshold_health_failures >= int(DYNAMIC_THRESHOLD_REFRESH_FAILURE_FRAMES):
+                if previous_pending_threshold is None:
+                    pending_threshold = _build_dynamic_threshold_for_blob(state.current_image, blob)
+                    pending_ok_frames = 0
+                else:
+                    pending_threshold = previous_pending_threshold
+                    pending_ok_frames = int(state.track_pending_dynamic_threshold_ok_frames)
+                if pending_threshold is not None and _dynamic_threshold_center_is_healthy(
+                    state.current_image,
+                    blob,
+                    pending_threshold,
+                ):
+                    pending_ok_frames += 1
+                    state.track_pending_dynamic_threshold = pending_threshold
+                    state.track_pending_dynamic_threshold_ok_frames = pending_ok_frames
+                    if pending_ok_frames >= int(DYNAMIC_THRESHOLD_REFRESH_CONFIRM_FRAMES):
+                        next_threshold = pending_threshold
+                        state.track_dynamic_threshold = next_threshold
+                        state.track_dynamic_threshold_generation += 1
+                        state.track_pending_dynamic_threshold = None
+                        state.track_pending_dynamic_threshold_ok_frames = 0
+                        state.track_dynamic_threshold_health_failures = 0
+                        state.track_dynamic_threshold_failure = None
+                else:
+                    state.track_pending_dynamic_threshold = None
+                    state.track_pending_dynamic_threshold_ok_frames = 0
+                    state.track_dynamic_threshold_failure = "calibration_failed"
+            else:
+                state.track_dynamic_threshold_failure = "health_check_failed"
+        state.track_dynamic_threshold_rect = (float(left), float(top), float(right), float(bottom))
+        if state.track_dynamic_threshold is not None:
+            estimated_area = _estimate_dynamic_foreground_area(
+                state.current_image,
+                blob,
+                state.track_dynamic_threshold,
+            )
+            if estimated_area is not None:
+                state.track_area = float(estimated_area)
+            if not same_lock:
+                state.track_dynamic_threshold_generation += 1
+            if state.track_dynamic_threshold_failure != "health_check_failed":
+                state.track_dynamic_threshold_failure = None
+        else:
+            state.track_dynamic_threshold_failure = "calibration_failed"
+    elif source == "roi":
+        state.track_confidence = min(100, max(int(state.track_confidence), 60) + 10)
+    state.track_failure_reason = TrackFailureReason.NONE
 
 def choose_best_candidate(candidates, target_x, target_y):
-    """! @brief 选择最靠近当前目标点的候选物体
-
-    @param candidates 候选目标列表
-    @param target_x hook 目标点 x 坐标
-    @param target_y hook 目标点 y 坐标
-    @return 被选中的候选目标
-    """
-
     return min(
         candidates,
         key=lambda item: (float(item[1]) - float(target_x)) ** 2
@@ -908,15 +1503,24 @@ def choose_best_candidate(candidates, target_x, target_y):
 
 
 def choose_largest_area_candidate(candidates):
-    """! @brief 选择面积最大的候选目标"""
-
     return max(candidates, key=lambda item: float(item[3]))
 
 
-def filter_candidates_in_target_window(candidates, target_x, target_y, tolerance_x, tolerance_y):
-    """! @brief 保留底边命中当前目标窗口的候选目标"""
+def debug_color_for_task_name(task_name):
+    if task_name == "tennis":
+        return (191, 255, 0)
+    if task_name == "red":
+        return (255, 0, 0)
+    if task_name == "blue":
+        return (0, 0, 255)
+    if task_name == "brown":
+        return (80, 40, 20)
+    if task_name == "white":
+        return (255, 255, 255)
+    return (255, 255, 255)
 
-    _ = (target_x, tolerance_x)
+
+def filter_candidates_in_target_window(candidates, target_y, tolerance_y):
     return [
         candidate
         for candidate in candidates
@@ -924,19 +1528,7 @@ def filter_candidates_in_target_window(candidates, target_x, target_y, tolerance
     ]
 
 
-def should_filter_candidates_by_target_window(hook):
-    """! @brief 判断当前上下文是否只接受命中目标窗口的候选目标"""
-
-    return hook.is_finish_hook_context()
-
-
-def build_search_target_point(
-    image_width, image_height, config_id=Task.SEARCH
-):
-    """! @brief 根据当前 hook 配置生成主车搜索目标点"""
-
-    _ = image_width
-    _ = image_height
+def build_search_target_point(config_id):
     target_x = float(MASTER_SEARCH_TARGET_X_PX)
     if int(config_id) == int(Task.ORBIT):
         return float(MASTER_ORBIT_TARGET_X_PX), float(MASTER_ORBIT_TARGET_Y_PX)
@@ -948,9 +1540,91 @@ def build_search_target_point(
     return target_x, float(MASTER_SEARCH_TARGET_Y_PX)
 
 
-def _build_finish_hook_ring_rois(blob, image_width, image_height):
-    """! @brief 根据目标框构造收尾判定环带 roi 列表和总面积"""
+def current_task_config_id():
+    current_task = state.current_task
+    if current_task is None:
+        return Task.SEARCH
+    return int(current_task["arg"])
 
+
+def is_finish_task_context():
+    current_task = state.current_task
+    return (
+        current_task is not None
+        and int(current_task["state"]) == int(State.TRANSPORT_OBJECT)
+        and int(current_task["target"]) == int(Target.EDGE_LINE)
+        and int(current_task["arg"]) == int(Task.TRANSPORT_FINISH)
+    )
+
+
+def is_orbit_task_context():
+    current_task = state.current_task
+    return (
+        current_task is not None
+        and int(current_task["state"]) == int(State.ORBITING)
+        and int(current_task["target"]) == int(Target.OBJECT)
+        and int(current_task["arg"]) == int(Task.ORBIT)
+    )
+
+
+def is_return_line_task_context():
+    current_task = state.current_task
+    return (
+        current_task is not None
+        and int(current_task["target"]) == int(Target.EDGE_LINE)
+        and int(current_task["arg"]) == int(Task.RETURN_GARAGE_LINE)
+        and int(current_task["state"]) == int(State.RETURN_GARAGE_RETREAT)
+    )
+
+
+def build_observation(valid, center_x, bottom_y, area):
+    context_id = 0
+    current_task = state.current_task
+    if current_task is not None:
+        context_id = int(current_task["context_id"])
+    if int(valid) != 1:
+        return context_id, 0.0, 0.0, 0.0
+    target_x, target_y = build_search_target_point(current_task_config_id())
+    return (
+        context_id,
+        float(center_x) - float(target_x),
+        float(bottom_y) - float(target_y),
+        float(area),
+    )
+
+
+def build_observation_and_candidates():
+    current_object_candidates = state.current_object_candidates
+    if not current_object_candidates:
+        return build_observation(0, 0, 0, 0), None, None, current_object_candidates
+    candidates = current_object_candidates
+    target_x, target_y = build_search_target_point(current_task_config_id())
+    if is_finish_task_context():
+        candidates = filter_candidates_in_target_window(
+            candidates,
+            target_y,
+            OBJECT_Y_TOLERANCE_PX,
+        )
+        if not candidates:
+            return build_observation(0, 0, 0, 0), None, None, candidates
+        task_name, center_x, bottom_y, area, best_blob = choose_largest_area_candidate(candidates)
+    else:
+        task_name, center_x, bottom_y, area, best_blob = choose_best_candidate(
+            candidates,
+            target_x,
+            target_y,
+        )
+    return (
+        build_observation(1, center_x, bottom_y, area),
+        best_blob,
+        task_name,
+        candidates,
+    )
+
+
+def build_finish_task_ring_rois(blob, img):
+    image_width = int(img.width())
+    image_height = int(img.height())
     left, top, right, bottom = blob_rect_to_bbox(blob.rect())
     expand = int(FINISH_HOOK_RING_EXPAND_PX)
     outer_left = max(0, int(left) - expand)
@@ -961,9 +1635,7 @@ def _build_finish_hook_ring_rois(blob, image_width, image_height):
     if outer_top < int(top):
         rois.append((outer_left, outer_top, outer_right - outer_left, int(top) - outer_top))
     if int(bottom) < outer_bottom:
-        rois.append(
-            (outer_left, int(bottom), outer_right - outer_left, outer_bottom - int(bottom))
-        )
+        rois.append((outer_left, int(bottom), outer_right - outer_left, outer_bottom - int(bottom)))
     if outer_left < int(left):
         rois.append((outer_left, int(top), int(left) - outer_left, int(bottom) - int(top)))
     if int(right) < outer_right:
@@ -979,12 +1651,24 @@ def _build_finish_hook_ring_rois(blob, image_width, image_height):
     return valid_rois, ring_area
 
 
-def _count_yellow_pixels_in_roi(img, roi):
-    """! @brief 统计单个 roi 内的黄色像素数"""
+def build_finish_task_fixed_object_roi(img):
+    image_width = int(img.width())
+    image_height = int(img.height())
+    display_left = int(float(image_width) * float(FINISH_HOOK_FIXED_OBJECT_ROI_LEFT_RATIO))
+    display_right = int(float(image_width) * float(FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO))
+    display_top = int(float(image_height) * float(FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO))
+    display_left = max(0, min(int(image_width), int(display_left)))
+    display_right = max(int(display_left), min(int(image_width), int(display_right)))
+    display_top = max(0, min(int(image_height), int(display_top)))
+    left = int(image_width) - int(display_right)
+    right = int(image_width) - int(display_left)
+    top = 0
+    bottom = int(image_height) - int(display_top)
+    return (int(left), int(top), int(right) - int(left), int(bottom) - int(top))
 
-    roi_width = int(roi[2])
-    roi_height = int(roi[3])
-    roi_area = roi_width * roi_height
+
+def _count_yellow_pixels_in_roi(img, roi):
+    roi_area = int(roi[2]) * int(roi[3])
     if roi_area <= 0:
         return 0
     blobs = img.find_blobs(
@@ -1004,12 +1688,11 @@ def _count_yellow_pixels_in_roi(img, roi):
     return int(yellow_pixels)
 
 
-def build_finish_hook_yellow_ratio_percent(img, blob, image_width, image_height):
-    """! @brief 计算主车收尾判定环带内的黄色像素百分比"""
-
-    if blob is None:
-        return 0.0
-    rois, ring_area = _build_finish_hook_ring_rois(blob, image_width, image_height)
+def build_finish_task_yellow_ratio_percent(img, blob):
+    _ = blob
+    roi = build_finish_task_fixed_object_roi(img)
+    rois = (roi,)
+    ring_area = int(roi[2]) * int(roi[3])
     if ring_area <= 0:
         return 0.0
     yellow_pixels = 0
@@ -1018,61 +1701,193 @@ def build_finish_hook_yellow_ratio_percent(img, blob, image_width, image_height)
     return float(yellow_pixels) * 100.0 / float(ring_area)
 
 
-def get_marker_corners(blob):
-    """! @brief 返回调试绘制使用的色块矩形角点
-
-    @param blob 候选色块对象
-    @return 色块矩形四个角点
-    """
-
-    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-    return ((left, top), (right, top), (right, bottom), (left, bottom))
-
-
-def get_blob_rect(blob):
-    """! @brief 返回候选色块的标准矩形框"""
-
-    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-    return (left, top, right - left, bottom - top)
+def draw_object_candidates_debug(img, candidates):
+    for task_name, _, _, _, blob in candidates:
+        color = debug_color_for_task_name(task_name)
+        img.draw_rectangle(blob.rect(), color=color, thickness=2)
+        rect_x, rect_y, _, _ = blob.rect()
+        img.draw_string(
+            int(rect_x),
+            int(rect_y) - 15,
+            task_name,
+            color=color,
+            scale=2,
+            mono_space=False,
+        )
 
 
-def draw_selected_marker(img, blob, pixel_x, pixel_y):
-    """! @brief 在调试画面上绘制选中物体矩形框
+def draw_selected_candidate_debug(img, task_name, blob):
+    color = debug_color_for_task_name(task_name)
+    img.draw_rectangle(blob.rect(), color=color, thickness=3)
+    rect_x, rect_y, _, _ = blob.rect()
+    img.draw_string(
+        int(rect_x),
+        int(rect_y) - 30,
+        "SELECT",
+        color=(255, 255, 255),
+        scale=2,
+        mono_space=False,
+    )
 
-    @param img 当前图像对象
-    @param blob 被选中的候选色块对象
-    @param pixel_x 目标中心 x 坐标
-    @param pixel_y 目标标记 y 坐标
-    """
 
-    _ = pixel_x
-    _ = pixel_y
-    _draw_debug_rectangle(img, get_blob_rect(blob))
-    _draw_debug_text(img, int(pixel_x) + 4, int(pixel_y) - 10, "SELECT")
+def draw_protocol_target_point_debug(img, target_x, target_y):
+    image_width = int(img.width())
+    image_height = int(img.height())
+    draw_x = image_width - 1 - int(target_x)
+    draw_y = image_height - 1 - int(target_y)
+    img.draw_cross(draw_x, draw_y, color=(255, 255, 0))
 
 
-def draw_blob_candidates_debug(img, candidates):
-    """! @brief 在调试画面上绘制当前识别到的全部物体
+def tracking_source_debug_name(source):
+    if source == "yolo":
+        return "YOLO"
+    if source == "roi":
+        return "ROI"
+    if source == "predict":
+        return "PRED"
+    return "MISS"
 
-    @param img 当前图像对象
-    @param candidates 当前帧候选目标列表
-    """
 
-    for task_name, pixel_x, _, _, blob in candidates:
-        color = _debug_color_for_task_name(task_name)
-        _ = pixel_x
-        _draw_debug_rectangle_with_color(img, get_blob_rect(blob), color)
-        _draw_debug_text_with_color(img, pixel_x + 4, blob.cy() - 6, task_name, color)
+def tracking_failure_debug_name(reason):
+    if int(reason) == int(TrackFailureReason.NO_CANDIDATE):
+        return "NO_CAND"
+    if int(reason) == int(TrackFailureReason.OUT_OF_WINDOW):
+        return "OUT_WIN"
+    if int(reason) == int(TrackFailureReason.AREA_JUMP):
+        return "AREA"
+    if int(reason) == int(TrackFailureReason.EDGE_TOUCH):
+        return "EDGE"
+    if int(reason) == int(TrackFailureReason.POOR_SEPARATION):
+        return "SEP"
+    return "NONE"
+
+
+def debug_log(tag, text):
+    if not MASTER_DEBUG_DISPLAY_ENABLED:
+        return
+    print("[master_v2][%s] %s" % (str(tag), str(text)))
+
+
+def draw_tracking_state_debug(img):
+    predicted_roi = state.track_predicted_roi
+    if predicted_roi is not None:
+        left, top, right, bottom = predicted_roi  # pyright: ignore[reportGeneralTypeIssues]
+        width = int(right) - int(left)
+        height = int(bottom) - int(top)
+        if width > 0 and height > 0:
+            img.draw_rectangle((int(left), int(top), width, height), color=(0, 255, 255), thickness=1)
+    if state.track_predicted_center_x is not None and state.track_predicted_bottom_y is not None:
+        draw_protocol_target_point_debug(
+            img,
+            state.track_predicted_center_x,
+            state.track_predicted_bottom_y,
+        )
+    img.draw_string(
+        2,
+        62,
+        "src=%s conf=%d gap=%d" % (
+            tracking_source_debug_name(state.current_detection_source),
+            int(state.track_confidence),
+            int(state.track_frames_since_yolo),
+        ),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+    img.draw_string(
+        2,
+        74,
+        "fail=%s rf=%d id=%d" % (
+            tracking_failure_debug_name(state.track_failure_reason),
+            int(state.track_roi_failure_frames),
+            int(state.track_object_id),
+        ),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+    img.draw_string(
+        2,
+        86,
+        "fps t=%d y=%d r=%d p=%d fb=%d" % (
+            int(state.last_second_total_frames),
+            int(state.last_second_yolo_frames),
+            int(state.last_second_roi_frames),
+            int(state.last_second_predict_frames),
+            int(state.last_second_roi_fallbacks),
+        ),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+    img.draw_string(
+        2,
+        98,
+        "roi ok=%d/%d" % (
+            int(state.last_second_roi_success_frames),
+            int(state.last_second_roi_attempt_frames),
+        ),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+
+
+def draw_finish_task_debug(img, blob, yellow_ratio):
+    _ = blob
+    img.draw_rectangle(build_finish_task_fixed_object_roi(img), color=(255, 255, 0), thickness=1)
+    touched = float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0
+    event_type = current_event_type()
+    pending_finish_event = (
+        state.pending_event is not None
+        and event_type is not None
+        and int(state.pending_event.get("event", 0)) == int(event_type)
+    )
+    img.draw_string(
+        2,
+        50,
+        "finish ratio=%.1f" % float(yellow_ratio),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+    img.draw_string(
+        2,
+        62,
+        "touch=%d seen=%d thr=%.1f" % (
+            1 if touched else 0,
+            1 if bool(state.finish_contact_seen) else 0,
+            float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0,
+        ),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+    img.draw_string(
+        2,
+        74,
+        "stable=%d/%d event=%d" % (
+            int(state.stable_frame_count),
+            int(required_stable_frames()),
+            1 if pending_finish_event else 0,
+        ),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+
+
+def draw_search_preview_debug(img, candidates):
+    draw_object_candidates_debug(img, candidates)
+    if candidates:
+        target_x, target_y = build_search_target_point(Task.SEARCH)
+        task_name, _, _, _, best_blob = choose_best_candidate(candidates, target_x, target_y)
+        draw_selected_candidate_debug(img, task_name, best_blob)
+        draw_protocol_target_point_debug(img, target_x, target_y)
+    img.flush()
 
 
 def _clamp(value, limit):
-    """! @brief 按对称上下限约束数值
-
-    @param value 原始数值
-    @param limit 绝对值上限
-    @return 限幅后的数值
-    """
-
     value = float(value)
     limit = abs(float(limit))
     if value > limit:
@@ -1083,14 +1898,6 @@ def _clamp(value, limit):
 
 
 def _apply_min_speed(value, limit, min_speed):
-    """! @brief 对非零速度量施加最小幅值和限幅
-
-    @param value 原始速度量
-    @param limit 速度幅值上限
-    @param min_speed 最小速度幅值
-    @return 处理后的速度量
-    """
-
     value = _clamp(value, limit)
     if value == 0.0:
         return 0.0
@@ -1105,91 +1912,92 @@ def _apply_min_speed(value, limit, min_speed):
     return value
 
 
-def _axis_p_velocity(error, deadzone, kp, limit, min_speed=MASTER_SEARCH_MIN_SPEED):
-    """! @brief 生成单轴 P 控制速度
+def current_frame_time_scale():
+    frame_interval_ms = float(state.current_frame_interval_ms)
+    if frame_interval_ms <= 0.0:
+        frame_interval_ms = reference_frame_interval_ms()
+    return reference_frame_interval_ms() / frame_interval_ms
 
-    @param error 当前轴像素误差
-    @param deadzone 当前轴死区
-    @param kp 当前轴 P 环增益
-    @param limit 当前轴速度限幅
-    @param min_speed 当前轴最小有效速度
-    @return 当前轴速度控制量
-    """
 
+def _axis_p_velocity(error, deadzone, kp, limit, min_speed):
     error = float(error)
     if abs(error) <= float(deadzone):
         return 0.0
+    if float(kp) == 0.0:
+        return 0.0
+    time_scale = current_frame_time_scale()
     return _apply_min_speed(
-        error * float(kp),
-        limit,
-        min_speed,
+        error * float(kp) * time_scale,
+        float(limit) * time_scale,
+        float(min_speed) * time_scale,
     )
 
 
-def _build_search_y_velocity(err_y, image_height):
-    """! @brief 根据图像高度归一化纵向底边误差并生成速度"""
+def reference_frame_interval_ms():
+    reference_fps = float(VISION_REFERENCE_FPS)
+    if reference_fps <= 0.0:
+        reference_fps = 1.0
+    return 1000.0 / reference_fps
 
+
+def _build_search_y_velocity(err_y):
     err_y = float(err_y)
     if abs(err_y) <= float(MASTER_SEARCH_DEADZONE_Y_PX):
         return 0.0
+    time_scale = current_frame_time_scale()
+    image_height = float(state.current_image_height)
     scaled_error = err_y * (
         float(MASTER_SEARCH_MAX_VY)
         / abs(float(MASTER_SEARCH_KP_Y))
         / float(image_height)
     )
     return _apply_min_speed(
-        scaled_error * float(MASTER_SEARCH_KP_Y),
-        MASTER_SEARCH_MAX_VY,
-        MASTER_SEARCH_MIN_SPEED,
+        scaled_error * float(MASTER_SEARCH_KP_Y) * time_scale,
+        float(MASTER_SEARCH_MAX_VY) * time_scale,
+        float(MASTER_SEARCH_MIN_SPEED) * time_scale,
     )
 
 
-def build_search_velocity_from_error(err_x, err_y, image_height):
-    """! @brief 根据主车搜索目标点误差生成速度控制量
-
-    @param err_x 识别框中心相对目标点的横向误差
-    @param err_y 识别框中心相对目标点的纵向误差
-    @param image_height 图像高度
-    @return vx, vy 速度控制量
-    """
-
-    return (
-        _axis_p_velocity(
-            err_x,
-            MASTER_SEARCH_DEADZONE_X_PX,
-            MASTER_SEARCH_KP_X,
-            MASTER_SEARCH_MAX_VX,
-        ),
-        _build_search_y_velocity(err_y, image_height),
-    )
-
-
-def build_search_velocity_from_observation(observation, image_height):
-    """! @brief 根据主车物体观测生成搜索速度控制量
-
-    @param observation context_id, x, y, value 观测字段元组
-    @param image_height 图像高度
-    @return vx, vy 速度控制量
-    """
-
+def build_search_velocity_from_observation(observation):
     _, x, y, value = observation
     if float(value) <= 0.0:
         return float(MASTER_MISSING_SEARCH_VX), float(MASTER_MISSING_SEARCH_VY)
-    return build_search_velocity_from_error(x, y, image_height)
+    return (
+        _axis_p_velocity(
+            x,
+            MASTER_SEARCH_DEADZONE_X_PX,
+            MASTER_SEARCH_KP_X,
+            MASTER_SEARCH_MAX_VX,
+            MASTER_SEARCH_MIN_SPEED,
+        ),
+        _build_search_y_velocity(y),
+    )
 
 
-def build_orbit_correction_velocity_from_observation(observation, image_height):
-    """! @brief 根据主车绕行物体观测生成平移修正量
+def _build_orbit_y_velocity(err_y):
+    err_y = float(err_y)
+    if abs(err_y) <= float(MASTER_ORBIT_DEADZONE_Y_PX):
+        return 0.0
+    if float(MASTER_ORBIT_KP_Y) == 0.0:
+        return 0.0
+    time_scale = current_frame_time_scale()
+    image_height = float(state.current_image_height)
+    scaled_error = err_y * (
+        float(MASTER_ORBIT_MAX_VY)
+        / abs(float(MASTER_ORBIT_KP_Y))
+        / float(image_height)
+    )
+    return _apply_min_speed(
+        scaled_error * float(MASTER_ORBIT_KP_Y) * time_scale,
+        float(MASTER_ORBIT_MAX_VY) * time_scale,
+        float(MASTER_ORBIT_MIN_SPEED) * time_scale,
+    )
 
-    @param observation context_id, x, y, value 观测字段元组
-    @param image_height 图像高度
-    @return vx, vy 平移修正量
-    """
 
-    _, _, _, value = observation
+def build_orbit_correction_velocity_from_observation(observation):
+    _, x, y, value = observation
     if float(value) <= 0.0:
         return 0.0, 0.0
-    _, x, y, _ = observation
     return (
         _axis_p_velocity(
             x,
@@ -1198,33 +2006,25 @@ def build_orbit_correction_velocity_from_observation(observation, image_height):
             MASTER_ORBIT_MAX_VX,
             MASTER_ORBIT_MIN_SPEED,
         ),
-        _build_orbit_y_velocity(y, image_height),
+        _build_orbit_y_velocity(y),
     )
 
 
 def _pixel_to_lab(pixel):
-    """! @brief 将单点像素转换为 LAB 阈值比较用三元组"""
-
     if pixel is None:
         return None
-    if omv_image is not None:
-        try:
-            return omv_image.rgb_to_lab(pixel)
-        except Exception:
-            pass
-    return pixel
+    lab = image.rgb_to_lab(pixel)
+    try:
+        if len(lab) < 3:
+            return None
+    except TypeError:
+        return None
+    return (float(lab[0]), float(lab[1]), float(lab[2]))
 
 
 def _pixel_matches_threshold(pixel, threshold):
-    """! @brief 判断单点像素是否落在 LAB 阈值内"""
-
     lab = _pixel_to_lab(pixel)
     if lab is None:
-        return False
-    try:
-        if len(lab) < 3:
-            return False
-    except TypeError:
         return False
     return (
         float(threshold[0]) <= float(lab[0]) <= float(threshold[1])
@@ -1233,1132 +2033,903 @@ def _pixel_matches_threshold(pixel, threshold):
     )
 
 
-def _return_line_pixel_matches(img, x, y, image_width, image_height):
-    max_x = int(image_width) - 1
-    max_y = int(image_height) - 1
-    return _pixel_matches_threshold(
-        img.get_pixel(max_x - int(x), max_y - int(y)),
-        RETURN_GARAGE_LINE_YELLOW_THRESHOLD,
-    )
+def _clamp_range_value(value, lower, upper):
+    value = int(round(float(value)))
+    if value < int(lower):
+        return int(lower)
+    if value > int(upper):
+        return int(upper)
+    return value
 
 
-def _return_line_has_horizontal_connected_at(
-    img, x, y, image_width, image_height, required_connected
-):
-    if not _return_line_pixel_matches(img, x, y, image_width, image_height):
-        return False
-    connected = 0
-    left = int(x) - 1
-    while left >= 0 and _return_line_pixel_matches(img, left, y, image_width, image_height):
-        connected += 1
-        if connected >= int(required_connected):
-            return True
-        left -= 1
-    right = int(x) + 1
-    max_x = int(image_width) - 1
-    while right <= max_x and _return_line_pixel_matches(img, right, y, image_width, image_height):
-        connected += 1
-        if connected >= int(required_connected):
-            return True
-        right += 1
-    return False
+def _sample_grid_count(span):
+    return min(9, max(3, int((int(span) + 3) // 4)))
 
 
-def _return_line_sample_columns(center_x, half_width):
-    yield int(center_x)
-    for offset in range(1, int(half_width) + 1):
-        yield int(center_x) - offset
-        yield int(center_x) + offset
+def _sample_grid_axis(start, end):
+    return tuple(_sample_roi_positions(start, end, _sample_grid_count(int(end) - int(start))))
 
 
-def _return_line_y_on_column(img, x, image_width, image_height):
-    top = None
-    bottom = None
-    for y in range(0, int(image_height)):
-        # 显示坐标按翻转后坐标标注, 但 get_pixel 读取表现为原始坐标。
-        if not _return_line_pixel_matches(img, x, y, image_width, image_height):
-            continue
-        if top is None:
-            top = int(y)
-        bottom = int(y)
-    if top is None or bottom is None:
+def _median_channel(samples, channel_index):
+    values = sorted(sample[channel_index] for sample in samples)
+    return values[len(values) // 2]
+
+
+def _quantile_value(sorted_values, numerator, denominator):
+    if not sorted_values:
         return None
-    max_thickness = int(RETURN_GARAGE_LINE_MAX_THICKNESS_PX)
-    if max_thickness > 0 and int(bottom) - int(top) > max_thickness:
-        top = int(bottom) - max_thickness
-    return (float(top) + float(bottom)) / 2.0
+    index = ((len(sorted_values) - 1) * int(numerator)) // int(denominator)
+    return sorted_values[index]
 
 
-def _build_return_line_y_from_pixels(img, image_width, image_height, previous_line_y=None):
-    """! @brief 在中心采样区逐像素按黄色阈值计算回库黄线中心 Y"""
+def _lab_distance_value(lab, center_lab):
+    delta_l = float(lab[0]) - float(center_lab[0])
+    delta_a = float(lab[1]) - float(center_lab[1])
+    delta_b = float(lab[2]) - float(center_lab[2])
+    return int(delta_l * delta_l + 4.0 * delta_a * delta_a + 4.0 * delta_b * delta_b)
 
+
+def _otsu_threshold(values):
+    if not values:
+        return None
+    min_value = int(min(values))
+    max_value = int(max(values))
+    if max_value <= min_value:
+        return None
+    histogram = [0] * (max_value - min_value + 1)
+    total_sum = 0
+    for value in values:
+        index = int(value) - min_value
+        histogram[index] += 1
+        total_sum += int(value)
+    total_count = len(values)
+    foreground_sum = 0
+    foreground_count = 0
+    best_threshold = None
+    best_score = -1.0
+    for index in range(len(histogram) - 1):
+        count = histogram[index]
+        foreground_count += count
+        if foreground_count <= 0:
+            continue
+        background_count = total_count - foreground_count
+        if background_count <= 0:
+            break
+        value = min_value + index
+        foreground_sum += value * count
+        foreground_mean = float(foreground_sum) / float(foreground_count)
+        background_mean = float(total_sum - foreground_sum) / float(background_count)
+        score = (
+            float(foreground_count)
+            * float(background_count)
+            * (foreground_mean - background_mean)
+            * (foreground_mean - background_mean)
+        )
+        if score > best_score:
+            best_score = score
+            best_threshold = value
+    if best_score <= 0.0:
+        return None
+    return best_threshold
+
+
+def _center_connected_sample_indices(mask_rows, center_mask_rows):
+    height = len(mask_rows)
+    if height <= 0:
+        return ()
+    width = len(mask_rows[0])
+    queue = []
+    visited = {}
+    for row_index in range(height):
+        for col_index in range(width):
+            if not mask_rows[row_index][col_index]:
+                continue
+            if not center_mask_rows[row_index][col_index]:
+                continue
+            key = row_index * width + col_index
+            visited[key] = True
+            queue.append((row_index, col_index))
+    if not queue:
+        return ()
+    connected = []
+    while queue:
+        row_index, col_index = queue.pop()
+        connected.append((row_index, col_index))
+        for next_row, next_col in (
+            (row_index - 1, col_index),
+            (row_index + 1, col_index),
+            (row_index, col_index - 1),
+            (row_index, col_index + 1),
+        ):
+            if next_row < 0 or next_row >= height or next_col < 0 or next_col >= width:
+                continue
+            if not mask_rows[next_row][next_col]:
+                continue
+            key = next_row * width + next_col
+            if key in visited:
+                continue
+            visited[key] = True
+            queue.append((next_row, next_col))
+    return tuple(connected)
+
+
+def _build_dynamic_threshold_from_labs(samples):
+    threshold = []
+    for channel_index, lower_bound, upper_bound in (
+        (0, 0, 100),
+        (1, -128, 127),
+        (2, -128, 127),
+    ):
+        channel_values = sorted(sample[channel_index] for sample in samples)
+        low = _quantile_value(channel_values, 1, 8)
+        high = _quantile_value(channel_values, 7, 8)
+        if low is None or high is None:
+            return None
+        margin = max(1, int((float(high) - float(low) + 3.0) // 4.0))
+        threshold.append(_clamp_range_value(float(low) - float(margin), lower_bound, upper_bound))
+        threshold.append(_clamp_range_value(float(high) + float(margin), lower_bound, upper_bound))
+    return tuple(threshold)
+
+
+def _build_dynamic_threshold_for_blob(img, blob):
+    calibrated_thresholds = _object_task_thresholds(state.track_task_name)
+    if calibrated_thresholds:
+        return calibrated_thresholds[0]
     get_pixel = getattr(img, "get_pixel", None)
     if get_pixel is None:
         return None
-    center_x = int(int(image_width) / 2)
-    half_width = int(RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX)
-    saw_candidate = False
-    for x in _return_line_sample_columns(center_x, half_width):
-        if x < 0 or x >= int(image_width):
-            continue
-        line_y = _return_line_y_on_column(img, x, image_width, image_height)
-        if line_y is None:
-            continue
-        saw_candidate = True
-        has_horizontal_connected = _return_line_has_horizontal_connected_at(
-            img,
-            x,
-            int(round(line_y)),
-            image_width,
-            image_height,
-            RETURN_GARAGE_LINE_MIN_HORIZONTAL_CONNECTED_PX,
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    left = max(0, int(left))
+    top = max(0, int(top))
+    right = min(int(state.current_image_width), int(right))
+    bottom = min(int(state.current_image_height), int(bottom))
+    if right - left <= 4 or bottom - top <= 4:
+        return None
+    if (right - left) * (bottom - top) < int(OBJECT_MIN_AREA):
+        return None
+    sample_xs = _sample_grid_axis(left, right)
+    sample_ys = _sample_grid_axis(top, bottom)
+    if len(sample_xs) * len(sample_ys) < 9:
+        return None
+    inset_x = max(1, int((right - left) // 4))
+    inset_y = max(1, int((bottom - top) // 4))
+    center_left = left + inset_x
+    center_top = top + inset_y
+    center_right = right - inset_x
+    center_bottom = bottom - inset_y
+    if center_right <= center_left or center_bottom <= center_top:
+        return None
+    lab_rows = []
+    center_samples = []
+    total_valid = 0
+    center_valid = 0
+    for sample_y in sample_ys:
+        row = []
+        for sample_x in sample_xs:
+            lab = _pixel_to_lab(get_pixel(int(sample_x), int(sample_y)))
+            row.append(lab)
+            if lab is None:
+                continue
+            total_valid += 1
+            if (
+                int(center_left) <= int(sample_x) < int(center_right)
+                and int(center_top) <= int(sample_y) < int(center_bottom)
+            ):
+                center_samples.append(lab)
+                center_valid += 1
+        lab_rows.append(row)
+    if total_valid < 9 or center_valid < 3:
+        return None
+    center_lab = (
+        _median_channel(center_samples, 0),
+        _median_channel(center_samples, 1),
+        _median_channel(center_samples, 2),
+    )
+    distance_rows = []
+    distances = []
+    center_mask_rows = []
+    for row_index in range(len(sample_ys)):
+        distance_row = []
+        center_mask_row = []
+        sample_y = sample_ys[row_index]
+        for col_index in range(len(sample_xs)):
+            sample_x = sample_xs[col_index]
+            lab = lab_rows[row_index][col_index]
+            if lab is None:
+                distance_row.append(None)
+                center_mask_row.append(False)
+                continue
+            distance = _lab_distance_value(lab, center_lab)
+            distance_row.append(distance)
+            distances.append(distance)
+            center_mask_row.append(
+                int(center_left) <= int(sample_x) < int(center_right)
+                and int(center_top) <= int(sample_y) < int(center_bottom)
+            )
+        distance_rows.append(distance_row)
+        center_mask_rows.append(center_mask_row)
+    threshold_value = _otsu_threshold(distances)
+    if threshold_value is None:
+        return None
+    max_distance = int(max(distances))
+    if threshold_value >= max_distance:
+        return None
+    mask_rows = []
+    for distance_row in distance_rows:
+        mask_rows.append(
+            [
+                distance is not None and int(distance) <= int(threshold_value)
+                for distance in distance_row
+            ]
         )
-        if has_horizontal_connected:
-            return line_y
-    if saw_candidate:
-        return previous_line_y
+    connected_indices = _center_connected_sample_indices(mask_rows, center_mask_rows)
+    if not connected_indices:
+        return None
+    connected_samples = []
+    center_connected = 0
+    for row_index, col_index in connected_indices:
+        lab = lab_rows[row_index][col_index]
+        if lab is None:
+            continue
+        connected_samples.append(lab)
+        if center_mask_rows[row_index][col_index]:
+            center_connected += 1
+    connected_count = len(connected_samples)
+    if connected_count < max(3, total_valid // 10):
+        return None
+    if connected_count * 20 <= total_valid:
+        return None
+    if connected_count * 20 >= total_valid * 19:
+        return None
+    if center_connected * total_valid < connected_count * center_valid:
+        return None
+    return _build_dynamic_threshold_from_labs(connected_samples)
+
+
+def _estimate_dynamic_foreground_area(img, blob, threshold):
+    get_pixel = getattr(img, "get_pixel", None)
+    if get_pixel is None or threshold is None:
+        return None
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    width = max(1.0, float(right) - float(left))
+    height = max(1.0, float(bottom) - float(top))
+    sample_xs = _sample_grid_axis(int(left), int(right))
+    sample_ys = _sample_grid_axis(int(top), int(bottom))
+    sample_total = len(sample_xs) * len(sample_ys)
+    if sample_total <= 0:
+        return None
+    foreground_count = 0
+    for sample_y in sample_ys:
+        for sample_x in sample_xs:
+            if _pixel_matches_threshold(get_pixel(int(sample_x), int(sample_y)), threshold):
+                foreground_count += 1
+    if foreground_count <= 0:
+        return None
+    estimated_area = width * height * float(foreground_count) / float(sample_total)
+    return max(1.0, float(estimated_area))
+
+
+def _blob_bbox_area_from_rect(rect):
+    left, top, right, bottom = rect
+    return max(0.0, float(right) - float(left)) * max(0.0, float(bottom) - float(top))
+
+
+def _dynamic_threshold_center_is_healthy(img, blob, threshold):
+    get_pixel = getattr(img, "get_pixel", None)
+    if threshold is None or get_pixel is None:
+        return False
+    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
+    sample_xs = _sample_grid_axis(int(left), int(right))
+    sample_ys = _sample_grid_axis(int(top), int(bottom))
+    inset_x = max(1, int((int(right) - int(left)) // 4))
+    inset_y = max(1, int((int(bottom) - int(top)) // 4))
+    center_left = int(left) + inset_x
+    center_top = int(top) + inset_y
+    center_right = int(right) - inset_x
+    center_bottom = int(bottom) - inset_y
+    if center_right <= center_left or center_bottom <= center_top:
+        return False
+    center_hits = 0
+    for sample_y in sample_ys:
+        for sample_x in sample_xs:
+            if not (
+                center_left <= int(sample_x) < center_right
+                and center_top <= int(sample_y) < center_bottom
+            ):
+                continue
+            center_hits += 1
+            if not _pixel_matches_threshold(get_pixel(int(sample_x), int(sample_y)), threshold):
+                return False
+    return center_hits >= 3
+
+
+def _sample_roi_positions(start, end, sample_count):
+    start = int(start)
+    end = int(end)
+    count = max(1, int(sample_count))
+    span = max(1, end - start)
+    for index in range(count):
+        yield start + (span * (index * 2 + 1)) // (count * 2)
+def build_task_event_value(img, best_blob, task_name=None):
+    if is_finish_task_context():
+        return build_finish_task_yellow_ratio_percent(img, best_blob)
+    current_task = state.current_task
+    if (
+        current_task is not None
+        and int(current_task["state"]) == int(State.SEARCH_OBJECT)
+        and int(current_task["target"]) == int(Target.OBJECT)
+        and int(current_task["arg"]) == int(Task.SEARCH)
+        and task_name is not None
+    ):
+        return object_task_id(task_name)
     return None
 
 
-def build_return_line_y_from_image(img, image_width, image_height, previous_line_y=None):
-    """! @brief 按屏幕中线左右色块范围计算回库黄线中心 Y"""
-
-    return _build_return_line_y_from_pixels(
-        img, image_width, image_height, previous_line_y
-    )
-
-
-def build_return_line_velocity_from_y(line_y):
-    """! @brief 根据回库黄线 Y 生成纵向保持速度"""
-
-    if line_y is None:
-        return 0.0, 0.0
-    err_y = float(line_y) - float(RETURN_GARAGE_LINE_TARGET_Y_PX)
-    return (
-        0.0,
-        _axis_p_velocity(
-            err_y,
-            RETURN_GARAGE_LINE_DEADZONE_Y_PX,
-            RETURN_GARAGE_LINE_KP_Y,
-            RETURN_GARAGE_LINE_MAX_VY,
-            RETURN_GARAGE_LINE_MIN_SPEED,
-        ),
-    )
-
-
-def is_return_line_aligned(line_y):
-    """! @brief 判断回库黄线 Y 是否进入目标容差"""
-
-    if line_y is None:
-        return False
-    return abs(float(line_y) - float(RETURN_GARAGE_LINE_TARGET_Y_PX)) <= float(
-        RETURN_GARAGE_LINE_ALIGN_TOLERANCE_PX
-    )
-
-
-def _build_orbit_y_velocity(err_y, image_height):
-    """! @brief 根据图像高度归一化绕行纵向误差并生成速度"""
-
-    err_y = float(err_y)
-    if abs(err_y) <= float(MASTER_ORBIT_DEADZONE_Y_PX):
-        return 0.0
-    if float(MASTER_ORBIT_KP_Y) == 0.0:
-        return 0.0
-    scaled_error = err_y * (
-        float(MASTER_ORBIT_MAX_VY)
-        / abs(float(MASTER_ORBIT_KP_Y))
-        / float(image_height)
-    )
-    return _apply_min_speed(
-        scaled_error * float(MASTER_ORBIT_KP_Y),
-        MASTER_ORBIT_MAX_VY,
-        MASTER_ORBIT_MIN_SPEED,
-    )
-
-
-class MasterVisionHook:
-    """! @brief 主车物体搜索视觉 hook 状态
-
-    @details 维护视觉上下文、稳定计数、可靠事件和重发节奏
-    """
-
-    def __init__(
-        self,
-        min_area=OBJECT_MIN_AREA,
-        tolerance_x=OBJECT_X_TOLERANCE_PX,
-        tolerance_y=OBJECT_Y_TOLERANCE_PX,
-        stable_frames=OBJECT_STABLE_FRAMES,
-        next_reliable_seq=1,
-        now_ms=None,
-        event_resend_interval_ms=RELIABLE_RESEND_INTERVAL_MS,
-    ):
-        """! @brief 初始化主车视觉 hook 状态
-
-        @param min_area 目标面积下限
-        @param tolerance_x 横向误差容差, 单位像素
-        @param tolerance_y 纵向误差容差, 单位像素
-        @param stable_frames hook 命中所需连续稳定帧数
-        @param next_reliable_seq 可靠事件序号初始值
-        @param now_ms 毫秒时钟函数, None 时使用默认时钟
-        @param event_resend_interval_ms 可靠事件重发间隔, 单位毫秒
-        """
-
-        self.min_area = float(min_area)
-        self.tolerance_x = float(tolerance_x)
-        self.tolerance_y = float(tolerance_y)
-        self.required_stable_frames = int(stable_frames)
-        self._next_reliable_seq = int(next_reliable_seq) % SEQ_RING_SIZE
-        self._now_ms = now_ms or default_now_ms
-        self._event_resend_interval_ms = int(event_resend_interval_ms)
-        self.context = None
-        self._last_context_id = None
-        self._stable_count = 0
-        self._pending_event = None
-        self._pending_event_last_sent_ms = None
-        self._event_context_id = None
-        self._finish_contact_seen = False
-        self._last_return_line_y = None
-
-    def has_context(self):
-        """! @brief 判断是否已经建立视觉上下文
-
-        @return 是否存在有效视觉上下文
-        """
-
-        return self.context is not None
-
-    def has_pending_event(self):
-        """! @brief 判断是否存在等待确认的可靠事件"""
-
-        return self._pending_event is not None
-
-    def current_target_config_id(self):
-        """! @brief 返回当前 hook 使用的目标点配置编号"""
-
-        if self.context is None:
-            return Task.SEARCH
-        return int(self.context["arg"])
-
-    def is_finish_hook_context(self):
-        """! @brief 判断当前上下文是否为收尾判定 hook"""
-
-        if self.context is None:
-            return False
-        return (
-            int(self.context["state"]) == int(State.TRANSPORT_OBJECT)
-            and int(self.context["target"]) == int(Target.EDGE_LINE)
-            and int(self.context["arg"]) == int(Task.TRANSPORT_FINISH)
-        )
-
-    def is_orbit_correction_context(self):
-        """! @brief 判断当前上下文是否为绕行视觉修正 hook"""
-
-        if self.context is None:
-            return False
-        return (
-            int(self.context["state"]) == int(State.ORBITING)
-            and int(self.context["target"]) == int(Target.OBJECT)
-            and int(self.context["arg"]) == int(Task.ORBIT)
-        )
-
-    def is_return_line_context(self):
-        """! @brief 判断当前上下文是否为回库黄线 hook"""
-
-        if self.context is None:
-            return False
-        return (
-            int(self.context["target"]) == int(Target.EDGE_LINE)
-            and int(self.context["arg"]) == int(Task.RETURN_GARAGE_LINE)
-            and (
-                int(self.context["state"]) == int(State.RETURN_GARAGE_RETREAT)
-                or int(self.context["state"]) == int(State.RETURN_GARAGE_LINE)
-            )
-        )
-
-    def last_return_line_y(self):
-        """! @brief 返回上一帧有效回库黄线 Y"""
-
-        return self._last_return_line_y
-
-    def remember_return_line_y(self, line_y):
-        """! @brief 保存当前有效回库黄线 Y"""
-
-        if line_y is not None:
-            self._last_return_line_y = float(line_y)
-
-    def handle_control_line(self, line):
-        """! @brief 处理 RT1021 发来的同步或确认短帧
-
-        @param line 原始控制短帧
-        @return 需要回复的 ACK 帧, 无需回复时返回 None
-        """
-
-        sync_packet = parse_sync_packet(line)
-        if sync_packet is not None:
-            return self._handle_sync_packet(sync_packet)
-        ack_packet = parse_ack_packet(line)
-        if ack_packet is not None:
-            self._handle_ack_packet(ack_packet)
+def current_event_type():
+    current_task = state.current_task
+    if current_task is None:
         return None
+    task_state = int(current_task["state"])
+    target = int(current_task["target"])
+    arg = int(current_task["arg"])
+    if task_state == State.SEARCH_OBJECT and target == Target.OBJECT and arg == Task.SEARCH:
+        return Event.TARGET_FOUND
+    if task_state == State.SEARCH_OBJECT and target == Target.OBJECT and arg == Task.TRANSPORT:
+        return Event.ALIGNED
+    if task_state == State.TRANSPORT_OBJECT and target == Target.EDGE_LINE and arg == Task.TRANSPORT_FINISH:
+        return Event.ARRIVED
+    if task_state == State.RETURN_GARAGE_RETREAT and target == Target.EDGE_LINE and arg == Task.RETURN_GARAGE_LINE:
+        return Event.RETURN_LINE_ALIGNED
+    return None
 
-    def _handle_sync_packet(self, packet):
-        """! @brief 处理视觉上下文同步包
 
-        @param packet 解析后的同步包字段
-        @return 同步确认帧文本
-        """
+def required_stable_frames():
+    if is_finish_task_context():
+        return int(FINISH_HOOK_STABLE_FRAMES)
+    return int(OBJECT_STABLE_FRAMES)
 
+
+def resolve_event_value(observation_value, event_value):
+    if is_finish_task_context():
+        return int(float(event_value))
+    if is_return_line_task_context():
+        return int(float(observation_value))
+    current_task = state.current_task
+    if (
+        current_task is not None
+        and int(current_task["state"]) == int(State.SEARCH_OBJECT)
+        and int(current_task["target"]) == int(Target.OBJECT)
+        and int(current_task["arg"]) == int(Task.SEARCH)
+        and event_value is not None
+    ):
+        return int(event_value)
+    return int(float(observation_value))
+
+
+def allocate_event_seq():
+    reliable_seq = state.next_event_seq
+    state.next_event_seq = (reliable_seq + 1) % SEQ_RING_SIZE
+    return reliable_seq
+
+
+def create_pending_event(context_id, event, value):
+    threshold = state.track_dynamic_threshold
+    if threshold is None:
+        threshold = (0, 0, 0, 0, 0, 0)
+    state.pending_event = {
+        "reliable_seq": allocate_event_seq(),
+        "context_id": int(context_id),
+        "event": int(event),
+        "value": int(value),
+        "threshold": tuple(threshold),
+    }
+    state.pending_event_last_sent_ms = None
+    state.last_event_context_id = int(context_id)
+
+
+def next_event_frame():
+    pending_event = state.pending_event
+    if pending_event is None:
+        return None
+    now_ms = default_now_ms()
+    if not should_resend(
+        now_ms,
+        state.pending_event_last_sent_ms,
+        RELIABLE_RESEND_INTERVAL_MS,
+    ):
+        return None
+    state.pending_event_last_sent_ms = now_ms
+    return format_event_frame(
+        pending_event["reliable_seq"],
+        pending_event["context_id"],
+        pending_event["event"],
+        pending_event["value"],
+        pending_event.get("threshold"),
+    )
+
+
+def _allocate_local_vision_control_seq():
+    reliable_seq = state.next_local_vision_control_seq
+    state.next_local_vision_control_seq = (reliable_seq + 1) % SEQ_RING_SIZE
+    return reliable_seq
+
+
+def request_local_vision_control(action):
+    pending = state.pending_local_vision_control
+    if pending is not None and int(pending["action"]) == int(action):
+        return
+    state.pending_local_vision_control = {
+        "reliable_seq": _allocate_local_vision_control_seq(),
+        "action": int(action),
+    }
+    state.pending_local_vision_control_last_sent_ms = None
+
+
+def next_local_vision_control_frame():
+    pending = state.pending_local_vision_control
+    if pending is None:
+        return None
+    now_ms = default_now_ms()
+    if not should_resend(
+        now_ms,
+        state.pending_local_vision_control_last_sent_ms,
+        RELIABLE_RESEND_INTERVAL_MS,
+    ):
+        return None
+    state.pending_local_vision_control_last_sent_ms = now_ms
+    return format_local_vision_control_frame(
+        pending["reliable_seq"],
+        pending["action"],
+    )
+
+
+def send_pending_local_vision_control():
+    frame = next_local_vision_control_frame()
+    if frame is None:
+        return False
+    return write_reliable_line(frame)
+
+
+def ensure_yolo_control_paused():
+    if state.local_vision_control_paused:
+        return True
+    request_local_vision_control(LocalVisionControl.PAUSE)
+    send_pending_local_vision_control()
+    return False
+
+
+def request_yolo_control_resume():
+    request_local_vision_control(LocalVisionControl.RESUME)
+    send_pending_local_vision_control()
+
+
+def clear_local_vision_control_state():
+    state.pending_local_vision_control = None
+    state.pending_local_vision_control_last_sent_ms = None
+    state.local_vision_control_paused = False
+
+
+def _accept_finish_task_observation(context_id, observation_value, yellow_ratio, event_type):
+    if float(observation_value) <= 0.0:
+        state.stable_frame_count = 0
+        return
+    if not state.finish_contact_seen:
+        if float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0:
+            state.finish_contact_seen = True
+        state.stable_frame_count = 0
+        return
+    if float(yellow_ratio) > 0.0:
+        state.stable_frame_count = 0
+        return
+    state.stable_frame_count += 1
+    if state.stable_frame_count >= required_stable_frames():
+        create_pending_event(
+            context_id,
+            event_type,
+            resolve_event_value(observation_value, yellow_ratio),
+        )
+
+
+def _accept_return_line_observation(context_id, img, event_type):
+    if event_type == Event.RETURN_LINE_ALIGNED:
+        if not bool(state.return_line_gate_enabled):
+            state.stable_frame_count = 0
+            return
+        yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
+        if float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0:
+            create_pending_event(
+                context_id,
+                event_type,
+                int(float(yellow_ratio)),
+            )
+            state.stable_frame_count = 0
+            return
+        state.stable_frame_count = 0
+        return
+
+
+def _process_debug_threshold_preview_frame(img):
+    candidates = build_debug_threshold_candidates(img)
+    state.current_yolo_candidates = ()
+    state.current_object_candidates = candidates
+    draw_object_candidates_debug(img, candidates)
+    if candidates:
+        target_x, target_y = build_search_target_point(Task.SEARCH)
+        task_name, _, _, _, best_blob = choose_best_candidate(candidates, target_x, target_y)
+        draw_selected_candidate_debug(img, task_name, best_blob)
+        draw_protocol_target_point_debug(img, target_x, target_y)
+    img.draw_string(
+        2,
+        50,
+        "threshold cand=%d" % int(len(candidates)),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+    img.flush()
+
+
+def accept_observation(observation, img, event_value=None):
+    if state.local_vision_control_paused:
+        state.stable_frame_count = 0
+        return
+    current_task = state.current_task
+    if current_task is None:
+        return
+    if state.current_detection_source == "predict":
+        state.stable_frame_count = 0
+        return
+    context_id = int(current_task["context_id"])
+    observed_context_id, error_x, error_y, observation_value = observation
+    if int(observed_context_id) != context_id:
+        return
+    event_type = current_event_type()
+    if event_type is None:
+        state.stable_frame_count = 0
+        return
+    if (
+        state.pending_event is not None
+        or state.last_event_context_id == context_id
+    ):
+        return
+    if is_return_line_task_context():
+        _accept_return_line_observation(
+            context_id,
+            img,
+            event_type,
+        )
+        return
+    if is_finish_task_context():
+        _accept_finish_task_observation(context_id, observation_value, event_value, event_type)
+        return
+    if (
+        float(observation_value) >= float(OBJECT_MIN_AREA)
+        and abs(float(error_x)) <= float(OBJECT_X_TOLERANCE_PX)
+        and abs(float(error_y)) <= float(OBJECT_Y_TOLERANCE_PX)
+    ):
+        state.stable_frame_count += 1
+    else:
+        state.stable_frame_count = 0
+        return
+    if state.stable_frame_count >= required_stable_frames():
+        create_pending_event(
+            context_id,
+            event_type,
+            resolve_event_value(observation_value, event_value),
+        )
+
+
+def handle_control_frame(frame_bytes):
+    packet = parse_task_sync_packet(frame_bytes)
+    if packet is not None:
         context_id = int(packet["context_id"])
-        if self._should_apply_context(context_id):
-            self.context = {
+        if is_newer_seq(context_id, state.last_task_context_id):
+            next_is_orbit = (
+                int(packet["state"]) == int(State.ORBITING)
+                and int(packet["target"]) == int(Target.OBJECT)
+                and int(packet["arg"]) == int(Task.ORBIT)
+            )
+            preserve_track = (
+                state.track_task_name is not None
+                and next_is_orbit
+            )
+            clear_local_vision_control_state()
+            state.current_task = {
                 "context_id": context_id,
                 "state": int(packet["state"]),
                 "target": int(packet["target"]),
                 "arg": int(packet["arg"]),
             }
-            self._last_context_id = context_id
-            self._stable_count = 0
-            self._event_context_id = None
-            self._finish_contact_seen = False
-            self._last_return_line_y = None
+            state.last_task_context_id = context_id
+            state.stable_frame_count = 0
+            state.finish_contact_seen = False
+            state.return_line_gate_enabled = False
+            state.entry_yolo_pending = (
+                not is_return_line_task_context()
+                and is_entry_yolo_only_task_context()
+            )
+            clear_yolo_only_skip()
+            clear_yolo_retry_skip()
+            if not preserve_track:
+                state.clear_track()
         return format_ack_frame(packet["reliable_seq"])
 
-    def _should_apply_context(self, context_id):
-        """! @brief 判断上下文编号是否应覆盖当前上下文
+    packet = parse_local_vision_control_packet(frame_bytes)
+    if packet is not None:
+        action = int(packet["action"])
+        if action == int(LocalVisionControl.RETURN_LINE_GATE_ON):
+            state.return_line_gate_enabled = True
+        elif action == int(LocalVisionControl.RETURN_LINE_GATE_OFF):
+            state.return_line_gate_enabled = False
+        return format_local_vision_control_ack_frame(packet["reliable_seq"])
 
-        @param context_id 待判断的上下文编号
-        @return 是否应用该上下文
-        """
-
-        if self._last_context_id is None:
-            return True
-        if int(context_id) == int(self._last_context_id):
-            return False
-        return is_newer_seq(context_id, self._last_context_id)
-
-    def _handle_ack_packet(self, packet):
-        """! @brief 处理可靠事件确认包
-
-        @param packet 解析后的确认包字段
-        """
-
-        if self._pending_event is None:
-            return
-        if int(packet["reliable_seq"]) == int(self._pending_event["reliable_seq"]):
-            self._pending_event = None
-            self._pending_event_last_sent_ms = None
-
-    def build_observation(
-        self, valid, center_x, bottom_y, area, image_width, image_height
-    ):
-        """! @brief 根据物体中心、底边和面积生成观测字段
-
-        @param valid 当前帧是否存在有效目标
-        @param center_x 目标中心 x 坐标
-        @param bottom_y 目标底边 y 坐标
-        @param area 目标面积
-        @param image_width 图像宽度
-        @param image_height 图像高度
-        @return context_id, x, y, value 观测字段元组
-        """
-
-        context_id = 0
-        if self.context is not None:
-            context_id = int(self.context["context_id"])
-        if int(valid) != 1:
-            return context_id, 0.0, 0.0, 0.0
-        target_x, target_y = build_search_target_point(
-            image_width,
-            image_height,
-            self.current_target_config_id(),
-        )
-        return (
-            context_id,
-            float(center_x) - target_x,
-            float(bottom_y) - target_y,
-            float(area),
-        )
-
-    def build_return_line_observation(self, line_y):
-        """! @brief 根据回库黄线 Y 生成 hook 观测"""
-
-        context_id = 0
-        if self.context is not None:
-            context_id = int(self.context["context_id"])
-        if line_y is None:
-            return context_id, 0.0, 0.0, 0.0
-        return (
-            context_id,
-            0.0,
-            float(line_y) - float(RETURN_GARAGE_LINE_TARGET_Y_PX),
-            float(line_y),
-        )
-
-    def accept_observation(self, observation, hook_value=None):
-        """! @brief 累计 hook 条件并按需创建可靠事件
-
-        @param observation 观测字段元组
-        @param hook_value 当前 hook 使用的附加判定值
-        """
-
-        if self.context is None:
-            return
-        context_id = int(self.context["context_id"])
-        observed_context_id, x, y, value = observation
-        if int(observed_context_id) != context_id:
-            return
-        event_type = self._resolve_event_type()
-        if event_type is None:
-            self._stable_count = 0
-            return
-        if self._pending_event is not None or self._event_context_id == context_id:
-            return
-        if self.is_finish_hook_context():
-            self._accept_finish_hook_observation(context_id, value, hook_value, event_type)
-            return
-        if self.is_return_line_context():
-            self._accept_return_line_observation(
-                context_id, x, y, value, hook_value, event_type
-            )
-            return
-        if self._observation_matches_hook(x, y, value, hook_value):
-            self._stable_count += 1
-        else:
-            self._stable_count = 0
-            return
-        if self._stable_count >= self._required_stable_frames():
-            self._create_event(
-                context_id,
-                self._resolve_event_value(value, hook_value),
-                event_type,
-            )
-
-    def _accept_return_line_observation(
-        self, context_id, x, y, value, hook_value, event_type
-    ):
-        """! @brief 处理回库黄线配置下的对正与丢线完成事件"""
-
-        if event_type == Event.RETURN_LINE_ALIGNED:
-            if (
-                float(value) > 0.0
-                and float(value) <= float(RETURN_GARAGE_LINE_TARGET_Y_PX)
-            ):
-                self._stable_count += 1
-            else:
-                self._stable_count = 0
-                return
-        elif event_type == Event.RETURN_GARAGE_FINISHED:
-            self._stable_count = 0
-            return
-        else:
-            return
-        required_stable_frames = self._required_stable_frames()
-        if event_type == Event.RETURN_GARAGE_FINISHED:
-            required_stable_frames = 5
-        if self._stable_count >= required_stable_frames:
-            self._create_event(
-                context_id,
-                self._resolve_event_value(value, None),
-                event_type,
-            )
-
-    def _accept_finish_hook_observation(self, context_id, value, hook_value, event_type):
-        """! @brief 按“未接触 -> 接触 -> 再次脱离”过程处理收尾 hook"""
-
-        if float(value) <= 0.0:
-            self._stable_count = 0
-            return
-        yellow_ratio = float(hook_value or 0.0)
-        if not self._finish_contact_seen:
-            if yellow_ratio > (float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0):
-                self._finish_contact_seen = True
-            self._stable_count = 0
-            return
-        if yellow_ratio <= 0.0:
-            self._stable_count += 1
-        else:
-            self._stable_count = 0
-            return
-        if self._stable_count >= self._required_stable_frames():
-            self._create_event(
-                context_id,
-                self._resolve_event_value(value, hook_value),
-                event_type,
-            )
-
-    def _observation_matches_hook(self, x, y, value, hook_value):
-        """! @brief 判断单帧观测是否满足 hook 条件
-
-        @param x 横向误差
-        @param y 纵向误差
-        @param value 目标强度
-        @param hook_value 当前 hook 使用的附加判定值
-        @return 观测是否满足当前 hook 条件
-        """
-
-        return (
-            float(value) >= self.min_area
-            and abs(float(x)) <= self.tolerance_x
-            and abs(float(y)) <= self.tolerance_y
-        )
-
-    def _required_stable_frames(self):
-        """! @brief 返回当前上下文所需的连续稳定帧数"""
-
-        if self.is_finish_hook_context():
-            return int(FINISH_HOOK_STABLE_FRAMES)
-        return self.required_stable_frames
-
-    def _resolve_event_value(self, value, hook_value):
-        """! @brief 返回当前事件应携带的附加值"""
-
-        if self.is_finish_hook_context():
-            return int(float(hook_value or 0.0))
-        if self.is_return_line_context():
-            return int(float(value))
-        if (
-            self.context is not None
-            and int(self.context["state"]) == State.SEARCH_OBJECT
-            and int(self.context["target"]) == Target.OBJECT
-            and int(self.context["arg"]) == Task.SEARCH
-            and hook_value is not None
-        ):
-            return int(hook_value)
-        return int(float(value))
-
-    def _resolve_event_type(self):
-        """! @brief 根据当前上下文解析应回报的事件类型
-
-        @return 事件编号, 不支持的上下文返回 None
-        """
-
-        if self.context is None:
-            return None
-        state = int(self.context["state"])
-        target = int(self.context["target"])
-        arg = int(self.context["arg"])
-        if (
-            state == State.SEARCH_OBJECT
-            and target == Target.OBJECT
-            and arg == Task.SEARCH
-        ):
-            return Event.TARGET_FOUND
-        if (
-            state == State.SEARCH_OBJECT
-            and target == Target.OBJECT
-            and arg == Task.TRANSPORT
-        ):
-            return Event.ALIGNED
-        if (
-            state == State.ORBITING
-            and target == Target.OBJECT
-            and arg == Task.ORBIT
-        ):
-            return None
-        if (
-            state == State.TRANSPORT_OBJECT
-            and target == Target.EDGE_LINE
-            and arg == Task.TRANSPORT_FINISH
-        ):
-            return Event.ARRIVED
-        if (
-            state == State.RETURN_GARAGE_RETREAT
-            and target == Target.EDGE_LINE
-            and arg == Task.RETURN_GARAGE_LINE
-        ):
-            return Event.RETURN_LINE_ALIGNED
-        if (
-            state == State.RETURN_GARAGE_LINE
-            and target == Target.EDGE_LINE
-            and arg == Task.RETURN_GARAGE_LINE
-        ):
-            return Event.RETURN_GARAGE_FINISHED
+    packet = parse_event_ack_packet(frame_bytes)
+    pending_event = state.pending_event
+    if packet is not None and pending_event is not None:
+        if int(packet["reliable_seq"]) == int(pending_event["reliable_seq"]):
+            state.pending_event = None
+            state.pending_event_last_sent_ms = None
         return None
 
-    def _allocate_reliable_seq(self):
-        """! @brief 分配新的可靠事件序号
-
-        @return 新的可靠事件序号
-        """
-
-        reliable_seq = self._next_reliable_seq
-        self._next_reliable_seq = (self._next_reliable_seq + 1) % SEQ_RING_SIZE
-        return reliable_seq
-
-    def _create_event(self, context_id, value, event):
-        """! @brief 创建待确认事件
-
-        @param context_id 视觉上下文编号
-        @param value 事件附加值
-        @param event 事件编号
-        """
-
-        reliable_seq = self._allocate_reliable_seq()
-        self._pending_event = {
-            "reliable_seq": reliable_seq,
-            "context_id": int(context_id),
-            "event": int(event),
-            "value": int(float(value)),
-        }
-        self._pending_event_last_sent_ms = None
-        self._event_context_id = int(context_id)
-
-    def next_event_frame(self):
-        """! @brief 返回待确认事件帧, 没有事件时返回 None
-
-        @return 事件帧文本, 未到发送时机或无待确认事件时返回 None
-        """
-
-        if self._pending_event is None:
-            return None
-        now_ms = self._now_ms()
-        if not should_resend(
-            now_ms, self._pending_event_last_sent_ms, self._event_resend_interval_ms
-        ):
-            return None
-        self._pending_event_last_sent_ms = now_ms
-        return format_event_frame(
-            self._pending_event["reliable_seq"],
-            self._pending_event["context_id"],
-            self._pending_event["event"],
-            self._pending_event["value"],
-        )
+    packet = parse_local_vision_control_ack_packet(frame_bytes)
+    pending_control = state.pending_local_vision_control
+    if packet is not None and pending_control is not None:
+        if int(packet["reliable_seq"]) == int(pending_control["reliable_seq"]):
+            action = int(pending_control["action"])
+            state.pending_local_vision_control = None
+            state.pending_local_vision_control_last_sent_ms = None
+            state.local_vision_control_paused = action == LocalVisionControl.PAUSE
+    return None
 
 
-def init_uart():
-    """! @brief 初始化主通信串口
-
-    @return 已配置的 UART 对象
-    @raises RuntimeError 主机环境缺少 UART 时抛出
-    """
-
-    if UART is None:
-        raise RuntimeError("UART unavailable in host environment")
-    return UART(UART_ID, baudrate=UART_BAUDRATE)
-
-
-def init_sensor():
-    """! @brief 初始化 OpenART 摄像头参数
-
-    @return image_width, image_height 图像尺寸
-    @raises RuntimeError 主机环境缺少 sensor 时抛出
-    """
-
-    if sensor is None:
-        raise RuntimeError("sensor unavailable in host environment")
-    sensor.reset()
-    sensor.set_pixformat(sensor.RGB565)
-    sensor.set_framesize(sensor.QVGA)
-    sensor.set_vflip(True)
-    sensor.set_hmirror(True)
-    sensor.skip_frames(time=2000)  # type: ignore
-    sensor.set_auto_gain(False)  # type: ignore
-    sensor.set_auto_whitebal(False)
-    sensor.set_auto_exposure(False, exposure_us=EXP_TIME_US)
-    return sensor.width(), sensor.height()
-
-
-def process_uart_input(uart, rx_buffer, hook):
-    """! @brief 处理 RT1021 发来的控制短帧
-
-    @param uart 控制链路串口对象
-    @param rx_buffer 上一轮遗留的未完整输入 bytes
-    @param hook 主车视觉 hook 状态对象
-    @return 更新后的接收缓冲区
-    """
-
-    any_fn = getattr(uart, "any", None)
-    if any_fn is None:
+def process_uart_input(rx_buffer):
+    uart_device = state.uart_device
+    if uart_device is None:
         return rx_buffer
-    size = uart.any()
+    size = uart_device.any()
     if not size:
         return rx_buffer
-    try:
-        data = uart.read(size)
-        if data is None:
-            return rx_buffer
-        if isinstance(data, memoryview):
-            data = data.tobytes()
-        elif isinstance(data, bytearray):
-            data = bytes(data)
-        elif not isinstance(data, bytes):
-            return rx_buffer
-        rx_buffer += data
-    except Exception:
+    data = uart_device.read(size)
+    if data is None:
         return rx_buffer
+    if isinstance(data, memoryview):
+        data = data.tobytes()
+    elif isinstance(data, bytearray):
+        data = bytes(data)
+    if not isinstance(data, bytes):
+        return rx_buffer
+    rx_buffer += data
     while len(rx_buffer) >= FRAME_SIZE:
         frame_start = _find_control_frame_start(rx_buffer)
         if frame_start < 0:
-            return rx_buffer[-(FRAME_SIZE - 1):]
+            return rx_buffer[-(FRAME_SIZE - 1) :]
         if frame_start > 0:
             rx_buffer = rx_buffer[frame_start:]
         if len(rx_buffer) < FRAME_SIZE:
             return rx_buffer
         line = rx_buffer[:FRAME_SIZE]
         rx_buffer = rx_buffer[FRAME_SIZE:]
-        reply = hook.handle_control_line(line)
+        reply = handle_control_frame(line)
         if reply is not None:
-            write_reliable_line(uart, reply)
+            write_reliable_line(reply)
     return rx_buffer
 
 
-def build_observation_from_image(hook, img, image_width, image_height, yolo_net=None):
-    """! @brief 从图像生成一帧物体观测
+def _process_return_line_frame(img):
+    if state.current_task is None:
+        return
+    accept_observation((int(state.current_task["context_id"]), 0.0, 0.0, 1.0), img)
+    if MASTER_DEBUG_DISPLAY_ENABLED:
+        draw_finish_task_debug(img, None, build_finish_task_yellow_ratio_percent(img, None))
+        img.flush()
 
-    @param hook 主车视觉 hook 状态对象
-    @param img 当前图像对象
-    @param image_width 图像宽度
-    @param image_height 图像高度
-    @return observation, best_blob 元组
-    """
 
-    observation, best_blob, _, _ = build_observation_and_candidates_from_image(
-        hook,
-        img,
-        image_width,
-        image_height,
-        yolo_net,
+def _process_finish_task_frame(img):
+    current_task = state.current_task
+    if current_task is None:
+        return
+    yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
+    write_data_line(format_search_velocity_frame(0.0, 0.0))
+    _accept_finish_task_observation(
+        int(current_task["context_id"]),
+        1.0,
+        yellow_ratio,
+        current_event_type(),
     )
-    return observation, best_blob
+    if MASTER_DEBUG_DISPLAY_ENABLED:
+        draw_finish_task_debug(img, None, yellow_ratio)
+        img.flush()
 
 
-def build_observation_and_candidates_from_image(
-    hook,
-    img,
-    image_width,
-    image_height,
-    yolo_net=None,
-):
-    """! @brief 从图像生成一帧物体观测并返回全部候选色块"""
-
-    candidates = build_blob_candidates(img, yolo_net)
-    if not candidates:
-        return (
-            hook.build_observation(0, 0, 0, 0, image_width, image_height),
-            None,
-            None,
-            candidates,
-        )
-    target_x, target_y = build_search_target_point(
-        image_width,
-        image_height,
-        hook.current_target_config_id(),
-    )
-    use_target_window_filter = should_filter_candidates_by_target_window(hook)
-    if use_target_window_filter:
-        candidates = filter_candidates_in_target_window(
-            candidates,
-            target_x,
-            target_y,
-            OBJECT_X_TOLERANCE_PX,
-            OBJECT_Y_TOLERANCE_PX,
-        )
-        if not candidates:
-            return (
-                hook.build_observation(0, 0, 0, 0, image_width, image_height),
-                None,
-                None,
-                candidates,
-            )
-    if use_target_window_filter:
-        task_name, pixel_x, bottom_y, area, best_blob = choose_largest_area_candidate(
-            candidates
-        )
-    else:
-        task_name, pixel_x, bottom_y, area, best_blob = choose_best_candidate(
-            candidates,
-            target_x,
-            target_y,
-        )
-    return (
-        hook.build_observation(1, pixel_x, bottom_y, area, image_width, image_height),
-        best_blob,
-        task_name,
-        candidates,
-    )
-
-
-def build_hook_event_value(hook, img, best_blob, image_width, image_height, task_name=None):
-    """! @brief 根据当前 hook 生成事件附加判定值"""
-
-    if not hook.is_finish_hook_context():
-        if (
-            hook.context is not None
-            and int(hook.context["state"]) == State.SEARCH_OBJECT
-            and int(hook.context["target"]) == Target.OBJECT
-            and int(hook.context["arg"]) == Task.SEARCH
-            and task_name is not None
-        ):
-            return object_task_id(task_name)
-        return None
-    return build_finish_hook_yellow_ratio_percent(
-        img,
-        best_blob,
-        image_width,
-        image_height,
-    )
-
-
-def _process_return_line_frame(uart, hook, img, image_width, image_height):
-    """! @brief 处理回库黄线配置的一帧输出"""
-
-    line_y = build_return_line_y_from_image(
-        img,
-        image_width,
-        image_height,
-        hook.last_return_line_y(),
-    )
-    hook.remember_return_line_y(line_y)
-    velocity = build_return_line_velocity_from_y(line_y)
-    write_data_line(uart, format_search_velocity_frame(*velocity))
-    if int(hook.context["state"]) == int(State.RETURN_GARAGE_RETREAT):
-        hook.accept_observation(hook.build_return_line_observation(line_y))
+def process_task_frame(img):
+    if state.current_task is None and MASTER_DEBUG_DISPLAY_ENABLED:
+        _process_debug_threshold_preview_frame(img)
         return
-    if line_y is None:
-        hook.accept_observation(hook.build_return_line_observation(None), 1.0)
-        return
-    hook.accept_observation(hook.build_return_line_observation(line_y))
-
-
-def _draw_debug_line(img, x0, y0, x1, y1):
-    draw_line = getattr(img, "draw_line", None)
-    if draw_line is None:
-        return
-    try:
-        draw_line(int(x0), int(y0), int(x1), int(y1), color=(255, 255, 0))
-    except TypeError:
-        draw_line(int(x0), int(y0), int(x1), int(y1))
-
-
-def _draw_debug_cross(img, x, y):
-    draw_cross = getattr(img, "draw_cross", None)
-    if draw_cross is None:
-        return
-    try:
-        draw_cross(int(x), int(y), color=(255, 0, 0))
-    except TypeError:
-        draw_cross(int(x), int(y))
-
-
-def _draw_debug_protocol_point(img, image_width, image_height, x, y):
-    """! @brief 将协议坐标点映射到调试画面并绘制十字"""
-
-    draw_x = int(image_width) - 1 - int(x)
-    draw_y = int(image_height) - 1 - int(y)
-    _draw_debug_cross(img, draw_x, draw_y)
-
-
-def _draw_debug_rectangle(img, rect):
-    draw_rectangle = getattr(img, "draw_rectangle", None)
-    if draw_rectangle is None:
-        return
-    x, y, w, h = rect
-    try:
-        draw_rectangle(int(x), int(y), int(w), int(h))
-    except TypeError:
-        draw_rectangle((int(x), int(y), int(w), int(h)))
-
-
-def _draw_debug_rectangle_with_color(img, rect, color):
-    draw_rectangle = getattr(img, "draw_rectangle", None)
-    if draw_rectangle is None:
-        return
-    x, y, w, h = rect
-    try:
-        draw_rectangle(int(x), int(y), int(w), int(h), color=color)
-    except TypeError:
-        try:
-            draw_rectangle((int(x), int(y), int(w), int(h)), color=color)
-        except TypeError:
-            draw_rectangle((int(x), int(y), int(w), int(h)))
-
-
-def _draw_debug_text(img, x, y, text):
-    draw_string = getattr(img, "draw_string", None)
-    if draw_string is None:
-        return
-    try:
-        draw_string(int(x), int(y), str(text), color=(255, 255, 255))
-    except TypeError:
-        draw_string(int(x), int(y), str(text))
-
-
-def _draw_debug_text_with_color(img, x, y, text, color):
-    draw_string = getattr(img, "draw_string", None)
-    if draw_string is None:
-        return
-    try:
-        draw_string(int(x), int(y), str(text), color=color)
-    except TypeError:
-        draw_string(int(x), int(y), str(text))
-
-
-def draw_finish_hook_debug(img, hook, blob, image_width, image_height, yellow_ratio):
-    """! @brief 绘制搬运收尾黄线接触判定信息"""
-
-    if blob is None:
-        _draw_debug_text(img, 2, 50, "finish touch=0 ratio=0.0 no target")
-        return
-    rois, _ = _build_finish_hook_ring_rois(blob, image_width, image_height)
-    for roi in rois:
-        _draw_debug_rectangle_with_color(img, roi, (255, 255, 0))
-    threshold_percent = float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0
-    touched = float(yellow_ratio) > threshold_percent
-    seen = bool(getattr(hook, "_finish_contact_seen", False))
-    _draw_debug_text(
-        img,
-        2,
-        50,
-        "finish touch=%d seen=%d ratio=%.1f/%.1f"
-        % (1 if touched else 0, 1 if seen else 0, float(yellow_ratio), threshold_percent),
-    )
-
-
-def _debug_color_for_task_name(task_name):
-    for task in TASKS:
-        task_name_in_config, thresholds, _, _, _, _, _ = object_task_parts(task)
-        if task_name_in_config != task_name:
-            continue
-        first_threshold = task_thresholds(thresholds)[0]
-        lab_center = (
-            int((int(first_threshold[0]) + int(first_threshold[1])) / 2),
-            int((int(first_threshold[2]) + int(first_threshold[3])) / 2),
-            int((int(first_threshold[4]) + int(first_threshold[5])) / 2),
-        )
-        if omv_image is not None:
-            try:
-                return tuple(int(value) for value in omv_image.lab_to_rgb(lab_center))
-            except Exception:
-                break
-    return (255, 255, 255)
-
-
-def draw_master_return_line_debug(img, image_width, image_height, line_y, vx, vy):
-    """! @brief 绘制主车回库黄线判定调试信息"""
-
-    center_x = int(float(image_width) / 2.0)
-    half_width = int(RETURN_GARAGE_LINE_SAMPLE_HALF_WIDTH_PX)
-    max_thickness = int(RETURN_GARAGE_LINE_MAX_THICKNESS_PX)
-    target_y = int(RETURN_GARAGE_LINE_TARGET_Y_PX)
-    bottom_y = int(image_height) - 1
-
-    def flip_x(x):
-        return int(image_width) - 1 - int(x)
-
-    def flip_y(y):
-        return int(image_height) - 1 - int(y)
-
-    def draw_line(x0, y0, x1, y1):
-        _draw_debug_line(img, flip_x(x0), flip_y(y0), flip_x(x1), flip_y(y1))
-
-    draw_line(center_x - half_width, 0, center_x - half_width, bottom_y)
-    draw_line(center_x + half_width, 0, center_x + half_width, bottom_y)
-    draw_line(0, target_y, int(image_width) - 1, target_y)
-    if line_y is not None:
-        draw_line(0, int(line_y), int(image_width) - 1, int(line_y))
-        _draw_debug_cross(img, flip_x(center_x), flip_y(int(line_y)))
-        line_text = "line_y=%.1f" % float(line_y)
-    else:
-        line_text = "line_y=none"
-
-    _draw_debug_text(img, 2, 2, "master return line debug")
-    _draw_debug_text(img, 2, 14, "max h=%d x=%d..%d" % (
-        max_thickness,
-        center_x - half_width,
-        center_x + half_width,
-    ))
-    _draw_debug_text(img, 2, 26, "%s found=%d" % (line_text, 1 if line_y is not None else 0))
-    _draw_debug_text(img, 2, 38, "vx=%.1f vy=%.1f" % (float(vx), float(vy)))
-
-
-def run_master_return_line_debug():
-    """! @brief 只显示主车回库黄线判定调试画面"""
-
-    image_width, image_height = init_sensor()
-    last_line_y = None
-    while True:
-        img = sensor.snapshot()  # type: ignore
-        apply_lens_correction(img)
-        line_y = build_return_line_y_from_image(
-            img,
-            image_width,
-            image_height,
-            last_line_y,
-        )
-        if line_y is not None:
-            last_line_y = line_y
-        vx, vy = build_return_line_velocity_from_y(line_y)
-        draw_master_return_line_debug(img, image_width, image_height, line_y, vx, vy)
-
-
-def process_search_frame(uart, hook, img, image_width, image_height, yolo_net=None):
-    """! @brief 处理单帧主车搜索速度流和 hook 事件
-
-    @param uart 主车视觉串口
-    @param hook 主车视觉 hook 状态
-    @param img 当前图像对象
-    @param image_width 图像宽度
-    @param image_height 图像高度
-    """
-
-    if hook.has_pending_event():
-        event_frame = hook.next_event_frame()
+    if state.pending_event is not None:
+        event_frame = next_event_frame()
         if event_frame is not None:
-            write_reliable_line(uart, event_frame)
-        if not hook.is_return_line_context():
+            write_reliable_line(event_frame)
+        if not is_return_line_task_context():
             return
-    candidates = None
-    selected_candidate = None
-    debug_blob = None
-    debug_yellow_ratio = None
-    if MASTER_OBJECT_DEBUG_DRAW_ENABLED and not hook.is_return_line_context():
-        raw_candidates = build_blob_candidates(img, yolo_net)
-        draw_blob_candidates_debug(img, raw_candidates)
-        target_x, target_y = build_search_target_point(
-            image_width,
-            image_height,
-            hook.current_target_config_id(),
-        )
-        candidates = raw_candidates
-        use_target_window_filter = should_filter_candidates_by_target_window(hook)
-        if use_target_window_filter:
-            candidates = filter_candidates_in_target_window(
-                raw_candidates,
-                target_x,
-                target_y,
-                OBJECT_X_TOLERANCE_PX,
-                OBJECT_Y_TOLERANCE_PX,
-            )
-        if candidates:
-            if use_target_window_filter:
-                selected_candidate = choose_largest_area_candidate(candidates)
-            else:
-                selected_candidate = choose_best_candidate(
-                    candidates,
-                    target_x,
-                    target_y,
-                )
-            _, pixel_x, _, _, best_blob = selected_candidate
-            debug_blob = best_blob
-            _draw_debug_protocol_point(img, image_width, image_height, target_x, target_y)
-            draw_selected_marker(
-                img=img,
-                blob=best_blob,
-                pixel_x=pixel_x,
-                pixel_y=blob_center_y(best_blob),
-            )
-        if not hook.has_context() or hook.is_finish_hook_context():
-            debug_yellow_ratio = build_finish_hook_yellow_ratio_percent(
-                img,
-                debug_blob,
-                image_width,
-                image_height,
-            )
-            draw_finish_hook_debug(
-                img,
-                hook,
-                debug_blob,
-                image_width,
-                image_height,
-                debug_yellow_ratio,
-            )
-    if not hook.has_context():
+    if state.current_task is None:
+        if MASTER_DEBUG_DISPLAY_ENABLED:
+            yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
+            draw_finish_task_debug(img, None, yellow_ratio)
+            img.flush()
         return
-    if hook.is_return_line_context():
-        _process_return_line_frame(uart, hook, img, image_width, image_height)
+    if (
+        int(state.current_task["state"]) == int(State.TRANSPORT_OBJECT)
+        and int(state.current_task["target"]) == int(Target.EDGE_LINE)
+    ):
+        _process_finish_task_frame(img)
         return
-
-    if candidates is None:
-        observation, best_blob, selected_task_name, candidates = (
-            build_observation_and_candidates_from_image(
-                hook,
-                img,
-                image_width,
-                image_height,
-                yolo_net,
-            )
-        )
-    else:
-        selected_task_name = None
-        target_x, target_y = build_search_target_point(
-            image_width,
-            image_height,
-            hook.current_target_config_id(),
-        )
-        if not candidates:
-            observation = hook.build_observation(0, 0, 0, 0, image_width, image_height)
-            best_blob = None
-        else:
-            if selected_candidate is None or selected_candidate not in candidates:
-                if should_filter_candidates_by_target_window(hook):
-                    selected_candidate = choose_largest_area_candidate(candidates)
-                else:
-                    selected_candidate = choose_best_candidate(
-                        candidates,
-                        target_x,
-                        target_y,
-                    )
-            selected_task_name, pixel_x, bottom_y, area, best_blob = selected_candidate
-            if debug_blob is None:
-                debug_blob = best_blob
-            observation = hook.build_observation(
-                1, pixel_x, bottom_y, area, image_width, image_height
-            )
-    _, x, y, _ = observation
-    if hook.is_orbit_correction_context():
-        velocity = build_orbit_correction_velocity_from_observation(
-            observation,
-            image_height,
-        )
-    else:
-        velocity = build_search_velocity_from_observation(observation, image_height)
-    write_data_line(uart, format_search_velocity_frame(*velocity))
-    if hook.is_finish_hook_context() and debug_yellow_ratio is not None:
-        hook_value = debug_yellow_ratio
-    else:
-        hook_value = build_hook_event_value(
-            hook,
-            img,
-            best_blob,
-            image_width,
-            image_height,
-            selected_task_name,
-        )
-    hook.accept_observation(
-        observation,
-        hook_value=hook_value,
+    if is_return_line_task_context():
+        _process_return_line_frame(img)
+        return
+    observation, best_blob, task_name, _candidates = build_observation_and_candidates()
+    debug_log(
+        "object",
+        "src=%s cand=%d best=%s conf=%d fail=%s" % (
+            tracking_source_debug_name(state.current_detection_source).lower(),
+            len(_candidates),
+            task_name if task_name is not None else "none",
+            int(state.track_confidence),
+            tracking_failure_debug_name(state.track_failure_reason),
+        ),
     )
+    if best_blob is not None and state.current_detection_source != "predict":
+        remember_object_tracking(
+            task_name,
+            best_blob,
+            best_blob.cx(),
+            observation[2] + build_search_target_point(current_task_config_id())[1],
+            observation[3],
+            state.current_detection_source,
+        )
+    elif state.current_detection_source == "yolo":
+        state.clear_track()
+    if is_orbit_task_context():
+        velocity = build_orbit_correction_velocity_from_observation(observation)
+    else:
+        velocity = build_search_velocity_from_observation(observation)
+    write_data_line(format_search_velocity_frame(*velocity))
+    event_value = build_task_event_value(img, best_blob, task_name)
+    accept_observation(
+        observation,
+        img,
+        event_value=event_value,
+    )
+    if MASTER_DEBUG_DISPLAY_ENABLED:
+        draw_object_candidates_debug(img, _candidates)
+        if best_blob is not None and task_name is not None:
+            draw_selected_candidate_debug(img, task_name, best_blob)
+        target_x, target_y = build_search_target_point(current_task_config_id())
+        draw_protocol_target_point_debug(img, target_x, target_y)
+        draw_tracking_state_debug(img)
+        if is_finish_task_context():
+            draw_finish_task_debug(img, best_blob, event_value)
+        img.flush()
 
 
-def apply_lens_correction(img):
-    """! @brief 执行当前帧镜头畸变校准"""
+def init_uart():
+    return UART(UART_ID, baudrate=UART_BAUDRATE)
 
-    lens_corr = getattr(img, "lens_corr", None)
-    if lens_corr is None:
-        return
-    try:
-        lens_corr(strength=2.8, zoom=1.0)
-    except Exception:
-        return
+
+def init_sensor():
+    sensor.reset()
+    sensor.set_pixformat(sensor.RGB565)
+    sensor.set_framesize(sensor.QVGA)
+    sensor.set_vflip(True)
+    sensor.set_hmirror(True)
+    sensor.skip_frames(0, time=2000)
+    sensor.set_auto_gain(False)  # pyright: ignore[reportCallIssue]
+    sensor.set_auto_whitebal(False)
+    sensor.set_auto_exposure(False, exposure_us=EXP_TIME_US)
+    return sensor.width(), sensor.height()
 
 
 def run():
-    """! @brief 运行主车物体搜索视觉主循环"""
-
-    uart = init_uart()
-    image_width, image_height = init_sensor()
-    yolo_net = load_yolo_model()
-    hook = MasterVisionHook()
-    rx_buffer = b""
+    reset_runtime_state()
+    state.uart_device = init_uart()
+    init_sensor()
+    if OBJECT_DETECTION_USE_YOLO:
+        state.yolo_net = tf.load(YOLO_MODEL_PATH)
+    debug_log(
+        "boot",
+        "debug=%d yolo=%d"
+        % (1 if MASTER_DEBUG_DISPLAY_ENABLED else 0, 1 if OBJECT_DETECTION_USE_YOLO else 0),
+    )
+    last_frame_ms = default_now_ms()
 
     while True:
-        rx_buffer = process_uart_input(uart, rx_buffer, hook)
-        img = sensor.snapshot()  # type: ignore
-        apply_lens_correction(img)
-        if OBJECT_DETECTION_USE_YOLO:
-            process_search_frame(uart, hook, img, image_width, image_height, yolo_net)
+        state.rx_buffer = process_uart_input(state.rx_buffer)
+        img = sensor.snapshot()
+        now_ms = default_now_ms()
+        if now_ms >= last_frame_ms:
+            state.current_frame_interval_ms = now_ms - last_frame_ms
         else:
-            process_search_frame(uart, hook, img, image_width, image_height)
+            state.current_frame_interval_ms = reference_frame_interval_ms()
+        last_frame_ms = now_ms
+        img.lens_corr(strength=2.8, zoom=1.0)
+        state.current_image = img
+        state.current_image_width = int(img.width())
+        state.current_image_height = int(img.height())
+        state.current_detection_source = "miss"
+        if state.pending_local_vision_control is not None:
+            send_pending_local_vision_control()
+        skip_task_frame = False
+        if state.pending_event is not None:
+            state.current_yolo_candidates = ()
+            state.current_object_candidates = ()
+            debug_log("skip", "reason=pending_event")
+        elif is_return_line_task_context():
+            state.current_yolo_candidates = ()
+            state.current_object_candidates = ()
+            debug_log("skip", "reason=return_line")
+        else:
+            if state.current_task is None and MASTER_DEBUG_DISPLAY_ENABLED:
+                state.current_yolo_candidates = ()
+                state.current_object_candidates = ()
+            elif state.current_task is not None or MASTER_DEBUG_DISPLAY_ENABLED:
+                need_yolo = should_run_yolo_for_current_frame()
+                if not need_yolo:
+                    if (
+                        OBJECT_DETECTION_USE_YOLO
+                        and state.yolo_only_skip_active_for_frame
+                        and is_yolo_only_task_context()
+                    ):
+                        state.current_detection_source = "yolo"
+                        state.current_object_candidates = tuple(state.current_yolo_candidates)
+                    else:
+                        state.current_yolo_candidates = ()
+                        state.current_object_candidates = tuple(build_object_candidates(img, ()))
+                        if (
+                            state.current_task is not None
+                            and is_entry_yolo_only_task_context()
+                            and not state.entry_yolo_pending
+                        ):
+                            if state.current_detection_source == "yolo":
+                                state.current_detection_source = "miss"
+                            need_yolo = False
+                        else:
+                            need_yolo = (
+                                state.current_detection_source == "yolo"
+                                and not state.yolo_retry_skip_active_for_frame
+                            )
+                if need_yolo:
+                    yolo_requires_control = state.current_task is not None
+                    if yolo_requires_control and not ensure_yolo_control_paused():
+                        state.current_yolo_candidates = ()
+                        state.current_object_candidates = ()
+                        skip_task_frame = True
+                    else:
+                        raw_yolo_candidates = tuple(yolo_detect(img))
+                        if raw_yolo_candidates:
+                            state.current_detection_source = "yolo"
+                            record_yolo_frame_run()
+                            clear_yolo_retry_skip()
+                        else:
+                            record_yolo_retry_miss()
+                        state.current_yolo_candidates = raw_yolo_candidates
+                        state.current_object_candidates = tuple(
+                            build_object_candidates(img, raw_yolo_candidates)
+                        )
+                        if (
+                            state.current_task is not None
+                            and is_entry_yolo_only_task_context()
+                        ):
+                            state.entry_yolo_pending = False
+                        if yolo_requires_control:
+                            request_yolo_control_resume()
+            else:
+                state.current_yolo_candidates = ()
+                state.current_object_candidates = ()
+        try:
+            if not skip_task_frame:
+                process_task_frame(img)
+        finally:
+            state.record_frame_source(state.current_detection_source)
+            gc.collect()
 
 
 if __name__ == "__main__":

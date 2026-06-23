@@ -25,7 +25,7 @@
 
 ## 入口接口风格
 
-- `master/main_v2.py` 与 `assistant/main_v2.py` 的接口风格保持一致。
+- `master/main.py` 与 `assistant/main.py` 的接口风格保持一致。
 - 当前轮次真正处理的对象应显式传入接口, 例如 `img`。
 - 由当前处理对象可直接得到的派生信息, 例如图像宽高, 不作为参数层层下传。
 - 当前运行态只维护一份的共享状态, 统一放在入口级 `state` 对象中读取。
@@ -46,10 +46,11 @@
 
 - 接收 RT1021 下发的主车视觉同步帧, body 字段为 `context_id/state/target/arg`。
 - 使用主车视觉同步 topic 的 ACK 帧确认可靠同步包。
-- `master/main_v2.py` 按阶段切换识别方式：第一次找目标使用 YOLO 与色块混合，搬运前最后对正只使用 YOLO，绕行修正与搬运结束判定只使用色块，回库黄线任务跳过物体 YOLO。
+- `master/main.py` 按阶段切换识别方式：第一次找目标使用 YOLO 与色块混合，搬运前最后对正只使用 YOLO，绕行修正与搬运结束判定只使用色块，回库黄线任务跳过物体 YOLO。
 - 主车纯 YOLO 阶段按可调的隔帧间隔触发模型推理，间隔帧沿用上一帧目标结果，避免每帧都发停车控制。
 - 基于候选目标识别框中心点计算搜索 P 环。
 - 输出主车搜索速度短帧, body 字段为 `vx/vy/omega/has_omega`, 其中 `omega=0`、`has_omega=0`。
+- 主车绕行修正阶段输出独立 `vx/vy` 平移修正, 底盘侧负责绕行动作解算。
 - 速度短帧独立于 task 上下文, 每帧直接根据当前识别开关选择的结果输出。
 - 在 task 条件满足时输出主车视觉事件回报帧, body 字段为 `context_id/event/value`。
 - `arg=1` 表示主车物体搜索 task 配置, 稳定满足条件后回报 `TARGET_FOUND=6`。
@@ -67,10 +68,11 @@
 
 - 跟随模式识别主车色标。
 - 找物体模式可通过代码开关选择色块阈值或 YOLO 模型识别目标物体。
-- `assistant/main_v2.py` 按阶段切换识别方式：第一次找目标使用 YOLO 与色块混合，搬运前最后对正只使用 YOLO，绕行修正与正式搬运只使用色块，跟随与回库黄线任务跳过物体 YOLO。
+- `assistant/main.py` 按阶段切换识别方式：第一次找目标使用 YOLO 与色块混合，搬运前最后对正只使用 YOLO，绕行修正与正式搬运只使用色块，跟随与回库黄线任务跳过物体 YOLO。
 - 辅车纯 YOLO 阶段按可调的隔帧间隔触发模型推理，间隔帧沿用上一帧目标结果，避免每帧都发停车控制。
 - 在 OpenART 端完成角色内阶段判断。
 - 输出辅车视觉速度修正短帧, body 字段为 `vx/vy/omega/has_omega`, 其中 `omega=0`、`has_omega=0`。
+- 辅车绕行修正阶段输出独立 `vx/vy` 平移修正, 底盘侧负责绕行动作解算。
 - 接收辅车 RT1021 下发的本地任务同步帧, body 字段为 `state/target/arg`。
 - 使用本地任务同步 topic 的 ACK 帧确认可靠同步包。
 - 找物体同步 `arg=1` 稳定满足条件后输出辅车视觉事件回报帧 `event=6`。
@@ -80,7 +82,7 @@
 ## 辅车找物体规则
 
 - 找物体模式可通过代码开关选择色块阈值或 YOLO 模型，与主车目标搜索保持一致。
-- `assistant/main_v2.py` 在混合识别阶段先基于 YOLO ROI 和标定阈值尝试短期跟踪, 跟踪失手时短时保留预测目标, 连续失败或达到上限后回退到 YOLO；纯 YOLO 阶段不允许回退到色块，纯色块阶段不触发 YOLO。
+- `assistant/main.py` 在混合识别阶段先基于 YOLO ROI 和标定阈值尝试短期跟踪, 跟踪失手时短时保留预测目标, 连续失败或达到上限后回退到 YOLO；纯 YOLO 阶段不允许回退到色块，纯色块阶段不触发 YOLO。
 - 纯 YOLO 阶段的隔帧间隔可分别通过 `MASTER_YOLO_ONLY_INTERVAL_FRAMES` 与 `ASSISTANT_YOLO_ONLY_INTERVAL_FRAMES` 调整。
 - 找物体目标点按同步配置编号切换，可通过对应目标点参数调整。
 - 找物体同步 `arg=1` 使用寻找阶段目标点，默认 `x=160, y=210`。
@@ -108,27 +110,21 @@
 
 ```bash
 ./assistant/build.sh
-./assistant/build_v2.sh
 ./master/build.sh
-./master/build_v2.sh
 ```
 
 默认板端目录为 `/Volumes/NO NAME`。需要指定板端目录时使用 `TARGET_DIR`:
 
 ```bash
 TARGET_DIR=/path/to/device ./assistant/build.sh
-TARGET_DIR=/path/to/device ./assistant/build_v2.sh
 TARGET_DIR=/path/to/device ./master/build.sh
-TARGET_DIR=/path/to/device ./master/build_v2.sh
 ```
 
 需要同步 YOLO 权重时传入 `yolo` 参数:
 
 ```bash
 ./assistant/build.sh yolo
-./assistant/build_v2.sh yolo
 ./master/build.sh yolo
-./master/build_v2.sh yolo
 ```
 
 ## 物体识别开关
@@ -148,15 +144,13 @@ TARGET_DIR=/path/to/device ./master/build_v2.sh
 uv run python calibration/chromaforge_export_adapter.py \
   --source master/main.py \
   --output /tmp/master-main.py \
-  --task-constant-name TASKS
+  --task-constant-name OBJECT_TASKS
 ```
-
-v2 入口生成时使用 `--task-constant-name OBJECT_TASKS`。
 
 只需要配置片段时省略 `--source` 和 `--output`。
 
 ## 验证命令
 
 ```bash
-uv run --with pytest python -m pytest tests/unit tests/contract -q
+PYTHONPATH=. uv run --with pytest-xdist pytest -n auto tests/unit tests/contract -q
 ```
