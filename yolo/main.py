@@ -1,4 +1,4 @@
-# pyright: reportMissingImports=false, reportCallIssue=false
+# pyright: reportMissingImports=false, reportCallIssue=false, reportAttributeAccessIssue=false
 
 import seekfree, pyb
 import sensor, image, time, tf, gc
