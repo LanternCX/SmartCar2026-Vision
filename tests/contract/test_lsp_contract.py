@@ -11,7 +11,7 @@ def test_pyright_typecheck_passes() -> None:
     """仓库的 Pyright 检查必须通过."""
 
     result = subprocess.run(
-        ["npx", "pyright"],
+        ["npx", "pyright", "assistant", "master", "calibration", "tests", "yolo"],
         cwd=ROOT,
         capture_output=True,
         text=True,
