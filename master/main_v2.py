@@ -89,6 +89,8 @@ FRAME_HEAD = 0xA5
 # 协议整帧长度, 单位为 byte
 FRAME_SIZE = 15
 
+# 是否启用 YOLO。False 时目标相关流程统一使用色块识别。
+OBJECT_DETECTION_USE_YOLO = False
 # YOLO 模型文件路径
 YOLO_MODEL_PATH = "/sd/yolo.tflite"
 # YOLO 输入图像复制缩放比例
@@ -803,6 +805,14 @@ def object_task_id(task_name):
     return 0
 
 
+def current_blob_task_name():
+    if state.track_task_name is not None:
+        return state.track_task_name
+    if OBJECT_TASKS:
+        return OBJECT_TASKS[0][0]
+    return None
+
+
 def _object_task_thresholds(task_name):
     for task in OBJECT_TASKS:
         if task[0] == task_name:
@@ -900,6 +910,8 @@ def _tracked_search_roi():
 
 def _build_dynamic_blob_object_candidates(img, use_tracking_roi=True):
     task_name = state.track_task_name
+    if task_name is None and not use_tracking_roi:
+        task_name = current_blob_task_name()
     if task_name is None:
         return ()
     config = _object_task_config(task_name)
@@ -1081,13 +1093,16 @@ def should_use_blob_tracking():
         return False
     if is_return_line_task_context():
         return False
-    if is_yolo_only_task_context():
+    if bool(OBJECT_DETECTION_USE_YOLO) and is_yolo_only_task_context():
         return False
     if state.track_task_name is None or state.track_rect is None:
         return False
     if state.track_dynamic_threshold is None:
         return False
-    if state.track_frames_since_yolo >= int(ROI_TRACKING_MAX_FRAMES):
+    if (
+        bool(OBJECT_DETECTION_USE_YOLO)
+        and state.track_frames_since_yolo >= int(ROI_TRACKING_MAX_FRAMES)
+    ):
         return False
     if state.track_roi_failure_frames >= int(ROI_TRACKING_FAILURE_TO_YOLO_FRAMES):
         return False
@@ -1175,6 +1190,8 @@ def should_skip_yolo_retry_frame():
 
 
 def should_run_yolo_for_current_frame():
+    if not bool(OBJECT_DETECTION_USE_YOLO):
+        return False
     if state.pending_event is not None:
         return False
     if is_return_line_task_context():
@@ -1255,7 +1272,7 @@ def build_object_candidates(img, yolo_candidates):
         state.current_detection_source = "miss"
         state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
         return ()
-    if is_blob_only_task_context():
+    if not bool(OBJECT_DETECTION_USE_YOLO) or is_blob_only_task_context():
         state.current_detection_source = "roi"
         state.track_failure_reason = TrackFailureReason.NONE
         return tuple(_build_dynamic_blob_object_candidates(img, use_tracking_roi=False))
@@ -2795,8 +2812,13 @@ def run():
     reset_runtime_state()
     state.uart_device = init_uart()
     init_sensor()
-    state.yolo_net = tf.load(YOLO_MODEL_PATH)
-    debug_log("boot", "debug=%d yolo=%d" % (1 if MASTER_DEBUG_DISPLAY_ENABLED else 0, 1))
+    if OBJECT_DETECTION_USE_YOLO:
+        state.yolo_net = tf.load(YOLO_MODEL_PATH)
+    debug_log(
+        "boot",
+        "debug=%d yolo=%d"
+        % (1 if MASTER_DEBUG_DISPLAY_ENABLED else 0, 1 if OBJECT_DETECTION_USE_YOLO else 0),
+    )
     last_frame_ms = default_now_ms()
 
     while True:
@@ -2831,7 +2853,11 @@ def run():
             elif state.current_task is not None or MASTER_DEBUG_DISPLAY_ENABLED:
                 need_yolo = should_run_yolo_for_current_frame()
                 if not need_yolo:
-                    if state.yolo_only_skip_active_for_frame and is_yolo_only_task_context():
+                    if (
+                        OBJECT_DETECTION_USE_YOLO
+                        and state.yolo_only_skip_active_for_frame
+                        and is_yolo_only_task_context()
+                    ):
                         state.current_detection_source = "yolo"
                         state.current_object_candidates = tuple(state.current_yolo_candidates)
                     else:

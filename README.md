@@ -137,6 +137,8 @@ TARGET_DIR=/path/to/device ./master/build_v2.sh
 
 - `master/main.py` 中的 `OBJECT_DETECTION_USE_YOLO`
 - `assistant/main.py` 中的 `OBJECT_DETECTION_USE_YOLO`
+- `master/main_v2.py` 中的 `OBJECT_DETECTION_USE_YOLO`
+- `assistant/main_v2.py` 中的 `OBJECT_DETECTION_USE_YOLO`
 
 设为 `False` 时使用当前色块阈值识别，设为 `True` 时使用 `yolo.tflite` 模型识别。
 

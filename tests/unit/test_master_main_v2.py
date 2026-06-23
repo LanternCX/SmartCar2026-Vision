@@ -209,6 +209,49 @@ def test_master_main_v2_yolo_only_mode_runs_yolo_every_configured_interval() -> 
     assert module.should_run_yolo_for_current_frame() is True
 
 
+def test_master_main_v2_disable_yolo_uses_blob_candidates_in_yolo_only_task() -> None:
+    module = load_master_v2()
+    module.OBJECT_DETECTION_USE_YOLO = False
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=12,
+            state=int(module.State.SEARCH_OBJECT),
+            target=int(module.Target.OBJECT),
+            arg=int(module.Task.TRANSPORT),
+        )
+    )
+
+    class Blob:
+        def rect(self):
+            return (150, 10, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def area(self):
+            return 400.0
+
+    img = DynamicThresholdRoiImage(module.OBJECT_TASKS[0][1][0], [Blob()])
+
+    assert module.should_run_yolo_for_current_frame() is False
+
+    candidates = module.build_object_candidates(img, ())
+
+    assert tuple(candidate[:4] for candidate in candidates) == (("red", 160.0, 230, 400.0),)
+    assert module.state.current_detection_source == "roi"
+
+
+def test_master_main_v2_disable_yolo_removes_roi_max_frame_limit() -> None:
+    module = load_master_v2()
+    module.OBJECT_DETECTION_USE_YOLO = False
+    module.ROI_TRACKING_MAX_FRAMES = 3
+    module.handle_control_frame(task_sync_frame(module, context_id=12))
+    _seed_master_short_track(module, frames_since_yolo=3)
+
+    assert module.should_use_blob_tracking() is True
+
+
 def test_master_main_v2_transport_align_ignores_blob_tracking_candidates() -> None:
     module = load_master_v2()
     module.handle_control_frame(

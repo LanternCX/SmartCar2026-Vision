@@ -861,6 +861,62 @@ def test_assistant_main_v2_build_object_candidates_prefers_blob_tracking_between
     assert candidates[0][5].rect() == (150, 20, 20, 20)
 
 
+def test_assistant_main_v2_disable_yolo_uses_blob_candidates_in_yolo_only_task() -> None:
+    """关闭 YOLO 后, 辅车纯 YOLO 阶段也应直接使用色块候选."""
+
+    module = load_assistant_v2()
+    module.OBJECT_DETECTION_USE_YOLO = False
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+
+    class Blob:
+        def rect(self):
+            return (150, 20, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def cy(self):
+            return 30.0
+
+        def area(self):
+            return 400.0
+
+    img = DynamicThresholdRoiImage(module.OBJECT_TASKS[0][1][0], [Blob()])
+
+    assert module.should_run_yolo_for_current_frame() is False
+
+    candidates = module.build_object_candidates(img, ())
+
+    assert tuple(candidate[:5] for candidate in candidates) == (("red", 160.0, 30.0, 220.0, 400.0),)
+    assert module.state.current_detection_source == "roi"
+
+
+def test_assistant_main_v2_disable_yolo_removes_roi_max_frame_limit() -> None:
+    """关闭 YOLO 后, 辅车 ROI 跟踪不再受连续未跑 YOLO 帧数限制."""
+
+    module = load_assistant_v2()
+    module.OBJECT_DETECTION_USE_YOLO = False
+    module.ROI_TRACKING_MAX_FRAMES = 3
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
+        )
+    )
+    _seed_assistant_short_track(module, frames_since_yolo=3)
+
+    assert module.should_use_blob_tracking() is True
+
+
 def test_assistant_main_v2_build_object_candidates_fallbacks_to_yolo_in_approach_object() -> None:
     """辅车接近物体态传统候选失败达到阈值时允许回退到 YOLO."""
 

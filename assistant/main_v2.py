@@ -92,6 +92,8 @@ FRAME_BODY_SIZE = 10
 FRAME_HEAD = 0xA5
 # 协议整帧长度, 单位为 byte
 FRAME_SIZE = 15
+# 是否启用 YOLO。False 时目标相关流程统一使用色块识别。
+OBJECT_DETECTION_USE_YOLO = False
 # YOLO 模型文件路径
 YOLO_MODEL_PATH = "/sd/yolo.tflite"
 # YOLO 输入图像复制缩放比例
@@ -778,6 +780,17 @@ def object_task_id(task_name):
     return 0
 
 
+def current_blob_task_name():
+    if state.track_task_name is not None:
+        return state.track_task_name
+    task_name = object_task_name_from_id(state.current_object_id())
+    if task_name is not None:
+        return task_name
+    if OBJECT_TASKS:
+        return OBJECT_TASKS[0][0]
+    return None
+
+
 def _object_task_thresholds(task_name):
     for task in OBJECT_TASKS:
         if task[0] == task_name:
@@ -793,6 +806,8 @@ def _object_task_config(task_name):
 
 
 def load_yolo_model():
+    if not OBJECT_DETECTION_USE_YOLO:
+        return None
     if state.yolo_net is None:
         state.yolo_net = tf.load(YOLO_MODEL_PATH)
     return state.yolo_net
@@ -903,6 +918,8 @@ def _tracked_search_roi():
 
 def _build_dynamic_blob_object_candidates(img, use_tracking_roi=True):
     task_name = state.track_task_name
+    if task_name is None and not use_tracking_roi:
+        task_name = current_blob_task_name()
     if task_name is None:
         return ()
     config = _object_task_config(task_name)
@@ -945,6 +962,15 @@ def build_object_candidates(img, yolo_candidates):
     state.current_image = img
     state.current_image_width = int(img.width())
     state.current_image_height = int(img.height())
+    if not bool(OBJECT_DETECTION_USE_YOLO):
+        candidates = _build_dynamic_blob_object_candidates(img, use_tracking_roi=False)
+        if candidates:
+            state.current_detection_source = "roi"
+            state.track_failure_reason = TrackFailureReason.NONE
+            return tuple(candidates)
+        state.current_detection_source = "miss"
+        state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
+        return ()
     if current_sync_is_blob_only(state.current_sync):
         if state.track_task_name is None:
             state.current_detection_source = "miss"
@@ -2410,13 +2436,16 @@ def should_use_blob_tracking():
         and not (state.current_sync is None and ASSISTANT_DEBUG_DISPLAY_ENABLED)
     ):
         return False
-    if current_sync_is_yolo_only(state.current_sync):
+    if bool(OBJECT_DETECTION_USE_YOLO) and current_sync_is_yolo_only(state.current_sync):
         return False
     if state.track_task_name is None or state.track_rect is None:
         return False
     if state.track_dynamic_threshold is None:
         return False
-    if state.track_frames_since_yolo >= int(ROI_TRACKING_MAX_FRAMES):
+    if (
+        bool(OBJECT_DETECTION_USE_YOLO)
+        and state.track_frames_since_yolo >= int(ROI_TRACKING_MAX_FRAMES)
+    ):
         return False
     if state.track_roi_failure_frames >= int(ROI_TRACKING_FAILURE_TO_YOLO_FRAMES):
         return False
@@ -2424,6 +2453,8 @@ def should_use_blob_tracking():
 
 
 def should_run_yolo_for_current_frame():
+    if not bool(OBJECT_DETECTION_USE_YOLO):
+        return False
     if state.has_pending_event():
         return False
     if (
@@ -2885,7 +2916,11 @@ def run():
     state.uart_device = init_uart()
     init_sensor()
     state.yolo_net = load_yolo_model()
-    debug_log("boot", "debug=%d yolo=%d" % (1 if ASSISTANT_DEBUG_DISPLAY_ENABLED else 0, 1))
+    debug_log(
+        "boot",
+        "debug=%d yolo=%d"
+        % (1 if ASSISTANT_DEBUG_DISPLAY_ENABLED else 0, 1 if OBJECT_DETECTION_USE_YOLO else 0),
+    )
     last_frame_ms = default_now_ms()
     while True:
         state.rx_buffer = process_uart_input(state.rx_buffer)
@@ -2918,7 +2953,11 @@ def run():
         ):
             need_yolo = should_run_yolo_for_current_frame()
             if not need_yolo:
-                if state.yolo_only_skip_active_for_frame and current_sync_is_yolo_only(state.current_sync):
+                if (
+                    OBJECT_DETECTION_USE_YOLO
+                    and state.yolo_only_skip_active_for_frame
+                    and current_sync_is_yolo_only(state.current_sync)
+                ):
                     state.current_detection_source = "yolo"
                     state.current_object_candidates = tuple(state.current_yolo_candidates)
                 else:
