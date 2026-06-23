@@ -1,16 +1,16 @@
-"""辅车视觉 main_v2 行为测试."""
+"""辅车视觉默认入口行为测试."""
 
 import inspect
 import pytest
 
 from tests.test_support import load_role_entry_module
-import tests.unit.test_assistant_object_approach as legacy_tests
+import tests.unit.assistant_object_approach_support as legacy_tests
 
 
 def load_assistant_v2():
-    """加载辅车视觉 main_v2 入口模块."""
+    """加载辅车视觉默认入口模块."""
 
-    module = load_role_entry_module("assistant", "main_v2.py", "assistant_main_v2_test_module")
+    module = load_role_entry_module("assistant", "main.py", "assistant_main_test_module")
     module.reset_runtime_state()
     module.state.yolo_net = "fake-yolo-net"
     return module

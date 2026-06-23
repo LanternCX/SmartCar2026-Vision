@@ -1,4 +1,4 @@
-"""主车 main_v2 协议契约测试."""
+"""主辅车默认入口协议契约测试."""
 
 from tests.test_support import (
     MODE_ACK,
@@ -14,24 +14,24 @@ from tests.test_support import (
 )
 
 
-def load_master_v2():
-    module = load_role_entry_module("master", "main_v2.py", "vision_master_v2_contract_module")
+def load_master_main():
+    module = load_role_entry_module("master", "main.py", "vision_master_contract_module")
     module.reset_runtime_state()
     return module
 
 
-def load_assistant_v2():
+def load_assistant_main():
     module = load_role_entry_module(
         "assistant",
-        "main_v2.py",
-        "vision_assistant_v2_contract_module",
+        "main.py",
+        "vision_assistant_contract_module",
     )
     module.reset_runtime_state()
     return module
 
 
-def test_master_main_v2_formats_velocity_and_reliable_event_frames() -> None:
-    module = load_master_v2()
+def test_master_main_formats_velocity_and_reliable_event_frames() -> None:
+    module = load_master_main()
     velocity_frame = decode_frame(module.format_search_velocity_frame(1.0, -0.5))
     ack_frame = decode_frame(module.format_ack_frame(12))
     event_frame = decode_frame(
@@ -65,8 +65,8 @@ def test_master_main_v2_formats_velocity_and_reliable_event_frames() -> None:
     }
 
 
-def test_master_main_v2_velocity_frame_keeps_only_vx_and_vy_fields() -> None:
-    module = load_master_v2()
+def test_master_main_velocity_frame_keeps_only_vx_and_vy_fields() -> None:
+    module = load_master_main()
     frame = decode_frame(module.format_search_velocity_frame(1.25, -0.5))
 
     assert frame is not None
@@ -78,8 +78,8 @@ def test_master_main_v2_velocity_frame_keeps_only_vx_and_vy_fields() -> None:
     }
 
 
-def test_master_main_v2_missing_target_velocity_frame_uses_configured_search_speed() -> None:
-    module = load_master_v2()
+def test_master_main_missing_target_velocity_frame_uses_configured_search_speed() -> None:
+    module = load_master_main()
     frame = decode_frame(
         module.format_search_velocity_frame(
             module.MASTER_MISSING_SEARCH_VX,
@@ -98,8 +98,8 @@ def test_master_main_v2_missing_target_velocity_frame_uses_configured_search_spe
     }
 
 
-def test_master_main_v2_return_line_aligned_event_uses_reliable_event_topic() -> None:
-    module = load_master_v2()
+def test_master_main_return_line_aligned_event_uses_reliable_event_topic() -> None:
+    module = load_master_main()
     assert int(module.Event.RETURN_LINE_ALIGNED) == 10
     aligned_frame = decode_frame(
         module.format_event_frame(32, 7, module.Event.RETURN_LINE_ALIGNED, 160)
@@ -115,8 +115,8 @@ def test_master_main_v2_return_line_aligned_event_uses_reliable_event_topic() ->
     }
 
 
-def test_assistant_main_v2_formats_velocity_and_reliable_event_frames_with_master_style_api() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_formats_velocity_and_reliable_event_frames_with_master_style_api() -> None:
+    module = load_assistant_main()
     velocity_frame = decode_frame(module.format_search_velocity_frame(1.0, -0.5))
     ack_frame = decode_frame(module.format_ack_frame(12))
     event_frame = decode_frame(
@@ -149,8 +149,8 @@ def test_assistant_main_v2_formats_velocity_and_reliable_event_frames_with_maste
     }
 
 
-def test_assistant_main_v2_return_line_aligned_event_uses_reliable_event_topic() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_return_line_aligned_event_uses_reliable_event_topic() -> None:
+    module = load_assistant_main()
     assert int(module.Event.RETURN_LINE_ALIGNED) == 10
     aligned_frame = decode_frame(
         module.format_event_frame(30, module.Event.RETURN_LINE_ALIGNED, 160)
@@ -165,8 +165,8 @@ def test_assistant_main_v2_return_line_aligned_event_uses_reliable_event_topic()
     }
 
 
-def test_assistant_main_v2_exposes_master_style_task_sync_helpers() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_exposes_master_style_task_sync_helpers() -> None:
+    module = load_assistant_main()
     frame = encode_frame(
         MODE_TCP,
         module.Topic.ASSISTANT_VISION_TASK_SYNC,

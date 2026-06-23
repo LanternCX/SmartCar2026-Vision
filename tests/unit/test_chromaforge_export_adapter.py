@@ -316,28 +316,6 @@ def test_role_build_script_generates_master_output_from_shared_rules(tmp_path) -
     rules = json.loads(load_rules_json())
     yellow_threshold = _first_yellow_threshold(rules)
 
-    assert "('red'" in uploaded
-    assert "'yellow'" not in uploaded
-    if yellow_threshold is not None:
-        assert "FINISH_HOOK_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
-        assert "RETURN_GARAGE_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
-    assert "threshold_index" not in uploaded
-
-
-def test_role_build_v2_script_generates_master_v2_output_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "master-v2-device"
-    target_dir.mkdir()
-
-    _run_role_build_script_preserving_sources(
-        "master/build_v2.sh",
-        target_dir,
-        preserved_sources=("master/main_v2.py",),
-    )
-
-    uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
-    rules = json.loads(load_rules_json())
-    yellow_threshold = _first_yellow_threshold(rules)
-
     assert "OBJECT_TASKS = (" in uploaded
     assert "('red'" in uploaded
     assert "'yellow'" not in uploaded
@@ -347,11 +325,11 @@ def test_role_build_v2_script_generates_master_v2_output_from_shared_rules(tmp_p
     assert "threshold_index" not in uploaded
 
 
-def test_role_build_v2_script_rewrites_master_v2_source_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "master-v2-copy-only-device"
+def test_role_build_script_rewrites_master_source_from_shared_rules(tmp_path) -> None:
+    target_dir = tmp_path / "master-copy-only-device"
     target_dir.mkdir()
     root_dir = DEFAULT_RULES_PATH.parent.parent
-    source_path = root_dir / "master" / "main_v2.py"
+    source_path = root_dir / "master" / "main.py"
     original_text = source_path.read_text(encoding="utf-8")
     modified_text = original_text.replace(
         "OBJECT_TASKS = (",
@@ -361,7 +339,7 @@ def test_role_build_v2_script_rewrites_master_v2_source_from_shared_rules(tmp_pa
     source_path.write_text(modified_text, encoding="utf-8")
     try:
         subprocess.run(
-            ["bash", "master/build_v2.sh"],
+            ["bash", "master/build.sh"],
             check=True,
             cwd=root_dir,
             env={
@@ -398,33 +376,11 @@ def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path
         assert "RETURN_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
 
 
-def test_role_build_v2_script_generates_assistant_v2_output_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "assistant-v2-device"
-    target_dir.mkdir()
-
-    _run_role_build_script_preserving_sources(
-        "assistant/build_v2.sh",
-        target_dir,
-        preserved_sources=("assistant/main_v2.py",),
-    )
-
-    uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
-    rules = json.loads(load_rules_json())
-    yellow_threshold = _first_yellow_threshold(rules)
-
-    assert "OBJECT_TASKS = (" in uploaded
-    assert "('red'" in uploaded
-    assert "'yellow'" not in uploaded
-    if yellow_threshold is not None:
-        assert "RETURN_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
-    assert "threshold_index" not in uploaded
-
-
-def test_role_build_v2_script_rewrites_assistant_v2_source_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "assistant-v2-copy-only-device"
+def test_role_build_script_rewrites_assistant_source_from_shared_rules(tmp_path) -> None:
+    target_dir = tmp_path / "assistant-copy-only-device"
     target_dir.mkdir()
     root_dir = DEFAULT_RULES_PATH.parent.parent
-    source_path = root_dir / "assistant" / "main_v2.py"
+    source_path = root_dir / "assistant" / "main.py"
     original_text = source_path.read_text(encoding="utf-8")
     modified_text = original_text.replace(
         "OBJECT_TASKS = (",
@@ -434,7 +390,7 @@ def test_role_build_v2_script_rewrites_assistant_v2_source_from_shared_rules(tmp
     source_path.write_text(modified_text, encoding="utf-8")
     try:
         subprocess.run(
-            ["bash", "assistant/build_v2.sh"],
+            ["bash", "assistant/build.sh"],
             check=True,
             cwd=root_dir,
             env={
