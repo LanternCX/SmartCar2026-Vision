@@ -181,7 +181,7 @@ FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO = 0.75
 # 搬运收尾固定物体区域顶部比例, 区域覆盖反转矫正后图像的底部三分之一
 FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO = 2.0 / 3.0
 # 搬运收尾黄色接触占比阈值
-FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.1
+FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.10
 # 搬运收尾脱离接触后的稳定帧数
 FINISH_HOOK_STABLE_FRAMES = 2
 
@@ -1679,7 +1679,16 @@ def _count_yellow_pixels_in_roi(img, roi):
         merge=True,
     )
     if not blobs:
-        return 0
+        get_pixel = getattr(img, "get_pixel", None)
+        if get_pixel is None:
+            return 0
+        yellow_pixels = 0
+        left, top, width, height = roi
+        for y in range(int(top), int(top) + int(height)):
+            for x in range(int(left), int(left) + int(width)):
+                if _pixel_matches_threshold(get_pixel(int(x), int(y)), FINISH_HOOK_YELLOW_THRESHOLD):
+                    yellow_pixels += 1
+        return yellow_pixels
     yellow_pixels = 0.0
     for blob in blobs:
         yellow_pixels += blob_area(blob)
@@ -2516,9 +2525,15 @@ def _accept_finish_task_observation(context_id, observation_value, yellow_ratio,
     if not state.finish_contact_seen:
         if float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0:
             state.finish_contact_seen = True
+            if required_stable_frames() <= 0:
+                create_pending_event(
+                    context_id,
+                    event_type,
+                    resolve_event_value(observation_value, yellow_ratio),
+                )
         state.stable_frame_count = 0
         return
-    if float(yellow_ratio) > 0.0:
+    if float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0:
         state.stable_frame_count = 0
         return
     state.stable_frame_count += 1

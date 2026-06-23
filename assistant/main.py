@@ -130,7 +130,7 @@ RETURN_LINE_TOUCH_ROI_RIGHT_RATIO = 0.75
 # 回库 touch 固定物体区域顶部比例
 RETURN_LINE_TOUCH_ROI_TOP_RATIO = 2.0 / 3.0
 # 回库 touch 黄色接触占比阈值
-RETURN_LINE_TOUCH_RATIO_THRESHOLD = 0.1
+RETURN_LINE_TOUCH_RATIO_THRESHOLD = 0.05
 
 # 跟随阶段的横向死区, 单位为 px
 FOLLOW_X_DEADZONE_PX = 5.0
@@ -139,7 +139,7 @@ FOLLOW_TARGET_Y = 45.0
 # 跟随阶段的纵向死区, 单位为 px
 FOLLOW_Y_DEADZONE_PX = 8.0
 # 跟随阶段横向控制比例系数
-FOLLOW_CONTROL_KP_X = 0.04
+FOLLOW_CONTROL_KP_X = 0.03
 # 跟随阶段纵向控制比例系数
 FOLLOW_CONTROL_KP_Y = -0.10
 # 跟随阶段最小输出速度
@@ -187,7 +187,7 @@ OBJECT_APPROACH_TARGET_Y_PX = 200.0
 OBJECT_ORBIT_TARGET_X_PX = 160.0
 # 绕目标阶段期望的图像纵向位置, 单位为 px
 OBJECT_ORBIT_TARGET_Y_PX = 200.0
-# 辅车运输阶段期望的图像纵向位置, 单位为 px
+# 辅车运输阶段图像纵向命中线, 单位为 px
 ASSISTANT_TRANSPORT_TARGET_Y_PX = 240.0
 # 目标最小有效面积阈值
 OBJECT_MIN_AREA = 50.0
@@ -1406,7 +1406,16 @@ def _count_yellow_pixels_in_roi(img, roi):
         merge=True,
     )
     if not blobs:
-        return 0
+        get_pixel = getattr(img, "get_pixel", None)
+        if get_pixel is None:
+            return 0
+        yellow_pixels = 0
+        left, top, width, height = roi
+        for y in range(int(top), int(top) + int(height)):
+            for x in range(int(left), int(left) + int(width)):
+                if _pixel_matches_threshold(get_pixel(int(x), int(y)), RETURN_LINE_YELLOW_THRESHOLD):
+                    yellow_pixels += 1
+        return yellow_pixels
     yellow_pixels = 0.0
     for blob in blobs:
         yellow_pixels += blob_area(blob)
@@ -1437,11 +1446,12 @@ def choose_largest_area_candidate(candidates):
 
 
 def filter_candidates_in_target_window(candidates, target_x, target_y, tolerance_x, tolerance_y):
-    _ = (target_x, tolerance_x)
+    _ = tolerance_y
     return [
         candidate
         for candidate in candidates
-        if abs(float(candidate[3]) - float(target_y)) <= float(tolerance_y)
+        if abs(float(candidate[1]) - float(target_x)) <= float(tolerance_x)
+        and float(candidate[3]) < float(target_y)
     ]
 
 
@@ -1954,6 +1964,8 @@ class RuntimeState:
                 "threshold": tuple(packet.get("threshold", (0, 0, 0, 0, 0, 0))),
             }
             self._last_sync_seq = reliable_seq
+            self._pending_event = None
+            self._pending_event_last_sent_ms = None
             self.mode = self._mode_from_sync(self.current_sync)
             self._stable_count = 0
             self.return_line_gate_enabled = False
@@ -2069,6 +2081,14 @@ class RuntimeState:
         self._stable_count = 0
 
     def _observation_matches_target(self, x, y, value):
+        if self.current_sync is not None:
+            config_id = unpack_task_arg_config(self.current_sync["arg"])
+            if int(config_id) == int(Task.TRANSPORT):
+                return (
+                    float(value) >= self.min_area
+                    and abs(float(x)) <= self.tolerance_x
+                    and float(y) < 0.0
+                )
         return (
             float(value) >= self.min_area
             and abs(float(x)) <= self.tolerance_x
