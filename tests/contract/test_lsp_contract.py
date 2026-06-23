@@ -14,8 +14,8 @@ def test_pyright_typecheck_passes() -> None:
         [
             "npx",
             "pyright",
-            "--project",
-            "pyrightconfig.json",
+            "-p",
+            ".",
             "assistant",
             "master",
             "calibration",
