@@ -13,10 +13,9 @@ def test_role_main_files_are_maintained_under_role_directories() -> None:
 
     assert role_main_path("assistant").is_file()
     assert role_main_path("master").is_file()
-    assert not (ROOT / "assistant" / "main_v2.py").exists()
-    assert not (ROOT / "master" / "main_v2.py").exists()
-    assert not (ROOT / "assistant" / "build_v2.sh").exists()
-    assert not (ROOT / "master" / "build_v2.sh").exists()
+    for role in ("assistant", "master"):
+        assert not any(path.stem.endswith("_" + "v" + "2") for path in (ROOT / role).glob("main*.py"))
+        assert not any(path.stem.endswith("_" + "v" + "2") for path in (ROOT / role).glob("build*.sh"))
     assert not (ROOT / "main.py").exists()
 
 

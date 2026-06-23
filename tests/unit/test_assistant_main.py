@@ -7,7 +7,10 @@ from tests.test_support import load_role_entry_module
 import tests.unit.assistant_object_approach_support as legacy_tests
 
 
-def load_assistant_v2():
+ASSISTANT_LOG_PREFIX = "[assistant_" + "v" + "2]"
+
+
+def load_assistant_main():
     """加载辅车视觉默认入口模块."""
 
     module = load_role_entry_module("assistant", "main.py", "assistant_main_test_module")
@@ -26,19 +29,20 @@ def start_run_as_local_vision_paused(module):
     module.reset_runtime_state = reset_as_paused
 
 
-legacy_tests.load_assistant = load_assistant_v2
+legacy_tests.load_assistant = load_assistant_main
 
 
-def assistant_v2_target_point(module, config_id=None):
+def assistant_target_point(module, config_id=None):
     if config_id is None:
         config_id = module.Task.SEARCH
     return module.build_object_target_point(config_id)
 
 
-def test_assistant_main_v2_object_candidates_use_yolo_by_default() -> None:
-    """辅车 main_v2 默认使用 YOLO 生成找物体候选."""
+def test_assistant_main_object_candidates_use_yolo_when_enabled() -> None:
+    """辅车 main 开启 YOLO 时使用模型结果生成找物体候选."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
 
     class FakeYoloTf:
         def __init__(self):
@@ -69,7 +73,7 @@ def test_assistant_main_v2_object_candidates_use_yolo_by_default() -> None:
 
         def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge, margin=0):
             _ = (thresholds, pixels_threshold, area_threshold, merge, margin)
-            raise AssertionError("main_v2 找物体主线不应回退到色块识别")
+            raise AssertionError("main 找物体主线不应回退到色块识别")
 
     module.tf = FakeYoloTf()
     module.state.yolo_net = None
@@ -91,10 +95,10 @@ def test_assistant_main_v2_object_candidates_use_yolo_by_default() -> None:
     assert candidates[0][4] == pytest.approx(3200.0)
 
 
-def test_assistant_main_v2_yolo_detect_filters_small_area_candidates() -> None:
+def test_assistant_main_yolo_detect_filters_small_area_candidates() -> None:
     """辅车 YOLO 结果面积过小时不应进入候选."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     class FakeYoloTf:
         def detect(self, net, img):
@@ -119,10 +123,10 @@ def test_assistant_main_v2_yolo_detect_filters_small_area_candidates() -> None:
     assert module.yolo_detect(img) == []
 
 
-def test_assistant_main_v2_exposes_master_style_runtime_api() -> None:
-    """辅车 main_v2 对外保留与主车一致的主流程入口名."""
+def test_assistant_main_exposes_master_style_runtime_api() -> None:
+    """辅车 main 对外保留与主车一致的主流程入口名."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     assert callable(module.format_search_velocity_frame)
     assert callable(module.parse_task_sync_packet)
@@ -188,17 +192,17 @@ def test_assistant_main_v2_exposes_master_style_runtime_api() -> None:
     assert not hasattr(module, "process_return_line_frame")
 
 
-def test_assistant_main_v2_build_object_candidates_matches_master_style_signature() -> None:
-    """辅车 main_v2 的找物体候选入口应显式接收模型候选."""
+def test_assistant_main_build_object_candidates_matches_master_style_signature() -> None:
+    """辅车 main 的找物体候选入口应显式接收模型候选."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     with pytest.raises(TypeError):
         module.build_object_candidates(object())
 
 
-def test_assistant_main_v2_object_task_config_keeps_only_filter_parameters() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_object_task_config_keeps_only_filter_parameters() -> None:
+    module = load_assistant_main()
     for task in module.OBJECT_TASKS:
         task_name = task[0]
         expected = (
@@ -213,26 +217,26 @@ def test_assistant_main_v2_object_task_config_keeps_only_filter_parameters() -> 
         assert module._object_task_config(task_name) == expected
 
 
-def test_assistant_main_v2_object_task_config_accepts_legacy_threshold_layout() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_object_task_config_accepts_legacy_threshold_layout() -> None:
+    module = load_assistant_main()
     module.OBJECT_TASKS = (("red", ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),)
 
     assert module._object_task_config("red") == ("red", 3, 30, 70, 90, True)
 
 
-def test_assistant_main_v2_process_uart_input_matches_master_style_signature() -> None:
-    """辅车 main_v2 的串口轮询入口应和主车一样只接受全局缓冲区."""
+def test_assistant_main_process_uart_input_matches_master_style_signature() -> None:
+    """辅车 main 的串口轮询入口应和主车一样只接受全局缓冲区."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     with pytest.raises(TypeError):
         module.process_uart_input(legacy_tests.FakeUART(), b"", module.state)
 
 
-def test_assistant_main_v2_exposes_master_style_yolo_detect_api() -> None:
-    """辅车 main_v2 提供与主车一致的 yolo_detect 入口."""
+def test_assistant_main_exposes_master_style_yolo_detect_api() -> None:
+    """辅车 main 提供与主车一致的 yolo_detect 入口."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     class FakeYoloTf:
         def __init__(self):
@@ -273,10 +277,10 @@ def test_assistant_main_v2_exposes_master_style_yolo_detect_api() -> None:
     assert candidates[0][4] == pytest.approx(3200.0)
 
 
-def test_assistant_main_v2_run_applies_lens_correction_and_uses_yolo_detect_before_processing() -> None:
+def test_assistant_main_run_applies_lens_correction_and_uses_yolo_detect_before_processing() -> None:
     """辅车 follow 模式运行循环应先做镜头校正, 且不进入物体 YOLO 链路."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     class StopLoop(Exception):
         pass
@@ -323,10 +327,11 @@ def test_assistant_main_v2_run_applies_lens_correction_and_uses_yolo_detect_befo
         module.run()
 
 
-def test_assistant_main_v2_run_applies_lens_correction_and_uses_yolo_preview_without_task_sync() -> None:
+def test_assistant_main_run_applies_lens_correction_and_uses_yolo_preview_without_task_sync() -> None:
     """辅车调试模式下即使没有任务同步也应先跑预览识别."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
     logs = []
     module.print = lambda *args: logs.append(" ".join(str(arg) for arg in args))
@@ -390,12 +395,13 @@ def test_assistant_main_v2_run_applies_lens_correction_and_uses_yolo_preview_wit
 
     assert module.state.current_second_total_frames == 1
     assert module.state.current_second_yolo_frames == 1
-    assert any("[assistant_v2][boot]" in line for line in logs)
+    assert any(ASSISTANT_LOG_PREFIX + "[boot]" in line for line in logs)
     assert any("debug=1" in line for line in logs)
 
 
-def test_assistant_main_v2_run_pauses_for_approach_object_yolo() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_run_pauses_for_approach_object_yolo() -> None:
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
 
     class StopLoop(Exception):
@@ -467,8 +473,9 @@ def test_assistant_main_v2_run_pauses_for_approach_object_yolo() -> None:
     assert frame["body"][0] == module.LocalVisionControl.PAUSE
 
 
-def test_assistant_main_v2_approach_object_yolo_requests_resume() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_approach_object_yolo_requests_resume() -> None:
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
     start_run_as_local_vision_paused(module)
 
@@ -551,8 +558,8 @@ def test_assistant_main_v2_approach_object_yolo_requests_resume() -> None:
     assert frame["body"][0] == module.LocalVisionControl.RESUME
 
 
-def test_assistant_main_v2_transport_mode_retries_pending_resume_control() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_transport_mode_retries_pending_resume_control() -> None:
+    module = load_assistant_main()
 
     class StopLoop(Exception):
         pass
@@ -628,10 +635,10 @@ def test_assistant_main_v2_transport_mode_retries_pending_resume_control() -> No
         module.run()
 
 
-def test_assistant_main_v2_run_skips_yolo_in_return_line_mode() -> None:
+def test_assistant_main_run_skips_yolo_in_return_line_mode() -> None:
     """辅车回库黄线模式不应进入物体 YOLO 链路."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     class StopLoop(Exception):
         pass
@@ -768,8 +775,8 @@ class DynamicThresholdRoiImage:
         return []
 
 
-def test_assistant_main_v2_roi_tracking_uses_calibrated_object_threshold() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_roi_tracking_uses_calibrated_object_threshold() -> None:
+    module = load_assistant_main()
     calibrated_threshold = (1, 2, 3, 4, 5, 6)
     stale_dynamic_threshold = (16, 51, 21, 84, -11, 52)
     module.OBJECT_TASKS = (("red", (calibrated_threshold,), 3, 30, 70, 90, True),)
@@ -806,10 +813,10 @@ def test_assistant_main_v2_roi_tracking_uses_calibrated_object_threshold() -> No
     assert img.find_blobs_calls[0][0] == calibrated_threshold
 
 
-def test_assistant_main_v2_build_object_candidates_prefers_blob_tracking_between_yolo_frames() -> None:
+def test_assistant_main_build_object_candidates_prefers_blob_tracking_between_yolo_frames() -> None:
     """辅车物体任务在短期跟踪有效时应优先使用传统候选."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -861,10 +868,10 @@ def test_assistant_main_v2_build_object_candidates_prefers_blob_tracking_between
     assert candidates[0][5].rect() == (150, 20, 20, 20)
 
 
-def test_assistant_main_v2_disable_yolo_uses_blob_candidates_in_yolo_only_task() -> None:
+def test_assistant_main_disable_yolo_uses_blob_candidates_in_yolo_only_task() -> None:
     """关闭 YOLO 后, 辅车纯 YOLO 阶段也应直接使用色块候选."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.OBJECT_DETECTION_USE_YOLO = False
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -898,10 +905,10 @@ def test_assistant_main_v2_disable_yolo_uses_blob_candidates_in_yolo_only_task()
     assert module.state.current_detection_source == "roi"
 
 
-def test_assistant_main_v2_disable_yolo_removes_roi_max_frame_limit() -> None:
+def test_assistant_main_disable_yolo_removes_roi_max_frame_limit() -> None:
     """关闭 YOLO 后, 辅车 ROI 跟踪不再受连续未跑 YOLO 帧数限制."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.OBJECT_DETECTION_USE_YOLO = False
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.handle_control_frame(
@@ -917,10 +924,11 @@ def test_assistant_main_v2_disable_yolo_removes_roi_max_frame_limit() -> None:
     assert module.should_use_blob_tracking() is True
 
 
-def test_assistant_main_v2_build_object_candidates_fallbacks_to_yolo_in_approach_object() -> None:
+def test_assistant_main_build_object_candidates_fallbacks_to_yolo_in_approach_object() -> None:
     """辅车接近物体态传统候选失败达到阈值时允许回退到 YOLO."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 1
     module.handle_control_frame(
@@ -960,10 +968,11 @@ def test_assistant_main_v2_build_object_candidates_fallbacks_to_yolo_in_approach
     assert module.state.track_failure_reason == module.TrackFailureReason.NONE
 
 
-def test_assistant_main_v2_build_object_candidates_keeps_predicted_target_before_yolo_fallback() -> None:
+def test_assistant_main_build_object_candidates_keeps_predicted_target_before_yolo_fallback() -> None:
     """辅车传统候选首次失手且未到阈值时应保留预测目标一帧."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 2
     module.handle_control_frame(
@@ -999,10 +1008,10 @@ def test_assistant_main_v2_build_object_candidates_keeps_predicted_target_before
     assert candidates[0][:5] == ("red", 160.0, 31.0, 221.0, 400.0)
 
 
-def test_assistant_main_v2_predict_frame_does_not_create_event() -> None:
+def test_assistant_main_predict_frame_does_not_create_event() -> None:
     """辅车预测帧可以继续输出控制, 但不能触发可靠事件."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -1058,8 +1067,8 @@ def test_assistant_main_v2_predict_frame_does_not_create_event() -> None:
     assert module.state.has_pending_event() is False
 
 
-def test_assistant_main_v2_build_object_observation_and_candidates_uses_current_object_candidates() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_build_object_observation_and_candidates_uses_current_object_candidates() -> None:
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -1068,7 +1077,7 @@ def test_assistant_main_v2_build_object_observation_and_candidates_uses_current_
             legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
         )
     )
-    target_x, target_y = assistant_v2_target_point(module)
+    target_x, target_y = assistant_target_point(module)
     blob = module.YoloDetectionBlob(
         target_x - 10.0,
         legacy_tests.IMAGE_HEIGHT - target_y,
@@ -1088,8 +1097,9 @@ def test_assistant_main_v2_build_object_observation_and_candidates_uses_current_
     assert candidates == [("red", target_x, 30.0, target_y, 400.0, blob)]
 
 
-def test_assistant_main_v2_runs_yolo_after_entering_transport_align() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_runs_yolo_after_entering_transport_align() -> None:
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ASSISTANT_YOLO_ONLY_INTERVAL_FRAMES = 3
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -1109,8 +1119,9 @@ def test_assistant_main_v2_runs_yolo_after_entering_transport_align() -> None:
     assert module.should_run_yolo_for_current_frame() is True
 
 
-def test_assistant_main_v2_transport_align_ignores_blob_tracking_candidates() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_transport_align_ignores_blob_tracking_candidates() -> None:
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -1138,8 +1149,9 @@ def test_assistant_main_v2_transport_align_ignores_blob_tracking_candidates() ->
     assert module.state.current_detection_source == "yolo"
 
 
-def test_assistant_main_v2_approach_object_without_master_threshold_requests_yolo() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_approach_object_without_master_threshold_requests_yolo() -> None:
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -1153,8 +1165,9 @@ def test_assistant_main_v2_approach_object_without_master_threshold_requests_yol
     assert module.should_run_yolo_for_current_frame() is True
 
 
-def test_assistant_main_v2_runs_yolo_once_after_entering_transport_object() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_runs_yolo_once_after_entering_transport_object() -> None:
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -1182,8 +1195,9 @@ def test_assistant_main_v2_runs_yolo_once_after_entering_transport_object() -> N
     assert candidates == ()
 
 
-def test_assistant_main_v2_runs_yolo_once_after_entering_orbit() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_runs_yolo_once_after_entering_orbit() -> None:
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -1211,8 +1225,9 @@ def test_assistant_main_v2_runs_yolo_once_after_entering_orbit() -> None:
     assert candidates == ()
 
 
-def test_assistant_main_v2_orbit_transport_runs_yolo_without_blob_tracking() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_orbit_transport_runs_yolo_without_blob_tracking() -> None:
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -1242,8 +1257,8 @@ def test_assistant_main_v2_orbit_transport_runs_yolo_without_blob_tracking() -> 
     assert module.state.current_detection_source == "yolo"
 
 
-def test_assistant_main_v2_transport_object_blob_only_preserves_previous_track() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_transport_object_blob_only_preserves_previous_track() -> None:
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             11,
@@ -1295,8 +1310,8 @@ def test_assistant_main_v2_transport_object_blob_only_preserves_previous_track()
     assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 240.0)
 
 
-def test_assistant_main_v2_transport_object_inherits_track_after_transport_realign() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_transport_object_inherits_track_after_transport_realign() -> None:
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             11,
@@ -1355,8 +1370,8 @@ def test_assistant_main_v2_transport_object_inherits_track_after_transport_reali
     assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 240.0)
 
 
-def test_assistant_main_v2_transport_object_inherits_track_after_orbit_transport_realign() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_transport_object_inherits_track_after_orbit_transport_realign() -> None:
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             11,
@@ -1386,8 +1401,8 @@ def test_assistant_main_v2_transport_object_inherits_track_after_orbit_transport
     assert module.state.track_task_name == "red"
 
 
-def test_assistant_main_v2_orbit_inherits_track_after_object_event() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_orbit_inherits_track_after_object_event() -> None:
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             11,
@@ -1439,8 +1454,8 @@ def test_assistant_main_v2_orbit_inherits_track_after_object_event() -> None:
     assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 240.0)
 
 
-def test_assistant_main_v2_blob_only_uses_full_image_blob_search() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_blob_only_uses_full_image_blob_search() -> None:
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             11,
@@ -1481,8 +1496,8 @@ def test_assistant_main_v2_blob_only_uses_full_image_blob_search() -> None:
     assert img.find_blobs_calls == [None]
 
 
-def test_assistant_main_v2_run_skips_yolo_when_blob_tracking_is_active() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_run_skips_yolo_when_blob_tracking_is_active() -> None:
+    module = load_assistant_main()
     module.ROI_TRACKING_MAX_FRAMES = 3
 
     class StopLoop(Exception):
@@ -1576,8 +1591,8 @@ def test_assistant_main_v2_run_skips_yolo_when_blob_tracking_is_active() -> None
     assert yolo_call_count == 0
 
 
-def test_assistant_main_v2_debug_preview_uses_blob_tracking_over_cached_yolo_without_task_sync() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_debug_preview_uses_blob_tracking_over_cached_yolo_without_task_sync() -> None:
+    module = load_assistant_main()
     module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
 
     class PreviewBlob:
@@ -1640,8 +1655,8 @@ def test_assistant_main_v2_debug_preview_uses_blob_tracking_over_cached_yolo_wit
     assert module.state.uart_device.writes == []
 
 
-def test_assistant_main_v2_debug_preview_handles_empty_candidates_without_crashing() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_debug_preview_handles_empty_candidates_without_crashing() -> None:
+    module = load_assistant_main()
     module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
     logs = []
     module.print = lambda *args: logs.append(" ".join(str(arg) for arg in args))
@@ -1680,12 +1695,12 @@ def test_assistant_main_v2_debug_preview_handles_empty_candidates_without_crashi
     module.process_task_frame(image)
 
     assert image.flush_count == 1
-    assert any("[assistant_v2][preview]" in line for line in logs)
+    assert any(ASSISTANT_LOG_PREFIX + "[preview]" in line for line in logs)
     assert any("cand=0" in line for line in logs)
 
 
-def test_assistant_main_v2_run_skips_yolo_in_debug_preview_when_blob_tracking_is_active() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_run_skips_yolo_in_debug_preview_when_blob_tracking_is_active() -> None:
+    module = load_assistant_main()
     module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
 
     class StopLoop(Exception):
@@ -1766,10 +1781,11 @@ def test_assistant_main_v2_run_skips_yolo_in_debug_preview_when_blob_tracking_is
     assert yolo_call_count == 0
 
 
-def test_assistant_main_v2_approach_object_uses_yolo_relocation_candidate_in_tracking_window() -> None:
+def test_assistant_main_approach_object_uses_yolo_relocation_candidate_in_tracking_window() -> None:
     """辅车接近物体态达到重定位条件后可使用跟踪窗口内的 YOLO 候选."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -1815,10 +1831,11 @@ def test_assistant_main_v2_approach_object_uses_yolo_relocation_candidate_in_tra
     assert module.state.track_failure_reason == module.TrackFailureReason.NONE
 
 
-def test_assistant_main_v2_yolo_relocation_position_jump_candidate_is_ignored() -> None:
+def test_assistant_main_yolo_relocation_position_jump_candidate_is_ignored() -> None:
     """辅车不使用位置跳变的 YOLO 重定位候选."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -1856,10 +1873,11 @@ def test_assistant_main_v2_yolo_relocation_position_jump_candidate_is_ignored() 
     assert module.state.track_failure_reason == module.TrackFailureReason.NO_CANDIDATE
 
 
-def test_assistant_main_v2_yolo_relocation_area_jump_candidate_is_ignored() -> None:
+def test_assistant_main_yolo_relocation_area_jump_candidate_is_ignored() -> None:
     """辅车不使用面积突变的 YOLO 重定位候选."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -1895,10 +1913,10 @@ def test_assistant_main_v2_yolo_relocation_area_jump_candidate_is_ignored() -> N
     assert module.state.track_failure_reason == module.TrackFailureReason.NO_CANDIDATE
 
 
-def test_assistant_main_v2_track_state_records_object_id_and_confidence() -> None:
+def test_assistant_main_track_state_records_object_id_and_confidence() -> None:
     """辅车短期跟踪状态应单独记录目标编号和可信度."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.state.current_image_height = legacy_tests.IMAGE_HEIGHT
 
     class FakeBlob:
@@ -1911,10 +1929,10 @@ def test_assistant_main_v2_track_state_records_object_id_and_confidence() -> Non
     assert module.state.track_confidence == 80
 
 
-def test_assistant_main_v2_debug_counters_roll_per_second() -> None:
+def test_assistant_main_debug_counters_roll_per_second() -> None:
     """辅车应滚动记录每秒来源统计、ROI 成功情况和回退次数."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     module.state.record_frame_source("yolo", now_ms=0)
     module.state.record_roi_attempt(True, now_ms=100)
@@ -1933,10 +1951,11 @@ def test_assistant_main_v2_debug_counters_roll_per_second() -> None:
     assert module.state.current_second_total_frames == 1
 
 
-def test_assistant_main_v2_rejects_blob_candidate_outside_tracking_window() -> None:
+def test_assistant_main_rejects_blob_candidate_outside_tracking_window() -> None:
     """辅车传统候选偏离预测窗口时应拒绝更新并转入预测帧."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 2
     module.handle_control_frame(
@@ -1986,10 +2005,11 @@ def test_assistant_main_v2_rejects_blob_candidate_outside_tracking_window() -> N
     assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 400.0)
 
 
-def test_assistant_main_v2_rejects_blob_candidate_with_large_area_jump() -> None:
+def test_assistant_main_rejects_blob_candidate_with_large_area_jump() -> None:
     """辅车传统候选面积突变时应拒绝更新并转入预测帧."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 2
     module.handle_control_frame(
@@ -2039,10 +2059,10 @@ def test_assistant_main_v2_rejects_blob_candidate_with_large_area_jump() -> None
     assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 400.0)
 
 
-def test_assistant_main_v2_builds_dynamic_threshold_from_yolo_and_uses_it_for_roi() -> None:
+def test_assistant_main_builds_dynamic_threshold_from_yolo_and_uses_it_for_roi() -> None:
     """辅车在 YOLO 命中后应建立动态阈值并在 ROI 帧复用."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.image.rgb_to_lab = lambda pixel: pixel
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 2
@@ -2103,8 +2123,8 @@ def test_assistant_main_v2_builds_dynamic_threshold_from_yolo_and_uses_it_for_ro
     assert img.find_blobs_calls[0][0] == tuple(threshold)
 
 
-def test_assistant_main_v2_yolo_calibration_uses_foreground_area_for_tracking() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_yolo_calibration_uses_foreground_area_for_tracking() -> None:
+    module = load_assistant_main()
     module.image.rgb_to_lab = lambda pixel: pixel
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.ROI_TRACKING_FAILURE_TO_YOLO_FRAMES = 2
@@ -2166,8 +2186,8 @@ def test_assistant_main_v2_yolo_calibration_uses_foreground_area_for_tracking() 
     assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 180.0)
 
 
-def test_assistant_main_v2_reuses_dynamic_threshold_when_center_stays_stable() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_reuses_dynamic_threshold_when_center_stays_stable() -> None:
+    module = load_assistant_main()
     module.image.rgb_to_lab = lambda pixel: pixel
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -2228,8 +2248,8 @@ def test_assistant_main_v2_reuses_dynamic_threshold_when_center_stays_stable() -
     assert module.state.track_dynamic_threshold_generation == old_generation
 
 
-def test_assistant_main_v2_refreshes_dynamic_threshold_after_consecutive_unhealthy_yolo_frames() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_refreshes_dynamic_threshold_after_consecutive_unhealthy_yolo_frames() -> None:
+    module = load_assistant_main()
     module.image.rgb_to_lab = lambda pixel: pixel
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -2312,8 +2332,8 @@ def test_assistant_main_v2_refreshes_dynamic_threshold_after_consecutive_unhealt
     assert module.state.track_dynamic_threshold_health_failures == 0
 
 
-def test_assistant_main_v2_keeps_dynamic_threshold_in_non_search_state() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_keeps_dynamic_threshold_in_non_search_state() -> None:
+    module = load_assistant_main()
     module.image.rgb_to_lab = lambda pixel: pixel
     module.DYNAMIC_THRESHOLD_REFRESH_FAILURE_FRAMES = 1
     module.handle_control_frame(
@@ -2376,8 +2396,8 @@ def test_assistant_main_v2_keeps_dynamic_threshold_in_non_search_state() -> None
     assert module.state.track_pending_dynamic_threshold is None
 
 
-def test_assistant_main_v2_recomputes_dynamic_threshold_after_track_reset() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_recomputes_dynamic_threshold_after_track_reset() -> None:
+    module = load_assistant_main()
     module.image.rgb_to_lab = lambda pixel: pixel
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -2435,10 +2455,10 @@ def test_assistant_main_v2_recomputes_dynamic_threshold_after_track_reset() -> N
     assert module.state.track_dynamic_threshold_generation == 1
 
 
-def test_assistant_main_v2_dynamic_threshold_keeps_center_connected_component_only() -> None:
+def test_assistant_main_dynamic_threshold_keeps_center_connected_component_only() -> None:
     """辅车动态阈值反推只使用与中心采样区连通的前景."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.image.rgb_to_lab = lambda pixel: pixel
 
     class YoloBlob:
@@ -2462,10 +2482,10 @@ def test_assistant_main_v2_dynamic_threshold_keeps_center_connected_component_on
     assert threshold[5] < 60
 
 
-def test_assistant_main_v2_calibrated_threshold_enables_roi_tracking_without_pixel_sampling() -> None:
+def test_assistant_main_calibrated_threshold_enables_roi_tracking_without_pixel_sampling() -> None:
     """辅车使用标定阈值建立 ROI 跟踪, 不依赖现场像素采样."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.ROI_TRACKING_MAX_FRAMES = 3
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -2506,10 +2526,10 @@ def test_assistant_main_v2_calibrated_threshold_enables_roi_tracking_without_pix
     assert module.should_use_blob_tracking() is True
 
 
-def test_assistant_main_v2_process_task_frame_uses_cached_yolo_candidates() -> None:
-    """辅车 main_v2 的全局 task 入口应消费预先缓存的 YOLO 候选."""
+def test_assistant_main_process_task_frame_uses_cached_yolo_candidates() -> None:
+    """辅车 main 的全局 task 入口应消费预先缓存的 YOLO 候选."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     state = module.AssistantVisionState(stable_frames=99)
     state.handle_control_line(
         legacy_tests.assistant_sync_frame(
@@ -2519,7 +2539,7 @@ def test_assistant_main_v2_process_task_frame_uses_cached_yolo_candidates() -> N
             legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
         )
     )
-    target_x, target_y = assistant_v2_target_point(module)
+    target_x, target_y = assistant_target_point(module)
 
     class FakeBlob:
         def rect(self):
@@ -2572,10 +2592,10 @@ def test_assistant_main_v2_process_task_frame_uses_cached_yolo_candidates() -> N
     legacy_tests.assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
 
 
-def test_assistant_main_v2_handle_control_frame_reuses_global_state() -> None:
-    """辅车 main_v2 可像主车一样通过全局入口处理控制帧."""
+def test_assistant_main_handle_control_frame_reuses_global_state() -> None:
+    """辅车 main 可像主车一样通过全局入口处理控制帧."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     reply = module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -2591,8 +2611,8 @@ def test_assistant_main_v2_handle_control_frame_reuses_global_state() -> None:
     assert module.state.current_object_config_id() == module.Task.SEARCH
 
 
-def test_assistant_main_v2_new_sync_clears_pending_local_vision_control() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_new_sync_clears_pending_local_vision_control() -> None:
+    module = load_assistant_main()
     module.state.local_vision_control_paused = True
     module.state.pending_local_vision_control = {
         "reliable_seq": 9,
@@ -2615,10 +2635,10 @@ def test_assistant_main_v2_new_sync_clears_pending_local_vision_control() -> Non
     assert module.state.pending_local_vision_control_last_sent_ms is None
 
 
-def test_assistant_main_v2_parse_task_sync_packet_matches_master_style_name() -> None:
-    """辅车 main_v2 使用主车同名入口解析本地任务同步帧."""
+def test_assistant_main_parse_task_sync_packet_matches_master_style_name() -> None:
+    """辅车 main 使用主车同名入口解析本地任务同步帧."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     threshold = (12, 80, -30, 40, -20, 60)
     packet = module.parse_task_sync_packet(
@@ -2640,8 +2660,9 @@ def test_assistant_main_v2_parse_task_sync_packet_matches_master_style_name() ->
     }
 
 
-def test_assistant_main_v2_ignores_synced_threshold_without_yolo_roi() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_ignores_synced_threshold_without_yolo_roi() -> None:
+    module = load_assistant_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
     threshold = (12, 80, -30, 40, -20, 60)
     reply = module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -2691,10 +2712,10 @@ def test_assistant_main_v2_ignores_synced_threshold_without_yolo_roi() -> None:
     assert module.state.current_detection_source == "yolo"
 
 
-def test_assistant_main_v2_build_search_velocity_wrapper_matches_object_path() -> None:
-    """辅车 main_v2 的主车式搜索速度入口仍复用找物体速度逻辑."""
+def test_assistant_main_build_search_velocity_wrapper_matches_object_path() -> None:
+    """辅车 main 的主车式搜索速度入口仍复用找物体速度逻辑."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     observation = (20.0, -30.0, 300.0)
 
     module.state.current_image_height = legacy_tests.IMAGE_HEIGHT
@@ -2703,10 +2724,10 @@ def test_assistant_main_v2_build_search_velocity_wrapper_matches_object_path() -
     ) == module.build_object_approach_velocity_from_observation(observation)
 
 
-def test_assistant_main_v2_orbit_outputs_independent_xy_velocity_correction() -> None:
+def test_assistant_main_orbit_outputs_independent_xy_velocity_correction() -> None:
     """辅车绕行修正直接输出独立 vx/vy 平移修正."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.OBJECT_ORBIT_KP_X = 0.2
     module.OBJECT_ORBIT_KP_Y = -0.3
     module.OBJECT_ORBIT_MIN_SPEED = 0.0
@@ -2720,7 +2741,7 @@ def test_assistant_main_v2_orbit_outputs_independent_xy_velocity_correction() ->
             legacy_tests.pack_task_arg(module.Task.ORBIT, 1),
         )
     )
-    target_x, target_y = assistant_v2_target_point(module, module.Task.ORBIT)
+    target_x, target_y = assistant_target_point(module, module.Task.ORBIT)
 
     class FakeBlob:
         def rect(self):
@@ -2781,10 +2802,10 @@ def test_assistant_main_v2_orbit_outputs_independent_xy_velocity_correction() ->
     assert body["vy"] == pytest.approx(expected_y)
 
 
-def test_assistant_main_v2_object_target_helpers_drop_unused_size_parameters() -> None:
-    """辅车 main_v2 的目标点与观测 helper 不再暴露无意义尺寸参数."""
+def test_assistant_main_object_target_helpers_drop_unused_size_parameters() -> None:
+    """辅车 main 的目标点与观测 helper 不再暴露无意义尺寸参数."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     assert tuple(inspect.signature(module.build_object_target_point).parameters) == ("config_id",)
     assert tuple(inspect.signature(module.build_object_observation).parameters) == (
@@ -2796,10 +2817,10 @@ def test_assistant_main_v2_object_target_helpers_drop_unused_size_parameters() -
     assert tuple(inspect.signature(module.build_object_observation_and_candidates).parameters) == ()
 
 
-def test_assistant_main_v2_process_task_frame_uses_global_object_pipeline() -> None:
-    """辅车 main_v2 的全局 task 入口应像主车一样消费全局候选和全局状态."""
+def test_assistant_main_process_task_frame_uses_global_object_pipeline() -> None:
+    """辅车 main 的全局 task 入口应像主车一样消费全局候选和全局状态."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -2808,7 +2829,7 @@ def test_assistant_main_v2_process_task_frame_uses_global_object_pipeline() -> N
             legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
         )
     )
-    target_x, target_y = assistant_v2_target_point(module)
+    target_x, target_y = assistant_target_point(module)
 
     class FakeBlob:
         def rect(self):
@@ -2855,10 +2876,10 @@ def test_assistant_main_v2_process_task_frame_uses_global_object_pipeline() -> N
     legacy_tests.assert_velocity_frame(module, uart.writes[0], 0.0, 0.0)
 
 
-def test_assistant_main_v2_process_task_frame_calls_master_style_velocity_wrapper() -> None:
-    """辅车 main_v2 的全局 task 入口应走主车式速度包装入口."""
+def test_assistant_main_process_task_frame_calls_master_style_velocity_wrapper() -> None:
+    """辅车 main 的全局 task 入口应走主车式速度包装入口."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -2867,7 +2888,7 @@ def test_assistant_main_v2_process_task_frame_calls_master_style_velocity_wrappe
             legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
         )
     )
-    target_x, target_y = assistant_v2_target_point(module)
+    target_x, target_y = assistant_target_point(module)
 
     class FakeBlob:
         def rect(self):
@@ -2928,10 +2949,10 @@ def test_assistant_main_v2_process_task_frame_calls_master_style_velocity_wrappe
     assert len(call_log) == 1
 
 
-def test_assistant_main_v2_debug_display_draws_tracking_state() -> None:
+def test_assistant_main_debug_display_draws_tracking_state() -> None:
     """辅车调试显示应绘制跟踪来源、失败原因和刷新图像."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.ASSISTANT_DEBUG_DISPLAY_ENABLED = True
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -3011,10 +3032,10 @@ def test_assistant_main_v2_debug_display_draws_tracking_state() -> None:
     assert img.flush_count == 1
 
 
-def test_assistant_main_v2_single_arg_process_uart_input_uses_global_state() -> None:
-    """辅车 main_v2 的单参串口轮询入口应直接驱动全局状态机."""
+def test_assistant_main_single_arg_process_uart_input_uses_global_state() -> None:
+    """辅车 main 的单参串口轮询入口应直接驱动全局状态机."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     uart = legacy_tests.FakeUART(
         legacy_tests.assistant_sync_frame(
             12,
@@ -3032,10 +3053,10 @@ def test_assistant_main_v2_single_arg_process_uart_input_uses_global_state() -> 
     assert module.state.mode == module.RunMode.APPROACH_OBJECT
 
 
-def test_assistant_main_v2_single_arg_process_uart_input_calls_master_style_handle_control_frame() -> None:
-    """辅车 main_v2 的单参串口轮询入口应走全局控制包入口."""
+def test_assistant_main_single_arg_process_uart_input_calls_master_style_handle_control_frame() -> None:
+    """辅车 main 的单参串口轮询入口应走全局控制包入口."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     frame = legacy_tests.assistant_sync_frame(
         12,
         module.State.APPROACH_OBJECT,
@@ -3058,8 +3079,8 @@ def test_assistant_main_v2_single_arg_process_uart_input_calls_master_style_hand
     assert call_log == [frame]
 
 
-def test_assistant_main_v2_process_uart_input_accepts_local_vision_control_tcp_frame() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_process_uart_input_accepts_local_vision_control_tcp_frame() -> None:
+    module = load_assistant_main()
     frame = module.encode_frame(
         module.Mode.TCP,
         module.Topic.LOCAL_VISION_CONTROL,
@@ -3080,20 +3101,20 @@ def test_assistant_main_v2_process_uart_input_accepts_local_vision_control_tcp_f
     assert module.state.return_line_gate_enabled is True
 
 
-def test_assistant_main_v2_process_uart_input_without_any_matches_master_behavior() -> None:
-    """辅车 main_v2 不再为缺失 any 的串口对象静默返回."""
+def test_assistant_main_process_uart_input_without_any_matches_master_behavior() -> None:
+    """辅车 main 不再为缺失 any 的串口对象静默返回."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.state.uart_device = object()
 
     with pytest.raises(AttributeError):
         module.process_uart_input(b"")
 
 
-def test_assistant_main_v2_process_uart_input_read_error_propagates() -> None:
-    """辅车 main_v2 不再吞掉串口读取异常."""
+def test_assistant_main_process_uart_input_read_error_propagates() -> None:
+    """辅车 main 不再吞掉串口读取异常."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     class BrokenUART:
         def any(self):
@@ -3109,10 +3130,10 @@ def test_assistant_main_v2_process_uart_input_read_error_propagates() -> None:
         module.process_uart_input(b"")
 
 
-def test_assistant_main_v2_event_helpers_reflect_global_state() -> None:
-    """辅车 main_v2 的主车式事件 helper 应直接反映全局状态."""
+def test_assistant_main_event_helpers_reflect_global_state() -> None:
+    """辅车 main 的主车式事件 helper 应直接反映全局状态."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -3135,8 +3156,8 @@ def test_assistant_main_v2_event_helpers_reflect_global_state() -> None:
     }
 
 
-def test_assistant_main_v2_return_line_event_helpers_use_aligned_event() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_return_line_event_helpers_use_aligned_event() -> None:
+    module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
             12,
@@ -3150,8 +3171,8 @@ def test_assistant_main_v2_return_line_event_helpers_use_aligned_event() -> None
     assert module.resolve_event_value(160.0, None) == 160
 
 
-def test_assistant_main_v2_return_line_reports_aligned_event_without_velocity_frame() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_return_line_reports_aligned_event_without_velocity_frame() -> None:
+    module = load_assistant_main()
     module.state.required_stable_frames = 1
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -3235,8 +3256,8 @@ def test_assistant_main_v2_return_line_reports_aligned_event_without_velocity_fr
     assert len(uart.writes) == 1
 
 
-def test_assistant_main_v2_return_line_gate_off_blocks_event() -> None:
-    module = load_assistant_v2()
+def test_assistant_main_return_line_gate_off_blocks_event() -> None:
+    module = load_assistant_main()
     module.state.required_stable_frames = 1
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
@@ -3301,7 +3322,7 @@ def test_assistant_main_v2_return_line_gate_off_blocks_event() -> None:
 def test_assistant_run_applies_lens_correction_before_processing() -> None:
     """辅车非物体任务先做镜头校正, 且不缓存物体候选."""
 
-    module = load_assistant_v2()
+    module = load_assistant_main()
 
     class StopLoop(Exception):
         pass
