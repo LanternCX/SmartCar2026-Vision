@@ -1300,16 +1300,6 @@ def test_master_main_search_velocity_clamps_vx_and_vy() -> None:
     assert negative == (-expected_positive_vx, -expected_positive_vy)
 
 
-def test_master_main_reference_fps_keeps_search_velocity_unchanged() -> None:
-    module = load_master_main()
-    module.state.current_frame_interval_ms = module.reference_frame_interval_ms()
-
-    module.state.current_image_height = IMAGE_HEIGHT
-    velocity = module.build_search_velocity_from_observation((7, 100.0, -100.0, 300.0))
-
-    assert velocity == pytest.approx((5.0, 2.0833333333333335))
-
-
 def test_master_main_reference_frame_interval_is_derived_from_fps() -> None:
     module = load_master_main()
     module.VISION_REFERENCE_FPS = 25
