@@ -166,7 +166,7 @@ OBJECT_APPROACH_MAX_VX = 5.0
 # 接近目标阶段纵向速度上限
 OBJECT_APPROACH_MAX_VY = 5.0
 # 绕目标阶段横向速度修正比例系数
-OBJECT_ORBIT_KP_X = 0.05
+OBJECT_ORBIT_KP_X = 0.015
 # 绕目标阶段纵向速度修正比例系数
 OBJECT_ORBIT_KP_Y = -0.15
 # 绕目标阶段最小输出速度
@@ -186,7 +186,7 @@ OBJECT_APPROACH_TARGET_Y_PX = 200.0
 # 绕目标阶段期望的图像横向位置, 单位为 px
 OBJECT_ORBIT_TARGET_X_PX = 160.0
 # 绕目标阶段期望的图像纵向位置, 单位为 px
-OBJECT_ORBIT_TARGET_Y_PX = 200.0
+OBJECT_ORBIT_TARGET_Y_PX = 240.0
 # 辅车运输阶段图像纵向命中线, 单位为 px
 ASSISTANT_TRANSPORT_TARGET_Y_PX = 240.0
 # 目标最小有效面积阈值

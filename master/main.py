@@ -145,7 +145,7 @@ MASTER_SEARCH_MAX_VX = 5.0
 MASTER_SEARCH_MAX_VY = 5.0
 
 # 绕目标阶段横向速度修正比例系数
-MASTER_ORBIT_KP_X = 0.05
+MASTER_ORBIT_KP_X = 0.015
 # 绕目标阶段纵向速度修正比例系数
 MASTER_ORBIT_KP_Y = -0.30
 # 绕目标阶段最小输出速度
