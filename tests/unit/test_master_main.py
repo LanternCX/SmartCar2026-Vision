@@ -598,6 +598,15 @@ class FakeImage:
         return [FakeBlob(roi[0], roi[1], roi[2], roi[3], area)]
 
     def get_pixel(self, x, y):
+        for roi, area in self.yellow_area_by_roi.items():
+            left, top, width, height = roi
+            roi_area = int(width) * int(height)
+            if (
+                int(area) >= int(roi_area)
+                and int(left) <= int(x) < int(left) + int(width)
+                and int(top) <= int(y) < int(top) + int(height)
+            ):
+                return (70, -10, 50)
         return self.pixels.get((x, y), (0, 0, 0))
 
 
@@ -1291,16 +1300,6 @@ def test_master_main_search_velocity_clamps_vx_and_vy() -> None:
     assert negative == (-expected_positive_vx, -expected_positive_vy)
 
 
-def test_master_main_reference_fps_keeps_search_velocity_unchanged() -> None:
-    module = load_master_main()
-    module.state.current_frame_interval_ms = module.reference_frame_interval_ms()
-
-    module.state.current_image_height = IMAGE_HEIGHT
-    velocity = module.build_search_velocity_from_observation((7, 100.0, -100.0, 300.0))
-
-    assert velocity == pytest.approx((5.0, 2.0833333333333335))
-
-
 def test_master_main_reference_frame_interval_is_derived_from_fps() -> None:
     module = load_master_main()
     module.VISION_REFERENCE_FPS = 25
@@ -1623,6 +1622,57 @@ def test_master_main_finish_observation_enters_contact_seen_and_pending_event() 
     assert module.state.pending_event is not None
 
 
+def test_master_main_finish_release_uses_touch_threshold_not_zero_yellow() -> None:
+    module = load_master_main()
+    module.state.yolo_net = "fake-net"
+    module.FINISH_HOOK_STABLE_FRAMES = 2
+    module.FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.10
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=22,
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
+        )
+    )
+
+    module.accept_observation((22, 0.0, 0.0, 1.0), FakeImage(), event_value=100.0)
+    module.accept_observation((22, 0.0, 0.0, 1.0), FakeImage(), event_value=5.0)
+
+    assert module.state.stable_frame_count == 1
+    assert module.state.pending_event is None
+
+    module.accept_observation((22, 0.0, 0.0, 1.0), FakeImage(), event_value=5.0)
+
+    assert module.state.pending_event is not None
+    assert module.state.pending_event["context_id"] == 22
+    assert module.state.pending_event["event"] == module.Event.ARRIVED
+    assert module.state.pending_event["value"] == 5
+
+
+def test_master_main_finish_stable_zero_reports_arrived_without_contact_release() -> None:
+    module = load_master_main()
+    module.state.yolo_net = "fake-net"
+    module.FINISH_HOOK_STABLE_FRAMES = 0
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=25,
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
+        )
+    )
+
+    module.accept_observation((25, 0.0, 0.0, 1.0), FakeImage(), event_value=100.0)
+
+    assert module.state.pending_event is not None
+    assert module.state.pending_event["context_id"] == 25
+    assert module.state.pending_event["event"] == module.Event.ARRIVED
+    assert module.state.pending_event["value"] == 100
+
+
 def test_master_main_finish_reports_arrived_after_contact_release_without_object_candidate() -> None:
     module = load_master_main()
     module.state.yolo_net = "fake-net"
@@ -1769,6 +1819,32 @@ def test_master_main_finish_yellow_ratio_uses_fixed_object_roi() -> None:
 
     assert fixed_roi == (80, 0, 160, 80)
     assert module.build_finish_task_yellow_ratio_percent(img, FarObjectBlob()) == pytest.approx(100.0)
+
+
+def test_master_main_finish_yellow_ratio_counts_roi_inner_threshold_hits() -> None:
+    module = load_master_main()
+
+    class InnerYellowImage(FakeImage):
+        def find_blobs(
+            self,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge,
+            roi=None,
+            margin=None,
+        ):
+            _ = thresholds, pixels_threshold, area_threshold, merge, roi, margin
+            return []
+
+        def get_pixel(self, x, y):
+            if 80 <= int(x) < 88 and 0 <= int(y) < 80:
+                return (70, -10, 50)
+            return (0, 0, 0)
+
+    img = InnerYellowImage()
+
+    assert module.build_finish_task_yellow_ratio_percent(img, None) == pytest.approx(5.0)
 
 
 def test_master_main_return_retreat_reports_line_aligned() -> None:

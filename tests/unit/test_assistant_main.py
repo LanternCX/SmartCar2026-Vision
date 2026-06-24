@@ -40,6 +40,88 @@ def assistant_target_point(module, config_id=None):
     return module.build_object_target_point(config_id)
 
 
+def test_assistant_main_transport_window_rejects_x_outside_candidate() -> None:
+    """辅车搬运窗口必须同时校准中心 X 与底边 Y."""
+
+    module = load_assistant_main()
+    target_x, target_y = assistant_target_point(module, module.Task.TRANSPORT)
+    candidates = [
+        (
+            "red",
+            target_x + float(module.OBJECT_X_TOLERANCE_PX) + 1.0,
+            0.0,
+            target_y,
+            300.0,
+            object(),
+        )
+    ]
+
+    assert module.filter_candidates_in_target_window(
+        candidates,
+        target_x,
+        target_y,
+        module.OBJECT_X_TOLERANCE_PX,
+        module.OBJECT_Y_TOLERANCE_PX,
+    ) == []
+
+
+def test_assistant_main_transport_window_rejects_y_outside_candidate() -> None:
+    """辅车搬运窗口必须过滤底边 Y 达到命中线外侧的候选."""
+
+    module = load_assistant_main()
+    target_x, target_y = assistant_target_point(module, module.Task.TRANSPORT)
+    candidates = [
+        (
+            "red",
+            target_x,
+            0.0,
+            target_y,
+            300.0,
+            object(),
+        )
+    ]
+
+    assert module.filter_candidates_in_target_window(
+        candidates,
+        target_x,
+        target_y,
+        module.OBJECT_X_TOLERANCE_PX,
+        module.OBJECT_Y_TOLERANCE_PX,
+    ) == []
+
+
+def test_assistant_main_transport_window_keeps_xy_inside_candidate() -> None:
+    """辅车搬运窗口保留中心 X 与底边 Y 都命中的候选."""
+
+    module = load_assistant_main()
+    target_x, target_y = assistant_target_point(module, module.Task.TRANSPORT)
+    candidate = ("red", target_x, 0.0, target_y - 1.0, 300.0, object())
+
+    assert module.filter_candidates_in_target_window(
+        [candidate],
+        target_x,
+        target_y,
+        module.OBJECT_X_TOLERANCE_PX,
+        module.OBJECT_Y_TOLERANCE_PX,
+    ) == [candidate]
+
+
+def test_assistant_main_transport_window_rejects_y_above_hit_line_candidate() -> None:
+    """辅车搬运窗口按底边 Y 小于命中线判断纵向命中."""
+
+    module = load_assistant_main()
+    target_x, target_y = assistant_target_point(module, module.Task.TRANSPORT)
+    candidate = ("red", target_x, 0.0, target_y + 20.0, 300.0, object())
+
+    assert module.filter_candidates_in_target_window(
+        [candidate],
+        target_x,
+        target_y,
+        module.OBJECT_X_TOLERANCE_PX,
+        module.OBJECT_Y_TOLERANCE_PX,
+    ) == []
+
+
 def test_assistant_main_object_candidates_use_yolo_when_enabled() -> None:
     """辅车 main 开启 YOLO 时使用模型结果生成找物体候选."""
 
@@ -1454,6 +1536,30 @@ def test_assistant_main_orbit_inherits_track_after_object_event() -> None:
 
     assert module.state.current_detection_source == "roi"
     assert candidates[0][:5] == ("red", 160.0, 30.0, 220.0, 240.0)
+
+
+def test_assistant_main_new_task_sync_clears_previous_pending_event() -> None:
+    module = load_assistant_main()
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            11,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+    module.create_pending_event(11, module.Event.ALIGNED, 300)
+
+    module.handle_control_frame(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.TRANSPORT_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+
+    assert module.state.has_pending_event() is False
 
 
 def test_assistant_main_blob_only_uses_full_image_blob_search() -> None:
@@ -3225,6 +3331,18 @@ def test_assistant_main_return_line_reports_aligned_event_without_velocity_frame
                     return []
                 return [FakeReturnBlob(roi[0], roi[1], roi[2], roi[3], area)]
 
+        def get_pixel(self, x, y):
+            for roi, area in self.yellow_area_by_roi.items():
+                left, top, width, height = roi
+                roi_area = int(width) * int(height)
+                if (
+                    int(area) >= int(roi_area)
+                    and int(left) <= int(x) < int(left) + int(width)
+                    and int(top) <= int(y) < int(top) + int(height)
+                ):
+                    return (70, -10, 50)
+            return (0, 0, 0)
+
     img = ReturnLineImage()
     module.state.current_image = img
     module.state.current_image_width = img.width()
@@ -3256,6 +3374,38 @@ def test_assistant_main_return_line_reports_aligned_event_without_velocity_frame
         100,
     )
     assert len(uart.writes) == 1
+
+
+def test_assistant_main_return_line_ratio_counts_roi_inner_threshold_hits() -> None:
+    module = load_assistant_main()
+
+    class ReturnLineInnerYellowImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+        def find_blobs(
+            self,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge,
+            roi=None,
+            margin=None,
+        ):
+            _ = thresholds, pixels_threshold, area_threshold, merge, roi, margin
+            return []
+
+        def get_pixel(self, x, y):
+            if 80 <= int(x) < 96 and 0 <= int(y) < 80:
+                return (70, -10, 50)
+            return (0, 0, 0)
+
+    img = ReturnLineInnerYellowImage()
+
+    assert module._build_return_line_touch_ratio_percent(img) == pytest.approx(10.0)
 
 
 def test_assistant_main_return_line_gate_off_blocks_event() -> None:
@@ -3309,6 +3459,18 @@ def test_assistant_main_return_line_gate_off_blocks_event() -> None:
             if area <= 0:
                 return []
             return [FakeReturnBlob(roi[0], roi[1], roi[2], roi[3], area)]
+
+        def get_pixel(self, x, y):
+            for roi, area in self.yellow_area_by_roi.items():
+                left, top, width, height = roi
+                roi_area = int(width) * int(height)
+                if (
+                    int(area) >= int(roi_area)
+                    and int(left) <= int(x) < int(left) + int(width)
+                    and int(top) <= int(y) < int(top) + int(height)
+                ):
+                    return (70, -10, 50)
+            return (0, 0, 0)
 
     img = ReturnLineImage()
     module.state.current_image = img
