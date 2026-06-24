@@ -1,0 +1,16 @@
+[project]
+name = "smartcar"
+version = "0.1.0"
+description = "SmartCar 2026 OpenART vision runtime"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.20.0",
+    "openmv>=1.0.6",
+    "pyserial>=3.5",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

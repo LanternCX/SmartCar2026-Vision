@@ -1,3 +1,0 @@
-openmv>=1.0.6
-numpy>=1.20.0
-pyserial>=3.5
