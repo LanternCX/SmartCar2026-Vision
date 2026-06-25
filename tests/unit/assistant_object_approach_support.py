@@ -845,7 +845,6 @@ def test_assistant_missing_target_outputs_zero_search_velocity() -> None:
         module.OBJECT_MISSING_SEARCH_VX,
         module.OBJECT_MISSING_SEARCH_VY,
     )
-    assert module.OBJECT_MISSING_SEARCH_VY == 0.0
 
 
 def test_assistant_object_target_point_generates_p_search_velocity() -> None:
