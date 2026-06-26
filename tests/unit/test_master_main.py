@@ -479,8 +479,17 @@ def test_master_main_object_task_config_keeps_only_filter_parameters() -> None:
 def test_master_main_object_task_config_accepts_legacy_threshold_layout() -> None:
     module = load_master_main()
     module.OBJECT_TASKS = (("red", ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),)
+    task = module.OBJECT_TASKS[0]
+    expected = (
+        task[0],
+        int(task[2]),
+        int(task[3]),
+        int(task[4]),
+        int(task[5]),
+        bool(task[6]),
+    )
 
-    assert module._object_task_config("red") == ("red", 3, 30, 70, 90, True)
+    assert module._object_task_config(task[0]) == expected
 
 
 def test_master_main_roi_tracking_uses_calibrated_object_threshold() -> None:
