@@ -40,29 +40,27 @@ def assistant_target_point(module, config_id=None):
     return module.build_object_target_point(config_id)
 
 
-def test_assistant_main_transport_window_rejects_x_outside_candidate() -> None:
-    """辅车搬运窗口必须同时校准中心 X 与底边 Y."""
+def test_assistant_main_transport_window_keeps_x_outside_deadzone_candidate() -> None:
+    """辅车搬运候选窗口覆盖全图横向范围."""
 
     module = load_assistant_main()
     target_x, target_y = assistant_target_point(module, module.Task.TRANSPORT)
-    candidates = [
-        (
-            "red",
-            target_x + float(module.OBJECT_X_TOLERANCE_PX) + 1.0,
-            0.0,
-            target_y,
-            300.0,
-            object(),
-        )
-    ]
+    candidate = (
+        "red",
+        target_x + float(module.OBJECT_APPROACH_DEADZONE_X_PX) + 1.0,
+        0.0,
+        target_y - 1.0,
+        300.0,
+        object(),
+    )
 
     assert module.filter_candidates_in_target_window(
-        candidates,
+        [candidate],
         target_x,
         target_y,
-        module.OBJECT_X_TOLERANCE_PX,
-        module.OBJECT_Y_TOLERANCE_PX,
-    ) == []
+        module.OBJECT_TRANSPORT_WINDOW_X_PX,
+        module.OBJECT_TRANSPORT_WINDOW_Y_PX,
+    ) == [candidate]
 
 
 def test_assistant_main_transport_window_rejects_y_outside_candidate() -> None:
@@ -85,8 +83,8 @@ def test_assistant_main_transport_window_rejects_y_outside_candidate() -> None:
         candidates,
         target_x,
         target_y,
-        module.OBJECT_X_TOLERANCE_PX,
-        module.OBJECT_Y_TOLERANCE_PX,
+        module.OBJECT_TRANSPORT_WINDOW_X_PX,
+        module.OBJECT_TRANSPORT_WINDOW_Y_PX,
     ) == []
 
 
@@ -101,8 +99,8 @@ def test_assistant_main_transport_window_keeps_xy_inside_candidate() -> None:
         [candidate],
         target_x,
         target_y,
-        module.OBJECT_X_TOLERANCE_PX,
-        module.OBJECT_Y_TOLERANCE_PX,
+        module.OBJECT_TRANSPORT_WINDOW_X_PX,
+        module.OBJECT_TRANSPORT_WINDOW_Y_PX,
     ) == [candidate]
 
 
@@ -117,8 +115,8 @@ def test_assistant_main_transport_window_rejects_y_above_hit_line_candidate() ->
         [candidate],
         target_x,
         target_y,
-        module.OBJECT_X_TOLERANCE_PX,
-        module.OBJECT_Y_TOLERANCE_PX,
+        module.OBJECT_TRANSPORT_WINDOW_X_PX,
+        module.OBJECT_TRANSPORT_WINDOW_Y_PX,
     ) == []
 
 

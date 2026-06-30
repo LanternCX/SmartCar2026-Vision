@@ -978,6 +978,15 @@ def test_assistant_target_found_window_matches_approach_deadzone() -> None:
     assert float(module.OBJECT_Y_TOLERANCE_PX) == float(module.OBJECT_APPROACH_DEADZONE_Y_PX)
 
 
+def test_assistant_transport_candidate_window_covers_qvga_frame() -> None:
+    """搬运候选筛选窗口覆盖当前 QVGA 图像范围."""
+
+    module = load_assistant()
+
+    assert float(module.OBJECT_TRANSPORT_WINDOW_X_PX) == float(IMAGE_WIDTH)
+    assert float(module.OBJECT_TRANSPORT_WINDOW_Y_PX) == float(IMAGE_HEIGHT)
+
+
 def test_assistant_object_target_can_be_reconfigured(monkeypatch) -> None:
     """找物体目标点改动后, 候选选择和输出速度都要跟着变化."""
 
