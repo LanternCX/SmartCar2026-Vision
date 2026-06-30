@@ -913,7 +913,19 @@ def _tracked_search_roi():
     return (roi_left, roi_top, roi_right - roi_left, roi_bottom - roi_top)
 
 
-def _build_dynamic_blob_object_candidates(img, use_tracking_roi=True):
+def _transport_finish_blob_roi():
+    image_width = int(state.current_image_width)
+    image_height = int(state.current_image_height)
+    _target_x, target_y = build_search_target_point(Task.TRANSPORT_FINISH)
+    tolerance_y = float(OBJECT_Y_TOLERANCE_PX)
+    roi_top = max(0, int(float(image_height) - float(target_y) - tolerance_y))
+    roi_bottom = min(image_height, int(float(image_height) - float(target_y) + tolerance_y))
+    if image_width <= 0 or roi_bottom <= roi_top:
+        return None
+    return (0, roi_top, image_width, roi_bottom - roi_top)
+
+
+def _build_dynamic_blob_object_candidates(img, use_tracking_roi=True, roi=None):
     task_name = state.track_task_name
     if task_name is None and not use_tracking_roi:
         task_name = current_blob_task_name()
@@ -935,13 +947,16 @@ def _build_dynamic_blob_object_candidates(img, use_tracking_roi=True):
         thresholds = (state.track_dynamic_threshold,)
     if not thresholds:
         return ()
+    search_roi = roi
+    if search_roi is None and use_tracking_roi:
+        search_roi = _tracked_search_roi()
     blobs = _find_blobs_with_task_config(
         img,
         thresholds,
         pixels_threshold,
         area_threshold,
         merge_margin,
-        _tracked_search_roi() if use_tracking_roi else None,
+        search_roi,
     )
     candidates = []
     for blob in blobs:
@@ -1284,11 +1299,22 @@ def build_object_candidates(img, yolo_candidates):
     state.current_image = img
     state.current_image_width = int(img.width())
     state.current_image_height = int(img.height())
+    if is_blob_only_task_context():
+        search_roi = _transport_finish_blob_roi() if is_finish_task_context() else None
+        state.current_detection_source = "roi"
+        state.track_failure_reason = TrackFailureReason.NONE
+        return tuple(
+            _build_dynamic_blob_object_candidates(
+                img,
+                use_tracking_roi=False,
+                roi=search_roi,
+            )
+        )
     if current_task is not None and int(current_task["target"]) != int(Target.OBJECT):
         state.current_detection_source = "miss"
         state.track_failure_reason = TrackFailureReason.NO_CANDIDATE
         return ()
-    if not bool(OBJECT_DETECTION_USE_YOLO) or is_blob_only_task_context():
+    if not bool(OBJECT_DETECTION_USE_YOLO):
         state.current_detection_source = "roi"
         state.track_failure_reason = TrackFailureReason.NONE
         return tuple(_build_dynamic_blob_object_candidates(img, use_tracking_roi=False))

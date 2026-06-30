@@ -1485,6 +1485,57 @@ def test_master_main_finish_accepts_x_outside_when_bottom_hits_target_window() -
     assert observation[3] == pytest.approx(400.0)
 
 
+def test_master_main_finish_blob_search_uses_transport_target_roi() -> None:
+    module = load_master_main()
+    module.OBJECT_DETECTION_USE_YOLO = False
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            state=int(module.State.TRANSPORT_OBJECT),
+            target=int(module.Target.EDGE_LINE),
+            arg=int(module.Task.TRANSPORT_FINISH),
+        )
+    )
+    expected_roi = (0, 0, IMAGE_WIDTH, int(module.OBJECT_Y_TOLERANCE_PX))
+
+    class Blob:
+        def rect(self):
+            return (150, 0, 20, 20)
+
+        def cx(self):
+            return 160.0
+
+        def area(self):
+            return 400.0
+
+    class TransportImage(FakeImage):
+        def __init__(self):
+            super().__init__()
+            self.find_blobs_calls = []
+
+        def find_blobs(
+            self,
+            thresholds,
+            pixels_threshold,
+            area_threshold,
+            merge,
+            roi=None,
+            margin=None,
+        ):
+            _ = (thresholds, pixels_threshold, area_threshold, merge, margin)
+            self.find_blobs_calls.append(roi)
+            if roi == expected_roi:
+                return [Blob()]
+            return []
+
+    img = TransportImage()
+
+    candidates = module.build_object_candidates(img, ())
+
+    assert img.find_blobs_calls == [expected_roi]
+    assert tuple(candidate[:4] for candidate in candidates) == (("red", 160.0, 240.0, 400.0),)
+
+
 def test_master_main_finish_uses_flipped_candidate_bottom_for_target_window() -> None:
     module = load_master_main()
     module.state.yolo_net = "fake-net"
