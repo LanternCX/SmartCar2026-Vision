@@ -90,6 +90,8 @@ def test_master_main_process_task_and_velocity_helpers_drop_frame_size_parameter
     assert tuple(inspect.signature(module.build_finish_task_ring_rois).parameters) == ("blob", "img")
     assert tuple(inspect.signature(module.build_finish_task_fixed_object_roi).parameters) == ("img",)
     assert tuple(inspect.signature(module.build_finish_task_yellow_ratio_percent).parameters) == ("img", "blob")
+    assert tuple(inspect.signature(module.build_return_line_touch_roi).parameters) == ("img",)
+    assert tuple(inspect.signature(module.build_return_line_yellow_ratio_percent).parameters) == ("img",)
     assert tuple(inspect.signature(module.draw_protocol_target_point_debug).parameters) == (
         "img",
         "target_x",
@@ -1877,12 +1879,33 @@ def test_master_main_finish_yellow_ratio_uses_fixed_object_roi() -> None:
 
     img.yellow_area_by_roi[tuple(fixed_roi)] = yellow_area
 
-    assert fixed_roi == (80, 0, 160, 80)
+    assert fixed_roi == module.build_finish_task_fixed_object_roi(img)
     assert module.build_finish_task_yellow_ratio_percent(img, FarObjectBlob()) == pytest.approx(100.0)
+
+
+def test_master_main_finish_fixed_object_roi_uses_width_and_top_config() -> None:
+    module = load_master_main()
+
+    assert module.FINISH_HOOK_FIXED_OBJECT_ROI_CONFIG == (0.5, 1.0 / 3.0)
+    assert not hasattr(module, "FINISH_HOOK_FIXED_OBJECT_ROI_LEFT_RATIO")
+    assert not hasattr(module, "FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO")
+    assert not hasattr(module, "FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO")
+    img = FakeImage()
+    roi_width = int(float(img.width()) * float(module.FINISH_HOOK_FIXED_OBJECT_ROI_CONFIG[0]))
+    roi_height = int(float(img.height()) * float(module.FINISH_HOOK_FIXED_OBJECT_ROI_CONFIG[1]))
+    assert module.build_finish_task_fixed_object_roi(img) == (
+        (int(img.width()) - int(roi_width)) // 2,
+        0,
+        roi_width,
+        roi_height,
+    )
 
 
 def test_master_main_finish_yellow_ratio_counts_roi_inner_threshold_hits() -> None:
     module = load_master_main()
+    probe_img = FakeImage()
+    fixed_roi = module.build_finish_task_fixed_object_roi(probe_img)
+    yellow_width = max(1, int(fixed_roi[2]) // 20)
 
     class InnerYellowImage(FakeImage):
         def find_blobs(
@@ -1898,13 +1921,66 @@ def test_master_main_finish_yellow_ratio_counts_roi_inner_threshold_hits() -> No
             return []
 
         def get_pixel(self, x, y):
-            if 80 <= int(x) < 88 and 0 <= int(y) < 80:
+            if (
+                int(fixed_roi[0]) <= int(x) < int(fixed_roi[0]) + yellow_width
+                and int(fixed_roi[1]) <= int(y) < int(fixed_roi[1]) + int(fixed_roi[3])
+            ):
                 return (70, -10, 50)
             return (0, 0, 0)
 
     img = InnerYellowImage()
 
     assert module.build_finish_task_yellow_ratio_percent(img, None) == pytest.approx(5.0)
+
+
+def test_master_main_return_line_touch_roi_uses_width_and_top_config() -> None:
+    module = load_master_main()
+
+    assert module.RETURN_LINE_TOUCH_ROI_CONFIG == (1.0 / 2.0, 1.0 / 2.0)
+    assert not hasattr(module, "RETURN_LINE_TOUCH_ROI_LEFT_RATIO")
+    assert not hasattr(module, "RETURN_LINE_TOUCH_ROI_RIGHT_RATIO")
+    assert not hasattr(module, "RETURN_LINE_TOUCH_ROI_TOP_RATIO")
+    assert not hasattr(module, "RETURN_LINE_YELLOW_THRESHOLD")
+    assert not hasattr(module, "RETURN_LINE_TOUCH_RATIO_THRESHOLD")
+    img = FakeImage()
+    roi_width = int(float(img.width()) * float(module.RETURN_LINE_TOUCH_ROI_CONFIG[0]))
+    roi_height = int(float(img.height()) * float(module.RETURN_LINE_TOUCH_ROI_CONFIG[1]))
+    assert module.build_return_line_touch_roi(img) == (
+        (int(img.width()) - int(roi_width)) // 2,
+        0,
+        roi_width,
+        roi_height,
+    )
+
+
+def test_master_main_return_line_yellow_ratio_uses_independent_roi() -> None:
+    module = load_master_main()
+    img = FakeImage()
+    module.FINISH_HOOK_FIXED_OBJECT_ROI_CONFIG = (0.25, 1.0 / 3.0)
+    module.RETURN_LINE_TOUCH_ROI_CONFIG = (1.0 / 2.0, 1.0 / 2.0)
+    return_roi = module.build_return_line_touch_roi(img)
+    finish_roi = module.build_finish_task_fixed_object_roi(img)
+
+    class ReturnLineOnlyImage(FakeImage):
+        def find_blobs(
+            self,
+            thresholds,
+            roi=None,
+            pixels_threshold=None,
+            area_threshold=None,
+            merge=None,
+            margin=None,
+        ):
+            _ = thresholds, pixels_threshold, area_threshold, merge, margin
+            if tuple(roi) == tuple(return_roi):
+                return [FakeBlob(return_roi[0], return_roi[1], return_roi[2], return_roi[3], int(return_roi[2]) * int(return_roi[3]))]
+            return []
+
+    img = ReturnLineOnlyImage()
+
+    assert return_roi != finish_roi
+    assert module.build_return_line_yellow_ratio_percent(img) == pytest.approx(100.0)
+    assert module.build_finish_task_yellow_ratio_percent(img, None) == pytest.approx(0.0)
 
 
 def test_master_main_return_retreat_reports_line_aligned() -> None:
@@ -1922,7 +1998,7 @@ def test_master_main_return_retreat_reports_line_aligned() -> None:
     uart = FakeUART()
     module.state.uart_device = uart
     img = FakeImage()
-    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    fixed_roi = module.build_return_line_touch_roi(img)
     img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
 
     run_frame(module, img)
@@ -1991,7 +2067,7 @@ def test_master_main_return_line_runtime_uses_touch_roi_detection() -> None:
         pass
 
     img = TouchDetectImage()
-    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    fixed_roi = module.build_return_line_touch_roi(img)
     img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
     run_frame(module, img)
 
@@ -2012,7 +2088,7 @@ def test_master_main_return_line_does_not_report_finished_event() -> None:
     uart = FakeUART()
     module.state.uart_device = uart
     img = FakeImage()
-    fixed_roi = module.build_finish_task_fixed_object_roi(img)
+    fixed_roi = module.build_return_line_touch_roi(img)
     img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
 
     module.handle_control_frame(

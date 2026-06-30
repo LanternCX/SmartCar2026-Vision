@@ -3354,7 +3354,7 @@ def test_assistant_main_return_line_reports_aligned_event_without_velocity_frame
     module.state.current_image = img
     module.state.current_image_width = img.width()
     module.state.current_image_height = img.height()
-    fixed_roi = (80, 0, 160, 80)
+    fixed_roi = module._build_return_line_touch_roi(img)
     img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
 
     module.process_task_frame(img)
@@ -3387,6 +3387,10 @@ def test_assistant_main_return_line_ratio_counts_roi_inner_threshold_hits() -> N
     module = load_assistant_main()
 
     class ReturnLineInnerYellowImage:
+        def __init__(self):
+            self.fixed_roi = None
+            self.yellow_width = 0
+
         def width(self):
             return legacy_tests.IMAGE_WIDTH
 
@@ -3406,13 +3410,48 @@ def test_assistant_main_return_line_ratio_counts_roi_inner_threshold_hits() -> N
             return []
 
         def get_pixel(self, x, y):
-            if 80 <= int(x) < 96 and 0 <= int(y) < 80:
+            if self.fixed_roi is None:
+                return (0, 0, 0)
+            if (
+                int(self.fixed_roi[0]) <= int(x) < int(self.fixed_roi[0]) + int(self.yellow_width)
+                and int(self.fixed_roi[1]) <= int(y) < int(self.fixed_roi[1]) + int(self.fixed_roi[3])
+            ):
                 return (70, -10, 50)
             return (0, 0, 0)
 
     img = ReturnLineInnerYellowImage()
+    fixed_roi = module._build_return_line_touch_roi(img)
+    yellow_width = max(1, int(fixed_roi[2]) // 10)
+    img.fixed_roi = fixed_roi
+    img.yellow_width = yellow_width
+    expected_ratio = float(yellow_width) * 100.0 / float(fixed_roi[2])
 
-    assert module._build_return_line_touch_ratio_percent(img) == pytest.approx(10.0)
+    assert module._build_return_line_touch_ratio_percent(img) == pytest.approx(expected_ratio)
+
+
+def test_assistant_main_return_line_touch_roi_uses_width_and_top_config() -> None:
+    module = load_assistant_main()
+
+    class ReturnLineImage:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+    assert module.RETURN_LINE_TOUCH_ROI_CONFIG == (1.0 / 2.0, 1.0 / 2.0)
+    assert not hasattr(module, "RETURN_LINE_TOUCH_ROI_LEFT_RATIO")
+    assert not hasattr(module, "RETURN_LINE_TOUCH_ROI_RIGHT_RATIO")
+    assert not hasattr(module, "RETURN_LINE_TOUCH_ROI_TOP_RATIO")
+    img = ReturnLineImage()
+    roi_width = int(float(img.width()) * float(module.RETURN_LINE_TOUCH_ROI_CONFIG[0]))
+    roi_height = int(float(img.height()) * float(module.RETURN_LINE_TOUCH_ROI_CONFIG[1]))
+    assert module._build_return_line_touch_roi(img) == (
+        (int(img.width()) - int(roi_width)) // 2,
+        0,
+        roi_width,
+        roi_height,
+    )
 
 
 def test_assistant_main_return_line_gate_off_blocks_event() -> None:
@@ -3442,7 +3481,7 @@ def test_assistant_main_return_line_gate_off_blocks_event() -> None:
 
     class ReturnLineImage:
         def __init__(self):
-            self.yellow_area_by_roi = {(80, 0, 160, 80): 160 * 80}
+            self.yellow_area_by_roi = {}
 
         def width(self):
             return legacy_tests.IMAGE_WIDTH
@@ -3480,6 +3519,8 @@ def test_assistant_main_return_line_gate_off_blocks_event() -> None:
             return (0, 0, 0)
 
     img = ReturnLineImage()
+    fixed_roi = module._build_return_line_touch_roi(img)
+    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
     module.state.current_image = img
     module.state.current_image_width = img.width()
     module.state.current_image_height = img.height()

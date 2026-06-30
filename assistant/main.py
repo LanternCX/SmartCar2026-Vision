@@ -123,12 +123,8 @@ OBJECT_TASKS = (
 )
 # 回库黄线识别阈值
 RETURN_LINE_YELLOW_THRESHOLD = (47, 87, -39, -5, 21, 85)
-# 回库 touch 固定物体区域左边界比例
-RETURN_LINE_TOUCH_ROI_LEFT_RATIO = 0.25
-# 回库 touch 固定物体区域右边界比例
-RETURN_LINE_TOUCH_ROI_RIGHT_RATIO = 0.75
-# 回库 touch 固定物体区域顶部比例
-RETURN_LINE_TOUCH_ROI_TOP_RATIO = 2.0 / 3.0
+# 回库 touch 区域配置: 宽度比例, 顶部高度比例
+RETURN_LINE_TOUCH_ROI_CONFIG = (1.0 / 2.0, 1.0 / 2.0)
 # 回库 touch 黄色接触占比阈值
 RETURN_LINE_TOUCH_RATIO_THRESHOLD = 0.05
 
@@ -1385,17 +1381,13 @@ def _sample_roi_positions(start, end, sample_count):
 def _build_return_line_touch_roi(img):
     image_width = int(img.width())
     image_height = int(img.height())
-    display_left = int(float(image_width) * float(RETURN_LINE_TOUCH_ROI_LEFT_RATIO))
-    display_right = int(float(image_width) * float(RETURN_LINE_TOUCH_ROI_RIGHT_RATIO))
-    display_top = int(float(image_height) * float(RETURN_LINE_TOUCH_ROI_TOP_RATIO))
-    display_left = max(0, min(int(image_width), int(display_left)))
-    display_right = max(int(display_left), min(int(image_width), int(display_right)))
-    display_top = max(0, min(int(image_height), int(display_top)))
-    left = int(image_width) - int(display_right)
-    right = int(image_width) - int(display_left)
-    top = 0
-    bottom = int(image_height) - int(display_top)
-    return (int(left), int(top), int(right) - int(left), int(bottom) - int(top))
+    width_ratio, top_ratio = RETURN_LINE_TOUCH_ROI_CONFIG
+    roi_width = int(float(image_width) * float(width_ratio))
+    roi_height = int(float(image_height) * float(top_ratio))
+    roi_width = max(0, min(int(image_width), int(roi_width)))
+    roi_height = max(0, min(int(image_height), int(roi_height)))
+    left = (int(image_width) - int(roi_width)) // 2
+    return (int(left), 0, int(roi_width), int(roi_height))
 
 
 def _count_yellow_pixels_in_roi(img, roi):
