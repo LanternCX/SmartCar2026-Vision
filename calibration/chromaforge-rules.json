@@ -10,16 +10,7 @@
       "min_recognition_block_area": 30,
       "min_recognition_target_area": 70,
       "max_recognition_side_length": 220,
-      "thresholds": [
-        [
-          14,
-          57,
-          24,
-          84,
-          -4,
-          48
-        ]
-      ],
+      "thresholds": [[14, 57, 24, 84, -4, 48]],
       "clusters": [
         {
           "id": "obj_1_blank_1",
@@ -36,16 +27,7 @@
       "min_recognition_block_area": 1,
       "min_recognition_target_area": 1,
       "max_recognition_side_length": 0,
-      "thresholds": [
-        [
-          58,
-          87,
-          -24,
-          -1,
-          21,
-          84
-        ]
-      ],
+      "thresholds": [[47, 87, -39, -5, 21, 85]],
       "clusters": [
         {
           "id": "obj_6_blank_1",

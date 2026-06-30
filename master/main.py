@@ -115,7 +115,7 @@ MASTER_MISSING_SEARCH_VX = 0.0
 # 搜索阶段无目标时的默认纵向速度
 MASTER_MISSING_SEARCH_VY = 2.0
 # 搜索阶段横向控制比例系数
-MASTER_SEARCH_KP_X = 0.02
+MASTER_SEARCH_KP_X = 0.015
 # 搜索阶段纵向控制比例系数
 MASTER_SEARCH_KP_Y = -0.15
 # 搜索阶段最小输出速度
@@ -173,7 +173,7 @@ MASTER_TRANSPORT_TARGET_Y_PX = 240.0
 # 搬运收尾环带外扩边距, 单位为 px
 FINISH_HOOK_RING_EXPAND_PX = 5
 # 搬运收尾黄线识别阈值
-FINISH_HOOK_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
+FINISH_HOOK_YELLOW_THRESHOLD = (47, 87, -39, -5, 21, 85)
 # 搬运收尾固定物体区域左边界比例, 以反转矫正后的图像宽度为基准
 FINISH_HOOK_FIXED_OBJECT_ROI_LEFT_RATIO = 0.25
 # 搬运收尾固定物体区域右边界比例, 以反转矫正后的图像宽度为基准
@@ -181,7 +181,7 @@ FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO = 0.75
 # 搬运收尾固定物体区域顶部比例, 区域覆盖反转矫正后图像的底部三分之一
 FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO = 2.0 / 3.0
 # 搬运收尾黄色接触占比阈值
-FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.10
+FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.05
 # 搬运收尾脱离接触后的稳定帧数
 FINISH_HOOK_STABLE_FRAMES = 2
 

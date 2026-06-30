@@ -122,7 +122,7 @@ OBJECT_TASKS = (
     ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 220, True),
 )
 # 回库黄线识别阈值
-RETURN_LINE_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
+RETURN_LINE_YELLOW_THRESHOLD = (47, 87, -39, -5, 21, 85)
 # 回库 touch 固定物体区域左边界比例
 RETURN_LINE_TOUCH_ROI_LEFT_RATIO = 0.25
 # 回库 touch 固定物体区域右边界比例
@@ -152,7 +152,7 @@ OBJECT_MISSING_SEARCH_VX = 0.0
 # 目标丢失时的默认搜索纵向速度
 OBJECT_MISSING_SEARCH_VY = 0.0
 # 接近目标阶段横向控制比例系数
-OBJECT_APPROACH_KP_X = 0.02
+OBJECT_APPROACH_KP_X = 0.015
 # 接近目标阶段纵向控制比例系数
 OBJECT_APPROACH_KP_Y = -0.2
 # 接近目标阶段最小输出速度
