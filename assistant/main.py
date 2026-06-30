@@ -191,9 +191,9 @@ OBJECT_ORBIT_TARGET_Y_PX = 240.0
 ASSISTANT_TRANSPORT_TARGET_Y_PX = 240.0
 # 目标最小有效面积阈值
 OBJECT_MIN_AREA = 50.0
-# 目标横向对齐容差, 单位为 px
+# 目标横向对正容差, 单位为 px
 OBJECT_X_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_X_PX
-# 目标纵向对齐容差, 单位为 px
+# 目标纵向对正容差, 单位为 px
 OBJECT_Y_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_Y_PX
 # 判定目标稳定所需连续帧数
 OBJECT_STABLE_FRAMES = 3
@@ -210,6 +210,10 @@ DYNAMIC_THRESHOLD_REFRESH_CONFIRM_FRAMES = 2
 PROTOCOL_IMAGE_WIDTH = 320
 # 协议约定的图像高度, 单位为 px
 PROTOCOL_IMAGE_HEIGHT = 240
+# 搬运候选筛选横向窗口, 单位为 px
+OBJECT_TRANSPORT_WINDOW_X_PX = float(PROTOCOL_IMAGE_WIDTH)
+# 搬运候选筛选纵向窗口, 单位为 px
+OBJECT_TRANSPORT_WINDOW_Y_PX = float(PROTOCOL_IMAGE_HEIGHT)
 
 # 有符号 16 位整数下界
 _I16_MIN = -32768
@@ -1486,8 +1490,8 @@ def build_object_observation_and_candidates():
             candidates,
             target_x,
             target_y,
-            OBJECT_X_TOLERANCE_PX,
-            OBJECT_Y_TOLERANCE_PX,
+            OBJECT_TRANSPORT_WINDOW_X_PX,
+            OBJECT_TRANSPORT_WINDOW_Y_PX,
         )
     if not candidates:
         return build_object_observation(0, 0, 0, 0), None, None, candidates
