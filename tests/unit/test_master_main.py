@@ -1972,7 +1972,7 @@ def test_master_main_return_line_yellow_ratio_uses_independent_roi() -> None:
             margin=None,
         ):
             _ = thresholds, pixels_threshold, area_threshold, merge, margin
-            if tuple(roi) == tuple(return_roi):
+            if roi is not None and tuple(roi) == tuple(return_roi):
                 return [FakeBlob(return_roi[0], return_roi[1], return_roi[2], return_roi[3], int(return_roi[2]) * int(return_roi[3]))]
             return []
 
