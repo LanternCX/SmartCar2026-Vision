@@ -115,7 +115,7 @@ MASTER_MISSING_SEARCH_VX = 0.0
 # 搜索阶段无目标时的默认纵向速度
 MASTER_MISSING_SEARCH_VY = 2.0
 # 搜索阶段横向控制比例系数
-MASTER_SEARCH_KP_X = 0.02
+MASTER_SEARCH_KP_X = 0.015
 # 搜索阶段纵向控制比例系数
 MASTER_SEARCH_KP_Y = -0.15
 # 搜索阶段最小输出速度
@@ -173,15 +173,13 @@ MASTER_TRANSPORT_TARGET_Y_PX = 240.0
 # 搬运收尾环带外扩边距, 单位为 px
 FINISH_HOOK_RING_EXPAND_PX = 5
 # 搬运收尾黄线识别阈值
-FINISH_HOOK_YELLOW_THRESHOLD = (58, 87, -24, -1, 21, 84)
-# 搬运收尾固定物体区域左边界比例, 以反转矫正后的图像宽度为基准
-FINISH_HOOK_FIXED_OBJECT_ROI_LEFT_RATIO = 0.25
-# 搬运收尾固定物体区域右边界比例, 以反转矫正后的图像宽度为基准
-FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO = 0.75
-# 搬运收尾固定物体区域顶部比例, 区域覆盖反转矫正后图像的底部三分之一
-FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO = 2.0 / 3.0
+FINISH_HOOK_YELLOW_THRESHOLD = (47, 87, -39, -5, 21, 85)
+# 搬运收尾固定物体区域配置: 宽度比例, 顶部高度比例
+FINISH_HOOK_FIXED_OBJECT_ROI_CONFIG = (0.5, 1.0 / 3.0)
 # 搬运收尾黄色接触占比阈值
-FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.10
+FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.05
+# 回库 touch 区域配置: 宽度比例, 顶部高度比例
+RETURN_LINE_TOUCH_ROI_CONFIG = (1.0 / 2.0, 1.0 / 2.0)
 # 搬运收尾脱离接触后的稳定帧数
 FINISH_HOOK_STABLE_FRAMES = 2
 
@@ -1680,17 +1678,25 @@ def build_finish_task_ring_rois(blob, img):
 def build_finish_task_fixed_object_roi(img):
     image_width = int(img.width())
     image_height = int(img.height())
-    display_left = int(float(image_width) * float(FINISH_HOOK_FIXED_OBJECT_ROI_LEFT_RATIO))
-    display_right = int(float(image_width) * float(FINISH_HOOK_FIXED_OBJECT_ROI_RIGHT_RATIO))
-    display_top = int(float(image_height) * float(FINISH_HOOK_FIXED_OBJECT_ROI_TOP_RATIO))
-    display_left = max(0, min(int(image_width), int(display_left)))
-    display_right = max(int(display_left), min(int(image_width), int(display_right)))
-    display_top = max(0, min(int(image_height), int(display_top)))
-    left = int(image_width) - int(display_right)
-    right = int(image_width) - int(display_left)
-    top = 0
-    bottom = int(image_height) - int(display_top)
-    return (int(left), int(top), int(right) - int(left), int(bottom) - int(top))
+    width_ratio, top_ratio = FINISH_HOOK_FIXED_OBJECT_ROI_CONFIG
+    roi_width = int(float(image_width) * float(width_ratio))
+    roi_height = int(float(image_height) * float(top_ratio))
+    roi_width = max(0, min(int(image_width), int(roi_width)))
+    roi_height = max(0, min(int(image_height), int(roi_height)))
+    left = (int(image_width) - int(roi_width)) // 2
+    return (int(left), 0, int(roi_width), int(roi_height))
+
+
+def build_return_line_touch_roi(img):
+    image_width = int(img.width())
+    image_height = int(img.height())
+    width_ratio, top_ratio = RETURN_LINE_TOUCH_ROI_CONFIG
+    roi_width = int(float(image_width) * float(width_ratio))
+    roi_height = int(float(image_height) * float(top_ratio))
+    roi_width = max(0, min(int(image_width), int(roi_width)))
+    roi_height = max(0, min(int(image_height), int(roi_height)))
+    left = (int(image_width) - int(roi_width)) // 2
+    return (int(left), 0, int(roi_width), int(roi_height))
 
 
 def _count_yellow_pixels_in_roi(img, roi):
@@ -1734,6 +1740,15 @@ def build_finish_task_yellow_ratio_percent(img, blob):
     for roi in rois:
         yellow_pixels += _count_yellow_pixels_in_roi(img, roi)
     return float(yellow_pixels) * 100.0 / float(ring_area)
+
+
+def build_return_line_yellow_ratio_percent(img):
+    roi = build_return_line_touch_roi(img)
+    roi_area = int(roi[2]) * int(roi[3])
+    if roi_area <= 0:
+        return 0.0
+    yellow_pixels = _count_yellow_pixels_in_roi(img, roi)
+    return float(yellow_pixels) * 100.0 / float(roi_area)
 
 
 def draw_object_candidates_debug(img, candidates):
@@ -1905,6 +1920,30 @@ def draw_finish_task_debug(img, blob, yellow_ratio):
             int(state.stable_frame_count),
             int(required_stable_frames()),
             1 if pending_finish_event else 0,
+        ),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+
+
+def draw_return_line_debug(img, yellow_ratio):
+    img.draw_rectangle(build_return_line_touch_roi(img), color=(255, 255, 0), thickness=1)
+    touched = float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0
+    img.draw_string(
+        2,
+        50,
+        "return ratio=%.1f" % float(yellow_ratio),
+        color=(255, 255, 255),
+        scale=1,
+        mono_space=False,
+    )
+    img.draw_string(
+        2,
+        62,
+        "touch=%d thr=%.1f" % (
+            1 if touched else 0,
+            float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0,
         ),
         color=(255, 255, 255),
         scale=1,
@@ -2576,7 +2615,7 @@ def _accept_return_line_observation(context_id, img, event_type):
         if not bool(state.return_line_gate_enabled):
             state.stable_frame_count = 0
             return
-        yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
+        yellow_ratio = build_return_line_yellow_ratio_percent(img)
         if float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0:
             create_pending_event(
                 context_id,
@@ -2761,7 +2800,7 @@ def _process_return_line_frame(img):
         return
     accept_observation((int(state.current_task["context_id"]), 0.0, 0.0, 1.0), img)
     if MASTER_DEBUG_DISPLAY_ENABLED:
-        draw_finish_task_debug(img, None, build_finish_task_yellow_ratio_percent(img, None))
+        draw_return_line_debug(img, build_return_line_yellow_ratio_percent(img))
         img.flush()
 
 
