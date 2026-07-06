@@ -148,9 +148,9 @@ OBJECT_MISSING_SEARCH_VX = 0.0
 # 目标丢失时的默认搜索纵向速度
 OBJECT_MISSING_SEARCH_VY = 0.0
 # 接近目标阶段横向控制比例系数
-OBJECT_APPROACH_KP_X = 0.015
+OBJECT_APPROACH_KP_X = 0.005
 # 接近目标阶段纵向控制比例系数
-OBJECT_APPROACH_KP_Y = -0.2
+OBJECT_APPROACH_KP_Y = -0.10
 # 接近目标阶段最小输出速度
 OBJECT_APPROACH_MIN_SPEED = 2
 # 接近目标阶段横向死区, 单位为 px
