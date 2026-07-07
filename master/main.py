@@ -115,9 +115,9 @@ MASTER_MISSING_SEARCH_VX = 0.0
 # 搜索阶段无目标时的默认纵向速度
 MASTER_MISSING_SEARCH_VY = 2.0
 # 搜索阶段横向控制比例系数
-MASTER_SEARCH_KP_X = 0.015
+MASTER_SEARCH_KP_X = 0.005
 # 搜索阶段纵向控制比例系数
-MASTER_SEARCH_KP_Y = -0.15
+MASTER_SEARCH_KP_Y = -0.10
 # 搜索阶段最小输出速度
 MASTER_SEARCH_MIN_SPEED = 2.0
 # 搜索阶段横向死区, 单位为 px

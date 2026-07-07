@@ -1293,8 +1293,10 @@ def test_master_main_search_velocity_applies_min_speed_outside_deadzone() -> Non
 def test_master_main_search_velocity_clamps_vx_and_vy() -> None:
     module = load_master_main()
     module.state.current_image_height = IMAGE_HEIGHT
-    positive = module.build_search_velocity_from_observation((7, 999.0, 999.0, 300.0))
-    negative = module.build_search_velocity_from_observation((7, -999.0, -999.0, 300.0))
+    clamp_x = abs(float(module.MASTER_SEARCH_MAX_VX) / float(module.MASTER_SEARCH_KP_X)) + 1.0
+    clamp_y = float(module.state.current_image_height) + 1.0
+    positive = module.build_search_velocity_from_observation((7, clamp_x, clamp_y, 300.0))
+    negative = module.build_search_velocity_from_observation((7, -clamp_x, -clamp_y, 300.0))
 
     expected_positive_vx = (
         module.MASTER_SEARCH_MAX_VX
