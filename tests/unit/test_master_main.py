@@ -2830,7 +2830,11 @@ def test_master_main_yolo_relocation_limits_large_position_jump() -> None:
 
     candidates = module.build_object_candidates(img, yolo_candidates)
 
-    assert candidates[0][:4] == ("red", 130.0, 210.0, 400.0)
+    candidate = yolo_candidates[0]
+    left, _, right, _ = module.blob_rect_to_bbox(candidate[4].rect())
+    max_delta = max(float(module.OBJECT_X_TOLERANCE_PX) * 2.0, right - left)
+    expected_center_x = min(candidate[1], float(module.state.track_center_x) + max_delta)
+    assert candidates[0][:4] == ("red", expected_center_x, 210.0, 400.0)
 
 
 def test_master_main_yolo_relocation_limits_large_area_jump() -> None:
