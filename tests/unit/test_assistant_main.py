@@ -1158,6 +1158,19 @@ def test_assistant_main_build_search_velocity_wrapper_matches_object_path() -> N
     ) == module.build_object_approach_velocity_from_observation(observation)
 
 
+def test_assistant_main_missing_target_uses_configured_search_velocity() -> None:
+    """辅车找不到物体时使用配置的搜索速度."""
+
+    module = load_assistant_main()
+    module.OBJECT_MISSING_SEARCH_VX = -1.25
+    module.OBJECT_MISSING_SEARCH_VY = 3.75
+
+    assert module.build_search_velocity_from_observation((0.0, 0.0, 0.0)) == (
+        module.OBJECT_MISSING_SEARCH_VX,
+        module.OBJECT_MISSING_SEARCH_VY,
+    )
+
+
 def test_assistant_main_orbit_outputs_independent_xy_velocity_correction() -> None:
     """辅车绕行修正直接输出独立 vx/vy 平移修正."""
 

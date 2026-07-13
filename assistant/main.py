@@ -111,7 +111,7 @@ OBJECT_MIN_AREA = 50.0
 # 目标丢失时的默认搜索横向速度
 OBJECT_MISSING_SEARCH_VX = 0.0
 # 目标丢失时的默认搜索纵向速度
-OBJECT_MISSING_SEARCH_VY = 0.0
+OBJECT_MISSING_SEARCH_VY = 2.0
 # 接近目标阶段横向控制比例系数
 OBJECT_APPROACH_KP_X = 0.005
 # 接近目标阶段纵向控制比例系数
