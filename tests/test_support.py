@@ -221,56 +221,30 @@ def decode_master_vision_hook_sync_body(body: bytes):
     }
 
 
-def _pack_i8(value: int) -> int:
-    value = int(value)
-    if value < 0:
-        value += 256
-    return value
-
-
-def _unpack_i8(value: int) -> int:
-    value = int(value)
-    if value >= 128:
-        return value - 256
-    return value
-
-
-def encode_assistant_vision_task_sync_body(state: int, target: int, arg: int, threshold=None) -> bytes:
+def encode_assistant_vision_task_sync_body(state: int, target: int, arg: int) -> bytes:
     """编码辅车视觉同步 body."""
 
-    if threshold is None:
-        threshold = (0, 0, 0, 0, 0, 0)
-    return bytes([int(state), int(target)]) + _pack_i16(arg) + bytes(
-        _pack_i8(value) for value in threshold
-    )
+    return bytes([int(state), int(target)]) + _pack_i16(arg)
 
 
 def decode_assistant_vision_task_sync_body(body: bytes):
     """解码辅车视觉同步 body."""
 
-    packet = {
+    return {
         "state": int(body[0]),
         "target": int(body[1]),
         "arg": _unpack_i16(body, 2),
     }
-    threshold = tuple(_unpack_i8(value) for value in body[4:10])
-    if any(threshold):
-        packet["threshold"] = threshold
-    return packet
 
 
 def decode_master_vision_event_report_body(body: bytes):
     """解码主车视觉事件 body."""
 
-    packet = {
+    return {
         "context_id": int(body[0]),
         "event": int(body[1]),
         "value": _unpack_i16(body, 2),
     }
-    threshold = tuple(_unpack_i8(value) for value in body[4:10])
-    if any(threshold):
-        packet["threshold"] = threshold
-    return packet
 
 
 def decode_assistant_vision_event_report_body(body: bytes):
@@ -282,14 +256,14 @@ def decode_assistant_vision_event_report_body(body: bytes):
     }
 
 
-def assistant_sync_frame(seq: int, state: int, target: int, arg: int, threshold=None) -> bytes:
+def assistant_sync_frame(seq: int, state: int, target: int, arg: int) -> bytes:
     """构造辅车视觉同步帧."""
 
     return encode_frame(
         MODE_TCP,
         TOPIC_ASSISTANT_VISION_TASK_SYNC,
         seq,
-        encode_assistant_vision_task_sync_body(state, target, arg, threshold),
+        encode_assistant_vision_task_sync_body(state, target, arg),
     )
 
 
