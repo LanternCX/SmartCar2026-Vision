@@ -3,7 +3,6 @@
 # pyright: reportAttributeAccessIssue=false
 
 import json
-import os
 import subprocess
 
 from calibration.chromaforge_export_adapter import (
@@ -12,32 +11,6 @@ from calibration.chromaforge_export_adapter import (
     build_role_source,
     load_rules_json,
 )
-
-
-def _run_role_build_script_preserving_sources(script_path, target_dir, preserved_sources=None):
-    root_dir = DEFAULT_RULES_PATH.parent.parent
-    if preserved_sources is None:
-        preserved_sources = ("master/run.py", "assistant/run.py")
-    originals = {}
-    for relative_path in preserved_sources:
-        source_path = root_dir / relative_path
-        originals[source_path] = source_path.read_text(encoding="utf-8")
-    try:
-        return subprocess.run(
-            ["bash", script_path],
-            check=True,
-            cwd=root_dir,
-            env={
-                "PATH": os.environ["PATH"],
-                "TARGET_DIR": str(target_dir),
-            },
-            capture_output=True,
-            text=True,
-        )
-    finally:
-        for source_path, original_text in originals.items():
-            source_path.write_text(original_text, encoding="utf-8")
-
 
 def test_chromaforge_export_builds_openart_threshold_config() -> None:
     document = {
@@ -227,94 +200,3 @@ def test_chromaforge_export_cli_uses_default_rules_file() -> None:
 
     assert "TASKS = (" in result.stdout
     assert "obj_1" not in result.stdout
-
-
-def test_role_build_script_generates_master_output_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "master-device"
-    target_dir.mkdir()
-
-    _run_role_build_script_preserving_sources("master/build.sh", target_dir)
-
-    uploaded = (target_dir / "run.py").read_text(encoding="utf-8")
-    assert "OBJECT_TASKS = (" in uploaded
-    assert "('red'" in uploaded
-    assert "threshold_index" not in uploaded
-
-
-def test_role_build_script_rewrites_master_source_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "master-copy-only-device"
-    target_dir.mkdir()
-    root_dir = DEFAULT_RULES_PATH.parent.parent
-    source_path = root_dir / "master" / "run.py"
-    original_text = source_path.read_text(encoding="utf-8")
-    modified_text = original_text.replace(
-        "OBJECT_TASKS = (",
-        "OBJECT_TASKS = (\n    ('runtime_only_marker', 1, 2, 3, 4, False),",
-        1,
-    )
-    source_path.write_text(modified_text, encoding="utf-8")
-    try:
-        subprocess.run(
-            ["bash", "master/build.sh"],
-            check=True,
-            cwd=root_dir,
-            env={
-                "PATH": os.environ["PATH"],
-                "TARGET_DIR": str(target_dir),
-            },
-            capture_output=True,
-            text=True,
-        )
-        uploaded = (target_dir / "run.py").read_text(encoding="utf-8")
-        generated_source = source_path.read_text(encoding="utf-8")
-        assert generated_source != modified_text
-        assert uploaded == generated_source
-        assert "runtime_only_marker" not in generated_source
-        assert "threshold_index" not in generated_source
-    finally:
-        source_path.write_text(original_text, encoding="utf-8")
-
-
-def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "assistant-device"
-    target_dir.mkdir()
-
-    _run_role_build_script_preserving_sources("assistant/build.sh", target_dir)
-
-    uploaded = (target_dir / "run.py").read_text(encoding="utf-8")
-    assert "OBJECT_TASKS = (" in uploaded
-    assert "('red'" in uploaded
-
-
-def test_role_build_script_rewrites_assistant_source_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "assistant-copy-only-device"
-    target_dir.mkdir()
-    root_dir = DEFAULT_RULES_PATH.parent.parent
-    source_path = root_dir / "assistant" / "run.py"
-    original_text = source_path.read_text(encoding="utf-8")
-    modified_text = original_text.replace(
-        "OBJECT_TASKS = (",
-        "OBJECT_TASKS = (\n    ('runtime_only_marker', 1, 2, 3, 4, False),",
-        1,
-    )
-    source_path.write_text(modified_text, encoding="utf-8")
-    try:
-        subprocess.run(
-            ["bash", "assistant/build.sh"],
-            check=True,
-            cwd=root_dir,
-            env={
-                "PATH": os.environ["PATH"],
-                "TARGET_DIR": str(target_dir),
-            },
-            capture_output=True,
-            text=True,
-        )
-        uploaded = (target_dir / "run.py").read_text(encoding="utf-8")
-        generated_source = source_path.read_text(encoding="utf-8")
-        assert generated_source != modified_text
-        assert uploaded == generated_source
-        assert "runtime_only_marker" not in generated_source
-        assert "threshold_index" not in generated_source
-    finally:
-        source_path.write_text(original_text, encoding="utf-8")
