@@ -30,32 +30,23 @@ class Mode:
 
 class Topic:
     LOCAL_VISION_VELOCITY = 0x01
-    LOCAL_VISION_CONTROL = 0x04
     ASSISTANT_VISION_TASK_SYNC = 0x11
     ASSISTANT_VISION_EVENT_REPORT = 0x13
-
-
-class LocalVisionControl:
-    RETURN_LINE_GATE_ON = 1
-    RETURN_LINE_GATE_OFF = 2
 
 
 class RunMode:
     FOLLOW = "follow"
     APPROACH_OBJECT = "approach_object"
     ORBIT_OBJECT = "orbit_object"
-    RETURN_LINE = "return_line"
 
 
 class State:
     APPROACH_OBJECT = 2
     ORBIT = 3
     TRANSPORT_OBJECT = 4
-    RETURN_FOLLOW = 6
 
 
 class Target:
-    NONE = 0
     OBJECT = 1
 
 
@@ -63,13 +54,11 @@ class Task:
     SEARCH = 1
     TRANSPORT = 2
     ORBIT = 3
-    RETURN_GARAGE_LINE = 5
 
 
 class Event:
     TARGET_FOUND = 6
     ALIGNED = 7
-    RETURN_LINE_ALIGNED = 10
 
 
 # 协议消息体长度, 单位为 byte
@@ -159,13 +148,6 @@ OBJECT_ORBIT_TARGET_X_PX = 160.0
 OBJECT_ORBIT_TARGET_Y_PX = 210.0
 # 辅车运输阶段图像纵向命中线, 单位为 px
 ASSISTANT_TRANSPORT_TARGET_Y_PX = 240.0
-
-# 回库黄线识别阈值
-RETURN_LINE_YELLOW_THRESHOLD = (47, 87, -39, -5, 21, 85)
-# 回库 touch 区域配置: 宽度比例, 顶部高度比例
-RETURN_LINE_TOUCH_ROI_CONFIG = (1.0 / 2.0, 1.0 / 2.0)
-# 回库 touch 黄色接触占比阈值
-RETURN_LINE_TOUCH_RATIO_THRESHOLD = 0.05
 
 # 协议约定的图像宽度, 单位为 px
 PROTOCOL_IMAGE_WIDTH = 320
@@ -303,14 +285,6 @@ def decode_velocity_body(body):
     }
 
 
-def encode_local_vision_control_body(action):
-    return bytes((_require_u8(action),))
-
-
-def decode_local_vision_control_body(body):
-    return {"action": int(body[0])}
-
-
 def encode_assistant_vision_task_sync_body(state_value, target, arg):
     return bytes((_require_u8(state_value), _require_u8(target))) + _pack_i16(arg)
 
@@ -362,10 +336,6 @@ def format_ack_frame(reliable_seq):
     return encode_frame(Mode.ACK, Topic.ASSISTANT_VISION_TASK_SYNC, reliable_seq, b"")
 
 
-def format_local_vision_control_ack_frame(reliable_seq):
-    return encode_frame(Mode.ACK, Topic.LOCAL_VISION_CONTROL, reliable_seq, b"")
-
-
 def format_event_frame(reliable_seq, event, value):
     return encode_frame(
         Mode.TCP,
@@ -397,20 +367,6 @@ def parse_event_ack_packet(frame_bytes):
     if frame["mode"] != Mode.ACK or frame["topic"] != Topic.ASSISTANT_VISION_EVENT_REPORT:
         return None
     return {"reliable_seq": int(frame["seq"])}
-
-
-def parse_local_vision_control_packet(frame_bytes):
-    frame = decode_frame(frame_bytes)
-    if frame is None:
-        return None
-    if frame["mode"] != Mode.TCP or frame["topic"] != Topic.LOCAL_VISION_CONTROL:
-        return None
-    body = frame["body"]
-    if len(body) < 1:
-        return None
-    packet = decode_local_vision_control_body(body)
-    packet["reliable_seq"] = int(frame["seq"])
-    return packet
 
 
 def is_newer_seq(seq, last_seq):
@@ -859,80 +815,6 @@ def build_object_candidates(img, yolo_candidates):
     return build_object_blob_candidates(img)
 
 
-def _pixel_to_lab(pixel):
-    if pixel is None:
-        return None
-    lab = image.rgb_to_lab(pixel)
-    try:
-        if len(lab) < 3:
-            return None
-    except TypeError:
-        return None
-    return (float(lab[0]), float(lab[1]), float(lab[2]))
-
-
-def _pixel_matches_threshold(pixel, threshold):
-    lab = _pixel_to_lab(pixel)
-    if lab is None:
-        return False
-    return (
-        float(threshold[0]) <= float(lab[0]) <= float(threshold[1])
-        and float(threshold[2]) <= float(lab[1]) <= float(threshold[3])
-        and float(threshold[4]) <= float(lab[2]) <= float(threshold[5])
-    )
-
-
-def _build_return_line_touch_roi(img):
-    image_width = int(img.width())
-    image_height = int(img.height())
-    width_ratio, top_ratio = RETURN_LINE_TOUCH_ROI_CONFIG
-    roi_width = int(float(image_width) * float(width_ratio))
-    roi_height = int(float(image_height) * float(top_ratio))
-    roi_width = max(0, min(int(image_width), int(roi_width)))
-    roi_height = max(0, min(int(image_height), int(roi_height)))
-    left = (int(image_width) - int(roi_width)) // 2
-    return (int(left), 0, int(roi_width), int(roi_height))
-
-
-def _count_yellow_pixels_in_roi(img, roi):
-    roi_area = int(roi[2]) * int(roi[3])
-    if roi_area <= 0:
-        return 0
-    blobs = img.find_blobs(
-        [RETURN_LINE_YELLOW_THRESHOLD],
-        roi=roi,
-        pixels_threshold=1,
-        area_threshold=1,
-        merge=True,
-    )
-    if not blobs:
-        get_pixel = getattr(img, "get_pixel", None)
-        if get_pixel is None:
-            return 0
-        yellow_pixels = 0
-        left, top, width, height = roi
-        for y in range(int(top), int(top) + int(height)):
-            for x in range(int(left), int(left) + int(width)):
-                if _pixel_matches_threshold(get_pixel(int(x), int(y)), RETURN_LINE_YELLOW_THRESHOLD):
-                    yellow_pixels += 1
-        return yellow_pixels
-    yellow_pixels = 0.0
-    for blob in blobs:
-        yellow_pixels += blob_area(blob)
-    if yellow_pixels >= float(roi_area):
-        return roi_area
-    return int(yellow_pixels)
-
-
-def _build_return_line_touch_ratio_percent(img):
-    roi = _build_return_line_touch_roi(img)
-    roi_area = int(roi[2]) * int(roi[3])
-    if roi_area <= 0:
-        return 0.0
-    yellow_pixels = _count_yellow_pixels_in_roi(img, roi)
-    return float(yellow_pixels) * 100.0 / float(roi_area)
-
-
 def choose_best_candidate(candidates, target_x, target_y):
     return min(
         candidates,
@@ -1244,7 +1126,6 @@ class RuntimeState:
         self._stable_count = 0
         self._pending_event = None
         self._pending_event_last_sent_ms = None
-        self.return_line_gate_enabled = False
         self._completed_event_sync_seq = None
         self.yolo_net = None
         self.uart_device = None
@@ -1261,14 +1142,6 @@ class RuntimeState:
         sync_packet = parse_task_sync_packet(line)
         if sync_packet is not None:
             return self._handle_sync_packet(sync_packet)
-        control_packet = parse_local_vision_control_packet(line)
-        if control_packet is not None:
-            action = int(control_packet["action"])
-            if action == int(LocalVisionControl.RETURN_LINE_GATE_ON):
-                self.return_line_gate_enabled = True
-            elif action == int(LocalVisionControl.RETURN_LINE_GATE_OFF):
-                self.return_line_gate_enabled = False
-            return format_local_vision_control_ack_frame(control_packet["reliable_seq"])
         ack_packet = parse_event_ack_packet(line)
         if ack_packet is not None:
             self._handle_ack_packet(ack_packet)
@@ -1291,7 +1164,6 @@ class RuntimeState:
             self._pending_event_last_sent_ms = None
             self.mode = self._mode_from_sync(self.current_sync)
             self._stable_count = 0
-            self.return_line_gate_enabled = False
         return format_ack_frame(reliable_seq)
 
     def _should_apply_sync(self, reliable_seq):
@@ -1327,12 +1199,6 @@ class RuntimeState:
             and config_id == Task.ORBIT
         ):
             return RunMode.ORBIT_OBJECT
-        if (
-            int(sync["state"]) == State.RETURN_FOLLOW
-            and int(sync["target"]) == Target.NONE
-            and config_id == Task.RETURN_GARAGE_LINE
-        ):
-            return RunMode.RETURN_LINE
         return RunMode.FOLLOW
 
     def current_object_config_id(self):
@@ -1377,28 +1243,6 @@ class RuntimeState:
         if self._stable_count >= self.required_stable_frames:
             self._create_event(current_sync_seq, event_id, value)
 
-    def accept_return_line_observation(self, img):
-        if self.current_sync is None:
-            self._stable_count = 0
-            return
-        current_sync_seq = int(self.current_sync["reliable_seq"])
-        if self._pending_event is not None:
-            return
-        if self._completed_event_sync_seq == current_sync_seq:
-            return
-        if self._current_event_id() != Event.RETURN_LINE_ALIGNED:
-            self._stable_count = 0
-            return
-        if not bool(self.return_line_gate_enabled):
-            self._stable_count = 0
-            return
-        yellow_ratio = _build_return_line_touch_ratio_percent(img)
-        if float(yellow_ratio) <= float(RETURN_LINE_TOUCH_RATIO_THRESHOLD) * 100.0:
-            self._stable_count = 0
-            return
-        self._create_event(current_sync_seq, Event.RETURN_LINE_ALIGNED, int(yellow_ratio))
-        self._stable_count = 0
-
     def _observation_matches_target(self, x, y, value):
         if self.current_sync is not None:
             config_id = unpack_task_arg_config(self.current_sync["arg"])
@@ -1426,8 +1270,6 @@ class RuntimeState:
             return Event.ALIGNED
         if sync_state == State.ORBIT and target == Target.OBJECT and config_id == Task.TRANSPORT:
             return Event.ALIGNED
-        if sync_state == State.RETURN_FOLLOW and target == Target.NONE and config_id == Task.RETURN_GARAGE_LINE:
-            return Event.RETURN_LINE_ALIGNED
         return None
 
     def _create_event(self, reliable_seq, event, value):
@@ -1485,9 +1327,7 @@ def next_event_frame():
 
 
 def accept_observation(observation=None, line_y=None):
-    if state.mode == RunMode.RETURN_LINE:
-        state.accept_return_line_observation(state.current_image)
-        return
+    _ = line_y
     if observation is None:
         observation = build_object_observation(0, 0, 0, 0)
     state.accept_object_observation(observation)
@@ -1560,8 +1400,6 @@ def _find_control_frame_start(rx_buffer):
         mode = frame["mode"]
         topic = frame["topic"]
         if mode == Mode.TCP and topic == Topic.ASSISTANT_VISION_TASK_SYNC:
-            return index
-        if mode == Mode.TCP and topic == Topic.LOCAL_VISION_CONTROL:
             return index
         if mode == Mode.ACK and topic == Topic.ASSISTANT_VISION_EVENT_REPORT:
             return index
@@ -1660,10 +1498,6 @@ def _process_object_frame(img):
             flush()
 
 
-def _process_return_line_frame(img):
-    accept_observation()
-
-
 def process_task_frame(img):
     if state.has_pending_event():
         event_frame = next_event_frame()
@@ -1672,8 +1506,6 @@ def process_task_frame(img):
         return
     if state.mode in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT):
         _process_object_frame(img)
-    elif state.mode == RunMode.RETURN_LINE:
-        _process_return_line_frame(img)
     else:
         _process_follow_frame(img)
 
@@ -1718,9 +1550,6 @@ def run():
         if state.has_pending_event():
             state.current_object_candidates = ()
             debug_log("skip", "reason=pending_event")
-        elif state.mode == RunMode.RETURN_LINE:
-            state.current_object_candidates = ()
-            debug_log("skip", "reason=return_line")
         elif (
             state.mode in (RunMode.APPROACH_OBJECT, RunMode.ORBIT_OBJECT)
             or (state.current_sync is None and ASSISTANT_DEBUG_DISPLAY_ENABLED)

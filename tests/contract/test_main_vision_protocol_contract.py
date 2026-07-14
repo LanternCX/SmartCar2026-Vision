@@ -30,6 +30,17 @@ def load_assistant_main():
     return module
 
 
+def test_visual_yellow_line_interfaces_are_removed() -> None:
+    for module in (load_master_main(), load_assistant_main()):
+        assert not hasattr(module, "LocalVisionControl")
+        assert not hasattr(module.Event, "RETURN_LINE_ALIGNED")
+        assert not hasattr(module.Task, "RETURN_GARAGE_LINE")
+    master = load_master_main()
+    assert not hasattr(master.Task, "TRANSPORT_FINISH")
+    assert not hasattr(master, "build_return_line_touch_roi")
+    assert not hasattr(master, "build_finish_hook_observation")
+
+
 def test_master_main_formats_velocity_and_reliable_event_frames() -> None:
     module = load_master_main()
     velocity_frame = decode_frame(module.format_search_velocity_frame(1.0, -0.5))
@@ -98,23 +109,6 @@ def test_master_main_missing_target_velocity_frame_uses_configured_search_speed(
     }
 
 
-def test_master_main_return_line_aligned_event_uses_reliable_event_topic() -> None:
-    module = load_master_main()
-    assert int(module.Event.RETURN_LINE_ALIGNED) == 10
-    aligned_frame = decode_frame(
-        module.format_event_frame(32, 7, module.Event.RETURN_LINE_ALIGNED, 160)
-    )
-
-    assert aligned_frame is not None
-    assert aligned_frame["mode"] == MODE_TCP
-    assert aligned_frame["topic"] == module.Topic.MASTER_VISION_EVENT_REPORT
-    assert decode_master_vision_event_report_body(aligned_frame["body"]) == {
-        "context_id": 7,
-        "event": module.Event.RETURN_LINE_ALIGNED,
-        "value": 160,
-    }
-
-
 def test_assistant_main_formats_velocity_and_reliable_event_frames_with_master_style_api() -> None:
     module = load_assistant_main()
     velocity_frame = decode_frame(module.format_search_velocity_frame(1.0, -0.5))
@@ -146,22 +140,6 @@ def test_assistant_main_formats_velocity_and_reliable_event_frames_with_master_s
     assert decode_assistant_vision_event_report_body(event_frame["body"]) == {
         "event": module.Event.TARGET_FOUND,
         "value": 300,
-    }
-
-
-def test_assistant_main_return_line_aligned_event_uses_reliable_event_topic() -> None:
-    module = load_assistant_main()
-    assert int(module.Event.RETURN_LINE_ALIGNED) == 10
-    aligned_frame = decode_frame(
-        module.format_event_frame(30, module.Event.RETURN_LINE_ALIGNED, 160)
-    )
-
-    assert aligned_frame is not None
-    assert aligned_frame["mode"] == MODE_TCP
-    assert aligned_frame["topic"] == module.Topic.ASSISTANT_VISION_EVENT_REPORT
-    assert decode_assistant_vision_event_report_body(aligned_frame["body"]) == {
-        "event": module.Event.RETURN_LINE_ALIGNED,
-        "value": 160,
     }
 
 

@@ -18,23 +18,6 @@
           "threshold_index": 0
         }
       ]
-    },
-    {
-      "id": "obj_6",
-      "name": "yellow",
-      "require_all_clusters": true,
-      "recognition_merge_gap": 3,
-      "min_recognition_block_area": 1,
-      "min_recognition_target_area": 1,
-      "max_recognition_side_length": 0,
-      "thresholds": [[47, 87, -39, -5, 21, 85]],
-      "clusters": [
-        {
-          "id": "obj_6_blank_1",
-          "name": "blank-1",
-          "threshold_index": 0
-        }
-      ]
     }
   ]
 }

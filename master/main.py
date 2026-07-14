@@ -31,45 +31,32 @@ class Mode:
 # 主车视觉协议 topic 编号分组
 class Topic:
     LOCAL_VISION_VELOCITY = 0x01
-    LOCAL_VISION_CONTROL = 0x04
     MASTER_VISION_TASK_SYNC = 0x10
     MASTER_VISION_EVENT_REPORT = 0x12
 
-
-class LocalVisionControl:
-    RETURN_LINE_GATE_ON = 1
-    RETURN_LINE_GATE_OFF = 2
 
 # 主车状态编号分组
 class State:
     SEARCH_OBJECT = 1
     ORBITING = 2
-    TRANSPORT_OBJECT = 4
-    RETURN_GARAGE_RETREAT = 6
-    RETURN_GARAGE_LINE = 7
 
 
 # 主车目标编号分组
 class Target:
     OBJECT = 1
-    EDGE_LINE = 3
 
 
 # 主车任务配置编号分组
 class Task:
     SEARCH = 1
     TRANSPORT = 2
-    TRANSPORT_FINISH = 3
     ORBIT = 4
-    RETURN_GARAGE_LINE = 5
 
 
 # 主车事件编号分组
 class Event:
     TARGET_FOUND = 6
     ALIGNED = 7
-    ARRIVED = 8
-    RETURN_LINE_ALIGNED = 10
 
 
 # 协议消息体长度, 单位为 byte
@@ -146,19 +133,6 @@ MASTER_ORBIT_TARGET_Y_PX = 210.0
 # 主车运输阶段期望的图像纵向位置, 单位为 px
 MASTER_TRANSPORT_TARGET_Y_PX = 240.0
 
-# 搬运收尾环带外扩边距, 单位为 px
-FINISH_HOOK_RING_EXPAND_PX = 5
-# 搬运收尾黄线识别阈值
-FINISH_HOOK_YELLOW_THRESHOLD = (47, 87, -39, -5, 21, 85)
-# 搬运收尾固定物体区域配置: 宽度比例, 顶部高度比例
-FINISH_HOOK_FIXED_OBJECT_ROI_CONFIG = (0.5, 1.0 / 3.0)
-# 搬运收尾黄色接触占比阈值
-FINISH_HOOK_YELLOW_RATIO_THRESHOLD = 0.05
-# 回库 touch 区域配置: 宽度比例, 顶部高度比例
-RETURN_LINE_TOUCH_ROI_CONFIG = (1.0 / 2.0, 1.0 / 2.0)
-# 搬运收尾脱离接触后的稳定帧数
-FINISH_HOOK_STABLE_FRAMES = 2
-
 # 协议约定的图像宽度, 单位为 px
 PROTOCOL_IMAGE_WIDTH = 320
 # 协议约定的图像高度, 单位为 px
@@ -194,9 +168,7 @@ class RuntimeState:
         self.next_event_seq = int(next_event_seq) % SEQ_RING_SIZE
         self.pending_event = None
         self.pending_event_last_sent_ms = None
-        self.return_line_gate_enabled = False
         self.last_event_context_id = None
-        self.finish_contact_seen = False
         self.rx_buffer = b""
         self.yolo_net = None
         self.uart_device = None
@@ -368,20 +340,6 @@ def parse_event_ack_packet(frame_bytes):
     return {"reliable_seq": int(frame["seq"])}
 
 
-def parse_local_vision_control_packet(frame_bytes):
-    frame = decode_frame(frame_bytes)
-    if frame is None:
-        return None
-    if frame["mode"] != Mode.TCP or frame["topic"] != Topic.LOCAL_VISION_CONTROL:
-        return None
-    body = frame["body"]
-    if len(body) < 1:
-        return None
-    packet = decode_local_vision_control_body(body)
-    packet["reliable_seq"] = int(frame["seq"])
-    return packet
-
-
 def is_newer_seq(seq, last_seq):
     if last_seq is None:
         return True
@@ -410,10 +368,6 @@ def format_ack_frame(reliable_seq):
     return encode_frame(Mode.ACK, Topic.MASTER_VISION_TASK_SYNC, reliable_seq, b"")
 
 
-def format_local_vision_control_ack_frame(reliable_seq):
-    return encode_frame(Mode.ACK, Topic.LOCAL_VISION_CONTROL, reliable_seq, b"")
-
-
 def format_search_velocity_frame(vx, vy):
     return encode_frame(
         Mode.UDP,
@@ -421,14 +375,6 @@ def format_search_velocity_frame(vx, vy):
         0,
         encode_velocity_body(vx, vy, 0.0, False),
     )
-
-
-def encode_local_vision_control_body(action):
-    return bytes([_require_u8(action)])
-
-
-def decode_local_vision_control_body(body):
-    return {"action": int(body[0])}
 
 
 def format_event_frame(reliable_seq, context_id, event, value):
@@ -473,8 +419,6 @@ def _find_control_frame_start(rx_buffer):
         if frame is None:
             continue
         if frame["mode"] == Mode.TCP and frame["topic"] == Topic.MASTER_VISION_TASK_SYNC:
-            return index
-        if frame["mode"] == Mode.TCP and frame["topic"] == Topic.LOCAL_VISION_CONTROL:
             return index
         if frame["mode"] == Mode.ACK and frame["topic"] == Topic.MASTER_VISION_EVENT_REPORT:
             return index
@@ -813,10 +757,7 @@ def build_search_target_point(config_id):
     target_x = float(MASTER_SEARCH_TARGET_X_PX)
     if int(config_id) == int(Task.ORBIT):
         return float(MASTER_ORBIT_TARGET_X_PX), float(MASTER_ORBIT_TARGET_Y_PX)
-    if int(config_id) in (
-        int(Task.TRANSPORT),
-        int(Task.TRANSPORT_FINISH),
-    ):
+    if int(config_id) == int(Task.TRANSPORT):
         return target_x, float(MASTER_TRANSPORT_TARGET_Y_PX)
     return target_x, float(MASTER_SEARCH_TARGET_Y_PX)
 
@@ -828,16 +769,6 @@ def current_task_config_id():
     return int(current_task["arg"])
 
 
-def is_finish_task_context():
-    current_task = state.current_task
-    return (
-        current_task is not None
-        and int(current_task["state"]) == int(State.TRANSPORT_OBJECT)
-        and int(current_task["target"]) == int(Target.EDGE_LINE)
-        and int(current_task["arg"]) == int(Task.TRANSPORT_FINISH)
-    )
-
-
 def is_orbit_task_context():
     current_task = state.current_task
     return (
@@ -845,16 +776,6 @@ def is_orbit_task_context():
         and int(current_task["state"]) == int(State.ORBITING)
         and int(current_task["target"]) == int(Target.OBJECT)
         and int(current_task["arg"]) == int(Task.ORBIT)
-    )
-
-
-def is_return_line_task_context():
-    current_task = state.current_task
-    return (
-        current_task is not None
-        and int(current_task["target"]) == int(Target.EDGE_LINE)
-        and int(current_task["arg"]) == int(Task.RETURN_GARAGE_LINE)
-        and int(current_task["state"]) == int(State.RETURN_GARAGE_RETREAT)
     )
 
 
@@ -880,155 +801,17 @@ def build_observation_and_candidates():
         return build_observation(0, 0, 0, 0), None, None, current_object_candidates
     candidates = current_object_candidates
     target_x, target_y = build_search_target_point(current_task_config_id())
-    if is_finish_task_context():
-        candidates = filter_candidates_in_target_window(
-            candidates,
-            target_y,
-            OBJECT_Y_TOLERANCE_PX,
-        )
-        if not candidates:
-            return build_observation(0, 0, 0, 0), None, None, candidates
-        task_name, center_x, bottom_y, area, best_blob = choose_largest_area_candidate(candidates)
-    else:
-        task_name, center_x, bottom_y, area, best_blob = choose_best_candidate(
-            candidates,
-            target_x,
-            target_y,
-        )
+    task_name, center_x, bottom_y, area, best_blob = choose_best_candidate(
+        candidates,
+        target_x,
+        target_y,
+    )
     return (
         build_observation(1, center_x, bottom_y, area),
         best_blob,
         task_name,
         candidates,
     )
-
-
-def build_finish_task_ring_rois(blob, img):
-    image_width = int(img.width())
-    image_height = int(img.height())
-    left, top, right, bottom = blob_rect_to_bbox(blob.rect())
-    expand = int(FINISH_HOOK_RING_EXPAND_PX)
-    outer_left = max(0, int(left) - expand)
-    outer_top = max(0, int(top) - expand)
-    outer_right = min(int(image_width), int(right) + expand)
-    outer_bottom = min(int(image_height), int(bottom) + expand)
-    rois = []
-    if outer_top < int(top):
-        rois.append((outer_left, outer_top, outer_right - outer_left, int(top) - outer_top))
-    if int(bottom) < outer_bottom:
-        rois.append((outer_left, int(bottom), outer_right - outer_left, outer_bottom - int(bottom)))
-    if outer_left < int(left):
-        rois.append((outer_left, int(top), int(left) - outer_left, int(bottom) - int(top)))
-    if int(right) < outer_right:
-        rois.append((int(right), int(top), outer_right - int(right), int(bottom) - int(top)))
-    ring_area = 0
-    valid_rois = []
-    for roi in rois:
-        _, _, width, height = roi
-        if width <= 0 or height <= 0:
-            continue
-        ring_area += int(width) * int(height)
-        valid_rois.append(roi)
-    return valid_rois, ring_area
-
-
-def build_finish_task_fixed_object_roi(img):
-    image_width = int(img.width())
-    image_height = int(img.height())
-    width_ratio, top_ratio = FINISH_HOOK_FIXED_OBJECT_ROI_CONFIG
-    roi_width = int(float(image_width) * float(width_ratio))
-    roi_height = int(float(image_height) * float(top_ratio))
-    roi_width = max(0, min(int(image_width), int(roi_width)))
-    roi_height = max(0, min(int(image_height), int(roi_height)))
-    left = (int(image_width) - int(roi_width)) // 2
-    return (int(left), 0, int(roi_width), int(roi_height))
-
-
-def build_return_line_touch_roi(img):
-    image_width = int(img.width())
-    image_height = int(img.height())
-    width_ratio, top_ratio = RETURN_LINE_TOUCH_ROI_CONFIG
-    roi_width = int(float(image_width) * float(width_ratio))
-    roi_height = int(float(image_height) * float(top_ratio))
-    roi_width = max(0, min(int(image_width), int(roi_width)))
-    roi_height = max(0, min(int(image_height), int(roi_height)))
-    left = (int(image_width) - int(roi_width)) // 2
-    return (int(left), 0, int(roi_width), int(roi_height))
-
-
-def _pixel_to_lab(pixel):
-    if pixel is None:
-        return None
-    lab = image.rgb_to_lab(pixel)
-    try:
-        if len(lab) < 3:
-            return None
-    except TypeError:
-        return None
-    return (float(lab[0]), float(lab[1]), float(lab[2]))
-
-
-def _pixel_matches_threshold(pixel, threshold):
-    lab = _pixel_to_lab(pixel)
-    if lab is None:
-        return False
-    return (
-        float(threshold[0]) <= float(lab[0]) <= float(threshold[1])
-        and float(threshold[2]) <= float(lab[1]) <= float(threshold[3])
-        and float(threshold[4]) <= float(lab[2]) <= float(threshold[5])
-    )
-
-
-def _count_yellow_pixels_in_roi(img, roi):
-    roi_area = int(roi[2]) * int(roi[3])
-    if roi_area <= 0:
-        return 0
-    blobs = img.find_blobs(
-        [FINISH_HOOK_YELLOW_THRESHOLD],
-        roi=roi,
-        pixels_threshold=1,
-        area_threshold=1,
-        merge=True,
-    )
-    if not blobs:
-        get_pixel = getattr(img, "get_pixel", None)
-        if get_pixel is None:
-            return 0
-        yellow_pixels = 0
-        left, top, width, height = roi
-        for y in range(int(top), int(top) + int(height)):
-            for x in range(int(left), int(left) + int(width)):
-                if _pixel_matches_threshold(get_pixel(int(x), int(y)), FINISH_HOOK_YELLOW_THRESHOLD):
-                    yellow_pixels += 1
-        return yellow_pixels
-    yellow_pixels = 0.0
-    for blob in blobs:
-        yellow_pixels += blob_area(blob)
-    if yellow_pixels >= float(roi_area):
-        return roi_area
-    return int(yellow_pixels)
-
-
-def build_finish_task_yellow_ratio_percent(img, blob):
-    _ = blob
-    roi = build_finish_task_fixed_object_roi(img)
-    rois = (roi,)
-    ring_area = int(roi[2]) * int(roi[3])
-    if ring_area <= 0:
-        return 0.0
-    yellow_pixels = 0
-    for roi in rois:
-        yellow_pixels += _count_yellow_pixels_in_roi(img, roi)
-    return float(yellow_pixels) * 100.0 / float(ring_area)
-
-
-def build_return_line_yellow_ratio_percent(img):
-    roi = build_return_line_touch_roi(img)
-    roi_area = int(roi[2]) * int(roi[3])
-    if roi_area <= 0:
-        return 0.0
-    yellow_pixels = _count_yellow_pixels_in_roi(img, roi)
-    return float(yellow_pixels) * 100.0 / float(roi_area)
 
 
 def draw_object_candidates_debug(img, candidates):
@@ -1072,74 +855,6 @@ def debug_log(tag, text):
     if not MASTER_DEBUG_DISPLAY_ENABLED:
         return
     print("[master_v2][%s] %s" % (str(tag), str(text)))
-
-
-def draw_finish_task_debug(img, blob, yellow_ratio):
-    _ = blob
-    img.draw_rectangle(build_finish_task_fixed_object_roi(img), color=(255, 255, 0), thickness=1)
-    touched = float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0
-    event_type = current_event_type()
-    pending_finish_event = (
-        state.pending_event is not None
-        and event_type is not None
-        and int(state.pending_event.get("event", 0)) == int(event_type)
-    )
-    img.draw_string(
-        2,
-        50,
-        "finish ratio=%.1f" % float(yellow_ratio),
-        color=(255, 255, 255),
-        scale=1,
-        mono_space=False,
-    )
-    img.draw_string(
-        2,
-        62,
-        "touch=%d seen=%d thr=%.1f" % (
-            1 if touched else 0,
-            1 if bool(state.finish_contact_seen) else 0,
-            float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0,
-        ),
-        color=(255, 255, 255),
-        scale=1,
-        mono_space=False,
-    )
-    img.draw_string(
-        2,
-        74,
-        "stable=%d/%d event=%d" % (
-            int(state.stable_frame_count),
-            int(required_stable_frames()),
-            1 if pending_finish_event else 0,
-        ),
-        color=(255, 255, 255),
-        scale=1,
-        mono_space=False,
-    )
-
-
-def draw_return_line_debug(img, yellow_ratio):
-    img.draw_rectangle(build_return_line_touch_roi(img), color=(255, 255, 0), thickness=1)
-    touched = float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0
-    img.draw_string(
-        2,
-        50,
-        "return ratio=%.1f" % float(yellow_ratio),
-        color=(255, 255, 255),
-        scale=1,
-        mono_space=False,
-    )
-    img.draw_string(
-        2,
-        62,
-        "touch=%d thr=%.1f" % (
-            1 if touched else 0,
-            float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0,
-        ),
-        color=(255, 255, 255),
-        scale=1,
-        mono_space=False,
-    )
 
 
 def draw_search_preview_debug(img, candidates):
@@ -1276,8 +991,8 @@ def build_orbit_correction_velocity_from_observation(observation):
 
 
 def build_task_event_value(img, best_blob, task_name=None):
-    if is_finish_task_context():
-        return build_finish_task_yellow_ratio_percent(img, best_blob)
+    _ = img
+    _ = best_blob
     current_task = state.current_task
     if (
         current_task is not None
@@ -1301,24 +1016,14 @@ def current_event_type():
         return Event.TARGET_FOUND
     if task_state == State.SEARCH_OBJECT and target == Target.OBJECT and arg == Task.TRANSPORT:
         return Event.ALIGNED
-    if task_state == State.TRANSPORT_OBJECT and target == Target.EDGE_LINE and arg == Task.TRANSPORT_FINISH:
-        return Event.ARRIVED
-    if task_state == State.RETURN_GARAGE_RETREAT and target == Target.EDGE_LINE and arg == Task.RETURN_GARAGE_LINE:
-        return Event.RETURN_LINE_ALIGNED
     return None
 
 
 def required_stable_frames():
-    if is_finish_task_context():
-        return int(FINISH_HOOK_STABLE_FRAMES)
     return int(OBJECT_STABLE_FRAMES)
 
 
 def resolve_event_value(observation_value, event_value):
-    if is_finish_task_context():
-        return int(float(event_value))
-    if is_return_line_task_context():
-        return int(float(observation_value))
     current_task = state.current_task
     if (
         current_task is not None
@@ -1368,51 +1073,6 @@ def next_event_frame():
     )
 
 
-def _accept_finish_task_observation(context_id, observation_value, yellow_ratio, event_type):
-    if float(observation_value) <= 0.0:
-        state.stable_frame_count = 0
-        return
-    if not state.finish_contact_seen:
-        if float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0:
-            state.finish_contact_seen = True
-            if required_stable_frames() <= 0:
-                create_pending_event(
-                    context_id,
-                    event_type,
-                    resolve_event_value(observation_value, yellow_ratio),
-                )
-        state.stable_frame_count = 0
-        return
-    if float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0:
-        state.stable_frame_count = 0
-        return
-    state.stable_frame_count += 1
-    if state.stable_frame_count >= required_stable_frames():
-        create_pending_event(
-            context_id,
-            event_type,
-            resolve_event_value(observation_value, yellow_ratio),
-        )
-
-
-def _accept_return_line_observation(context_id, img, event_type):
-    if event_type == Event.RETURN_LINE_ALIGNED:
-        if not bool(state.return_line_gate_enabled):
-            state.stable_frame_count = 0
-            return
-        yellow_ratio = build_return_line_yellow_ratio_percent(img)
-        if float(yellow_ratio) > float(FINISH_HOOK_YELLOW_RATIO_THRESHOLD) * 100.0:
-            create_pending_event(
-                context_id,
-                event_type,
-                int(float(yellow_ratio)),
-            )
-            state.stable_frame_count = 0
-            return
-        state.stable_frame_count = 0
-        return
-
-
 def _process_debug_preview_frame(img):
     if OBJECT_DETECTION_USE_YOLO:
         candidates = tuple(yolo_detect(img))
@@ -1439,16 +1099,6 @@ def accept_observation(observation, img, event_value=None):
         state.pending_event is not None
         or state.last_event_context_id == context_id
     ):
-        return
-    if is_return_line_task_context():
-        _accept_return_line_observation(
-            context_id,
-            img,
-            event_type,
-        )
-        return
-    if is_finish_task_context():
-        _accept_finish_task_observation(context_id, observation_value, event_value, event_type)
         return
     if (
         float(observation_value) >= float(OBJECT_MIN_AREA)
@@ -1480,18 +1130,7 @@ def handle_control_frame(frame_bytes):
             }
             state.last_task_context_id = context_id
             state.stable_frame_count = 0
-            state.finish_contact_seen = False
-            state.return_line_gate_enabled = False
         return format_ack_frame(packet["reliable_seq"])
-
-    packet = parse_local_vision_control_packet(frame_bytes)
-    if packet is not None:
-        action = int(packet["action"])
-        if action == int(LocalVisionControl.RETURN_LINE_GATE_ON):
-            state.return_line_gate_enabled = True
-        elif action == int(LocalVisionControl.RETURN_LINE_GATE_OFF):
-            state.return_line_gate_enabled = False
-        return format_local_vision_control_ack_frame(packet["reliable_seq"])
 
     packet = parse_event_ack_packet(frame_bytes)
     pending_event = state.pending_event
@@ -1537,32 +1176,6 @@ def process_uart_input(rx_buffer):
     return rx_buffer
 
 
-def _process_return_line_frame(img):
-    if state.current_task is None:
-        return
-    accept_observation((int(state.current_task["context_id"]), 0.0, 0.0, 1.0), img)
-    if MASTER_DEBUG_DISPLAY_ENABLED:
-        draw_return_line_debug(img, build_return_line_yellow_ratio_percent(img))
-        img.flush()
-
-
-def _process_finish_task_frame(img):
-    current_task = state.current_task
-    if current_task is None:
-        return
-    yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
-    write_data_line(format_search_velocity_frame(0.0, 0.0))
-    _accept_finish_task_observation(
-        int(current_task["context_id"]),
-        1.0,
-        yellow_ratio,
-        current_event_type(),
-    )
-    if MASTER_DEBUG_DISPLAY_ENABLED:
-        draw_finish_task_debug(img, None, yellow_ratio)
-        img.flush()
-
-
 def process_task_frame(img):
     if state.current_task is None and MASTER_DEBUG_DISPLAY_ENABLED:
         _process_debug_preview_frame(img)
@@ -1571,22 +1184,8 @@ def process_task_frame(img):
         event_frame = next_event_frame()
         if event_frame is not None:
             write_reliable_line(event_frame)
-        if not is_return_line_task_context():
-            return
+        return
     if state.current_task is None:
-        if MASTER_DEBUG_DISPLAY_ENABLED:
-            yellow_ratio = build_finish_task_yellow_ratio_percent(img, None)
-            draw_finish_task_debug(img, None, yellow_ratio)
-            img.flush()
-        return
-    if (
-        int(state.current_task["state"]) == int(State.TRANSPORT_OBJECT)
-        and int(state.current_task["target"]) == int(Target.EDGE_LINE)
-    ):
-        _process_finish_task_frame(img)
-        return
-    if is_return_line_task_context():
-        _process_return_line_frame(img)
         return
     observation, best_blob, task_name, _candidates = build_observation_and_candidates()
     if best_blob is not None:
@@ -1608,8 +1207,6 @@ def process_task_frame(img):
             draw_selected_candidate_debug(img, task_name, best_blob)
         target_x, target_y = build_search_target_point(current_task_config_id())
         draw_protocol_target_point_debug(img, target_x, target_y)
-        if is_finish_task_context():
-            draw_finish_task_debug(img, best_blob, event_value)
         img.flush()
 
 
@@ -1668,9 +1265,6 @@ def run():
         if state.pending_event is not None:
             state.current_object_candidates = ()
             debug_log("skip", "reason=pending_event")
-        elif is_return_line_task_context():
-            state.current_object_candidates = ()
-            debug_log("skip", "reason=return_line")
         elif (
             state.current_task is not None
             and int(state.current_task["target"]) == int(Target.OBJECT)

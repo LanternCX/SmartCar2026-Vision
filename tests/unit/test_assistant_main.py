@@ -690,78 +690,6 @@ def test_assistant_main_run_applies_lens_correction_and_uses_yolo_preview_withou
     assert any(entry[2] == "red" for entry in image.strings)
     assert image.crosses
     assert module.state.uart_device is None
-
-
-
-
-
-
-
-
-def test_assistant_main_run_skips_yolo_in_return_line_mode() -> None:
-    """辅车回库黄线模式不应进入物体 YOLO 链路."""
-
-    module = load_assistant_main()
-
-    class StopLoop(Exception):
-        pass
-
-    class SnapshotImage:
-        def __init__(self):
-            self.lens_corr_called = False
-
-        def width(self):
-            return legacy_tests.IMAGE_WIDTH
-
-        def height(self):
-            return legacy_tests.IMAGE_HEIGHT
-
-        def lens_corr(self, strength, zoom):
-            _ = strength, zoom
-            self.lens_corr_called = True
-            return self
-
-    image = SnapshotImage()
-
-    class Sensor:
-        def snapshot(self):
-            return image
-
-    def switch_to_return_line(rx_buffer):
-        module.state.current_sync = {
-            "reliable_seq": 12,
-            "state": module.State.RETURN_FOLLOW,
-            "target": module.Target.NONE,
-            "arg": legacy_tests.pack_task_arg(module.Task.RETURN_GARAGE_LINE, 0),
-        }
-        module.state.mode = module.RunMode.RETURN_LINE
-        return rx_buffer
-
-    module.sensor = Sensor()
-    module.init_uart = lambda: legacy_tests.FakeUART()
-    module.init_sensor = lambda: (legacy_tests.IMAGE_WIDTH, legacy_tests.IMAGE_HEIGHT)
-    module.process_uart_input = switch_to_return_line
-
-    def fake_yolo_detect(img):
-        _ = img
-        raise AssertionError("return line 模式不应调用 yolo_detect")
-
-    def stop_after_frame(current_img):
-        assert current_img is image
-        assert image.lens_corr_called is True
-        assert module.state.mode == module.RunMode.RETURN_LINE
-        assert tuple(module.state.current_object_candidates) == ()
-        raise StopLoop()
-
-    module.yolo_detect = fake_yolo_detect
-    module.process_task_frame = stop_after_frame
-
-    with pytest.raises(StopLoop):
-        module.run()
-
-
-
-
 class DynamicThresholdCalibrationImage:
     def __init__(self, bbox, foreground, background, fragment=None):
         self.left, self.top, self.right, self.bottom = bbox
@@ -810,10 +738,6 @@ class DynamicThresholdRoiImage:
         return []
 
 
-
-
-
-
 def test_assistant_main_disable_yolo_uses_blob_candidates_in_every_object_task() -> None:
     """关闭 YOLO 后, 辅车物体阶段直接使用色块候选."""
 
@@ -849,14 +773,6 @@ def test_assistant_main_disable_yolo_uses_blob_candidates_in_every_object_task()
     assert module.state.current_detection_source == "blob"
 
 
-
-
-
-
-
-
-
-
 def test_assistant_main_build_object_observation_and_candidates_uses_current_object_candidates() -> None:
     module = load_assistant_main()
     module.handle_control_frame(
@@ -886,8 +802,6 @@ def test_assistant_main_build_object_observation_and_candidates_uses_current_obj
     assert candidates == [("red", target_x, 30.0, target_y, 400.0, blob)]
 
 
-
-
 def test_assistant_main_yolo_mode_does_not_call_blob_detector() -> None:
     module = load_assistant_main()
     module.OBJECT_DETECTION_USE_YOLO = True
@@ -914,22 +828,6 @@ def test_assistant_main_yolo_mode_does_not_call_blob_detector() -> None:
 
     assert candidates == ()
     assert module.state.current_detection_source == "yolo"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_assistant_main_new_task_sync_clears_previous_pending_event() -> None:
@@ -996,44 +894,6 @@ def test_assistant_main_blob_mode_uses_full_image_blob_search() -> None:
     module.build_object_candidates(img, ())
 
     assert img.find_blobs_calls == [None]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_assistant_main_process_task_frame_uses_cached_yolo_candidates() -> None:
@@ -1120,8 +980,6 @@ def test_assistant_main_handle_control_frame_reuses_global_state() -> None:
     assert module.state.current_object_config_id() == module.Task.SEARCH
 
 
-
-
 def test_assistant_main_parse_task_sync_packet_matches_master_style_name() -> None:
     """辅车 main 使用主车同名入口解析本地任务同步帧."""
 
@@ -1142,8 +1000,6 @@ def test_assistant_main_parse_task_sync_packet_matches_master_style_name() -> No
         "target": module.Target.OBJECT,
         "arg": legacy_tests.pack_task_arg(module.Task.SEARCH, 2),
     }
-
-
 
 
 def test_assistant_main_build_search_velocity_wrapper_matches_object_path() -> None:
@@ -1394,8 +1250,6 @@ def test_assistant_main_process_task_frame_calls_master_style_velocity_wrapper()
     assert len(call_log) == 1
 
 
-
-
 def test_assistant_main_single_arg_process_uart_input_uses_global_state() -> None:
     """辅车 main 的单参串口轮询入口应直接驱动全局状态机."""
 
@@ -1441,30 +1295,6 @@ def test_assistant_main_single_arg_process_uart_input_calls_master_style_handle_
 
     assert remainder == b""
     assert call_log == [frame]
-
-
-def test_assistant_main_process_uart_input_accepts_local_vision_control_tcp_frame() -> None:
-    module = load_assistant_main()
-    frame = module.encode_frame(
-        module.Mode.TCP,
-        module.Topic.LOCAL_VISION_CONTROL,
-        23,
-        module.encode_local_vision_control_body(module.LocalVisionControl.RETURN_LINE_GATE_ON),
-    )
-    uart = legacy_tests.FakeUART(frame)
-    module.state.uart_device = uart
-
-    remainder = module.process_uart_input(b"")
-
-    assert remainder == b""
-    ack = module.decode_frame(uart.writes[-1])
-    assert ack is not None
-    assert ack["mode"] == module.Mode.ACK
-    assert ack["topic"] == module.Topic.LOCAL_VISION_CONTROL
-    assert ack["seq"] == 23
-    assert module.state.return_line_gate_enabled is True
-
-
 def test_assistant_main_process_uart_input_without_any_matches_master_behavior() -> None:
     """辅车 main 不再为缺失 any 的串口对象静默返回."""
 
@@ -1518,268 +1348,6 @@ def test_assistant_main_event_helpers_reflect_global_state() -> None:
         "event": module.Event.TARGET_FOUND,
         "value": 300,
     }
-
-
-def test_assistant_main_return_line_event_helpers_use_aligned_event() -> None:
-    module = load_assistant_main()
-    module.handle_control_frame(
-        legacy_tests.assistant_sync_frame(
-            12,
-            module.State.RETURN_FOLLOW,
-            module.Target.NONE,
-            legacy_tests.pack_task_arg(module.Task.RETURN_GARAGE_LINE, 0),
-        )
-    )
-
-    assert module.current_event_type() == module.Event.RETURN_LINE_ALIGNED
-    assert module.resolve_event_value(160.0, None) == 160
-
-
-def test_assistant_main_return_line_reports_aligned_event_without_velocity_frame() -> None:
-    module = load_assistant_main()
-    module.state.required_stable_frames = 1
-    module.handle_control_frame(
-        legacy_tests.assistant_sync_frame(
-            12,
-            module.State.RETURN_FOLLOW,
-            module.Target.NONE,
-            legacy_tests.pack_task_arg(module.Task.RETURN_GARAGE_LINE, 0),
-        )
-    )
-    uart = legacy_tests.FakeUART()
-    module.state.uart_device = uart
-
-    class FakeReturnBlob:
-        def __init__(self, x, y, w, h, area):
-            self._rect = (x, y, w, h)
-            self._area = area
-
-        def rect(self):
-            return self._rect
-
-        def area(self):
-            return self._area
-
-    class ReturnLineImage:
-        def __init__(self):
-            self.yellow_area_by_roi = {}
-
-        def width(self):
-            return legacy_tests.IMAGE_WIDTH
-
-        def height(self):
-            return legacy_tests.IMAGE_HEIGHT
-
-        def find_blobs(
-            self,
-            thresholds,
-            pixels_threshold,
-            area_threshold,
-            merge,
-            roi=None,
-            margin=None,
-        ):
-                _ = thresholds, pixels_threshold, area_threshold, merge, margin
-                if roi is None:
-                    return []
-                area = self.yellow_area_by_roi.get(tuple(roi), 0)
-                if area <= 0:
-                    return []
-                return [FakeReturnBlob(roi[0], roi[1], roi[2], roi[3], area)]
-
-        def get_pixel(self, x, y):
-            for roi, area in self.yellow_area_by_roi.items():
-                left, top, width, height = roi
-                roi_area = int(width) * int(height)
-                if (
-                    int(area) >= int(roi_area)
-                    and int(left) <= int(x) < int(left) + int(width)
-                    and int(top) <= int(y) < int(top) + int(height)
-                ):
-                    return (70, -10, 50)
-            return (0, 0, 0)
-
-    img = ReturnLineImage()
-    module.state.current_image = img
-    module.state.current_image_width = img.width()
-    module.state.current_image_height = img.height()
-    fixed_roi = module._build_return_line_touch_roi(img)
-    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
-
-    module.process_task_frame(img)
-    assert uart.writes == []
-
-    module.handle_control_frame(
-        module.encode_frame(
-            module.Mode.TCP,
-            module.Topic.LOCAL_VISION_CONTROL,
-            21,
-            module.encode_local_vision_control_body(module.LocalVisionControl.RETURN_LINE_GATE_ON),
-        )
-    )
-
-    module.process_task_frame(img)
-    assert uart.writes == []
-    module.process_task_frame(img)
-
-    legacy_tests.assert_assistant_event(
-        module,
-        uart.writes[0],
-        12,
-        module.Event.RETURN_LINE_ALIGNED,
-        100,
-    )
-    assert len(uart.writes) == 1
-
-
-def test_assistant_main_return_line_ratio_counts_roi_inner_threshold_hits() -> None:
-    module = load_assistant_main()
-
-    class ReturnLineInnerYellowImage:
-        def __init__(self):
-            self.fixed_roi = None
-            self.yellow_width = 0
-
-        def width(self):
-            return legacy_tests.IMAGE_WIDTH
-
-        def height(self):
-            return legacy_tests.IMAGE_HEIGHT
-
-        def find_blobs(
-            self,
-            thresholds,
-            pixels_threshold,
-            area_threshold,
-            merge,
-            roi=None,
-            margin=None,
-        ):
-            _ = thresholds, pixels_threshold, area_threshold, merge, roi, margin
-            return []
-
-        def get_pixel(self, x, y):
-            if self.fixed_roi is None:
-                return (0, 0, 0)
-            if (
-                int(self.fixed_roi[0]) <= int(x) < int(self.fixed_roi[0]) + int(self.yellow_width)
-                and int(self.fixed_roi[1]) <= int(y) < int(self.fixed_roi[1]) + int(self.fixed_roi[3])
-            ):
-                return (70, -10, 50)
-            return (0, 0, 0)
-
-    img = ReturnLineInnerYellowImage()
-    fixed_roi = module._build_return_line_touch_roi(img)
-    yellow_width = max(1, int(fixed_roi[2]) // 10)
-    img.fixed_roi = fixed_roi
-    img.yellow_width = yellow_width
-    expected_ratio = float(yellow_width) * 100.0 / float(fixed_roi[2])
-
-    assert module._build_return_line_touch_ratio_percent(img) == pytest.approx(expected_ratio)
-
-
-def test_assistant_main_return_line_touch_roi_uses_width_and_top_config() -> None:
-    module = load_assistant_main()
-
-    class ReturnLineImage:
-        def width(self):
-            return legacy_tests.IMAGE_WIDTH
-
-        def height(self):
-            return legacy_tests.IMAGE_HEIGHT
-
-    assert module.RETURN_LINE_TOUCH_ROI_CONFIG == (1.0 / 2.0, 1.0 / 2.0)
-    assert not hasattr(module, "RETURN_LINE_TOUCH_ROI_LEFT_RATIO")
-    assert not hasattr(module, "RETURN_LINE_TOUCH_ROI_RIGHT_RATIO")
-    assert not hasattr(module, "RETURN_LINE_TOUCH_ROI_TOP_RATIO")
-    img = ReturnLineImage()
-    roi_width = int(float(img.width()) * float(module.RETURN_LINE_TOUCH_ROI_CONFIG[0]))
-    roi_height = int(float(img.height()) * float(module.RETURN_LINE_TOUCH_ROI_CONFIG[1]))
-    assert module._build_return_line_touch_roi(img) == (
-        (int(img.width()) - int(roi_width)) // 2,
-        0,
-        roi_width,
-        roi_height,
-    )
-
-
-def test_assistant_main_return_line_gate_off_blocks_event() -> None:
-    module = load_assistant_main()
-    module.state.required_stable_frames = 1
-    module.handle_control_frame(
-        legacy_tests.assistant_sync_frame(
-            12,
-            module.State.RETURN_FOLLOW,
-            module.Target.NONE,
-            legacy_tests.pack_task_arg(module.Task.RETURN_GARAGE_LINE, 0),
-        )
-    )
-    uart = legacy_tests.FakeUART()
-    module.state.uart_device = uart
-
-    class FakeReturnBlob:
-        def __init__(self, x, y, w, h, area):
-            self._rect = (x, y, w, h)
-            self._area = area
-
-        def rect(self):
-            return self._rect
-
-        def area(self):
-            return self._area
-
-    class ReturnLineImage:
-        def __init__(self):
-            self.yellow_area_by_roi = {}
-
-        def width(self):
-            return legacy_tests.IMAGE_WIDTH
-
-        def height(self):
-            return legacy_tests.IMAGE_HEIGHT
-
-        def find_blobs(
-            self,
-            thresholds,
-            pixels_threshold,
-            area_threshold,
-            merge,
-            roi=None,
-            margin=None,
-        ):
-            _ = thresholds, pixels_threshold, area_threshold, merge, margin
-            if roi is None:
-                return []
-            area = self.yellow_area_by_roi.get(tuple(roi), 0)
-            if area <= 0:
-                return []
-            return [FakeReturnBlob(roi[0], roi[1], roi[2], roi[3], area)]
-
-        def get_pixel(self, x, y):
-            for roi, area in self.yellow_area_by_roi.items():
-                left, top, width, height = roi
-                roi_area = int(width) * int(height)
-                if (
-                    int(area) >= int(roi_area)
-                    and int(left) <= int(x) < int(left) + int(width)
-                    and int(top) <= int(y) < int(top) + int(height)
-                ):
-                    return (70, -10, 50)
-            return (0, 0, 0)
-
-    img = ReturnLineImage()
-    fixed_roi = module._build_return_line_touch_roi(img)
-    img.yellow_area_by_roi[tuple(fixed_roi)] = int(fixed_roi[2]) * int(fixed_roi[3])
-    module.state.current_image = img
-    module.state.current_image_width = img.width()
-    module.state.current_image_height = img.height()
-
-    module.process_task_frame(img)
-    module.process_task_frame(img)
-
-    assert uart.writes == []
-
-
 def test_assistant_run_applies_lens_correction_before_processing() -> None:
     """辅车非物体任务先做镜头校正, 且不缓存物体候选."""
 
