@@ -83,6 +83,27 @@ def test_master_main_process_task_and_velocity_helpers_drop_frame_size_parameter
         "right",
         "bottom",
     )
+
+
+def test_master_capture_image_rotates_frame_once() -> None:
+    module = load_master_main()
+
+    class Image:
+        def __init__(self):
+            self.replace_calls = []
+
+        def replace(self, **kwargs):
+            self.replace_calls.append(kwargs)
+            return self
+
+    image = Image()
+    module.sensor.snapshot = lambda: image
+
+    assert module.capture_image() is image
+    assert image.replace_calls == [
+        {"vflip": True, "hmirror": True, "transpose": False}
+    ]
+    assert module.normalize_bbox_for_protocol(10, 20, 30, 40) == (10, 20, 30, 40)
     assert tuple(inspect.signature(module.build_search_velocity_from_observation).parameters) == (
         "observation",
     )
@@ -308,7 +329,7 @@ def test_master_main_disable_yolo_uses_blob_candidates_in_every_object_task() ->
 
     candidates = module.build_object_candidates(img, ())
 
-    assert tuple(candidate[:4] for candidate in candidates) == (("red", 160.0, 230, 400.0),)
+    assert tuple(candidate[:4] for candidate in candidates) == (("brown", 160.0, 30, 400.0),)
     assert module.state.current_detection_source == "blob"
 
 
@@ -356,6 +377,25 @@ def test_master_main_object_task_config_keeps_only_filter_parameters() -> None:
         )
 
         assert module._object_task_config(task_name) == expected
+
+
+def test_master_main_enables_all_yolo_object_classes() -> None:
+    module = load_master_main()
+
+    assert tuple(task[0] for task in module.OBJECT_TASKS) == (
+        "brown",
+        "red",
+        "green",
+        "blue",
+        "white",
+    )
+    assert tuple(module.object_task_id(name) for name in module.YOLO_LABELS) == (
+        3,
+        2,
+        4,
+        1,
+        5,
+    )
 
 
 def test_master_main_object_task_config_accepts_legacy_threshold_layout() -> None:
@@ -414,6 +454,9 @@ class FakeImage:
 
     def copy(self, scale, flag):
         self.copy_calls.append((scale, flag))
+        return self
+
+    def replace(self, **_kwargs):
         return self
 
     def lens_corr(self, strength, zoom):
@@ -555,11 +598,11 @@ def event_ack_frame(module, seq):
 
 
 def search_aligned_detection():
-    return (150.0 / 320.0, 30.0 / 240.0, 170.0 / 320.0, 50.0 / 240.0, 1, 0.95)
+    return (150.0 / 320.0, 190.0 / 240.0, 170.0 / 320.0, 210.0 / 240.0, 1, 0.95)
 
 
 def transport_aligned_detection():
-    return (150.0 / 320.0, 0.0, 170.0 / 320.0, 20.0 / 240.0, 1, 0.95)
+    return (150.0 / 320.0, 220.0 / 240.0, 170.0 / 320.0, 1.0, 1, 0.95)
 
 
 def pixel_detection(left, top, right, bottom, label=1, score=0.95):
@@ -841,7 +884,7 @@ def test_master_main_search_uses_yolo_candidates_for_velocity_and_target_found()
     assert latest_event(type("U", (), {"writes": [uart.writes[1]]})()) == {
         "context_id": 7,
         "event": module.Event.TARGET_FOUND,
-        "value": 1,
+        "value": 2,
     }
 
 
@@ -927,14 +970,14 @@ def test_master_main_blob_debug_preview_reports_detected_object() -> None:
     module = load_master_main()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
     module.OBJECT_DETECTION_USE_YOLO = False
-    red_threshold = module.OBJECT_TASKS[0][1][0]
-    img = FixedThresholdPreviewImage(red_threshold)
+    brown_threshold = module.OBJECT_TASKS[0][1][0]
+    img = FixedThresholdPreviewImage(brown_threshold)
     set_current_image(module, img)
 
     module._process_debug_preview_frame(img)
 
-    assert any(call == (tuple(red_threshold), None) for call in img.find_blobs_calls)
-    assert any(entry[2] == "red" for entry in img.strings)
+    assert any(call == (tuple(brown_threshold), None) for call in img.find_blobs_calls)
+    assert any(entry[2] == "brown" for entry in img.strings)
     assert not any("touch=" in entry[2] for entry in img.strings)
     assert img.flush_count == 1
 
@@ -1140,12 +1183,12 @@ def test_master_main_candidate_selection_uses_configured_target_point() -> None:
     module.state.yolo_net = "fake-net"
     target_x, target_y = module.build_search_target_point(module.Task.SEARCH)
     module.tf.detect = lambda net, img: [
-        pixel_detection(target_x - 40, IMAGE_HEIGHT - target_y, target_x + 40, IMAGE_HEIGHT - target_y + 20),
+        pixel_detection(target_x - 40, target_y - 20.0, target_x + 40, target_y),
         pixel_detection(
             target_x - 40,
-            IMAGE_HEIGHT - (target_y + 20.0),
+            target_y,
             target_x + 40,
-            IMAGE_HEIGHT - (target_y + 20.0) + 20,
+            target_y + 20.0,
         ),
     ]
     module.handle_control_frame(task_sync_frame(module))
@@ -1205,8 +1248,8 @@ def test_master_main_blob_debug_preview_replaces_previous_candidates() -> None:
     module = load_master_main()
     module.MASTER_DEBUG_DISPLAY_ENABLED = True
     module.OBJECT_DETECTION_USE_YOLO = False
-    red_threshold = module.OBJECT_TASKS[0][1][0]
-    image = FixedThresholdPreviewImage(red_threshold)
+    brown_threshold = module.OBJECT_TASKS[0][1][0]
+    image = FixedThresholdPreviewImage(brown_threshold)
     set_current_image(module, image)
     yolo_blob = module.YoloDetectionBlob(150.0, 30.0, 170.0, 50.0, 1, 0.95)
     module.state.current_detection_source = "yolo"
@@ -1214,7 +1257,12 @@ def test_master_main_blob_debug_preview_replaces_previous_candidates() -> None:
 
     module._process_debug_preview_frame(image)
 
-    assert tuple(module.state.current_object_candidates[:1])[0][:4] == ("red", 135.0, 210.0, 900.0)
-    assert any(call == (tuple(red_threshold), None) for call in image.find_blobs_calls)
-    assert any(entry[2] == "red" for entry in image.strings)
+    assert tuple(module.state.current_object_candidates[:1])[0][:4] == (
+        "brown",
+        135.0,
+        50,
+        900.0,
+    )
+    assert any(call == (tuple(brown_threshold), None) for call in image.find_blobs_calls)
+    assert any(entry[2] == "brown" for entry in image.strings)
     assert image.flush_count == 1

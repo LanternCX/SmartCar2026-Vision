@@ -4,16 +4,129 @@
   "objects": [
     {
       "id": "obj_1",
-      "name": "red",
-      "require_all_clusters": true,
+      "name": "brown",
+      "require_all_clusters": false,
       "recognition_merge_gap": 3,
-      "min_recognition_block_area": 30,
-      "min_recognition_target_area": 70,
-      "max_recognition_side_length": 220,
-      "thresholds": [[14, 57, 24, 84, -4, 48]],
+      "min_recognition_block_area": 10,
+      "min_recognition_target_area": 50,
+      "max_recognition_side_length": 80,
+      "thresholds": [
+        [
+          15,
+          37,
+          -11,
+          20,
+          8,
+          31
+        ]
+      ],
       "clusters": [
         {
           "id": "obj_1_blank_1",
+          "name": "blank-1",
+          "threshold_index": 0
+        }
+      ]
+    },
+    {
+      "id": "obj_2",
+      "name": "red",
+      "require_all_clusters": true,
+      "recognition_merge_gap": 3,
+      "min_recognition_block_area": 10,
+      "min_recognition_target_area": 15,
+      "max_recognition_side_length": 60,
+      "thresholds": [
+        [
+          16,
+          39,
+          21,
+          60,
+          0,
+          49
+        ]
+      ],
+      "clusters": [
+        {
+          "id": "obj_2_blank_1",
+          "name": "blank-1",
+          "threshold_index": 0
+        }
+      ]
+    },
+    {
+      "id": "obj_3",
+      "name": "green",
+      "require_all_clusters": true,
+      "recognition_merge_gap": 3,
+      "min_recognition_block_area": 10,
+      "min_recognition_target_area": 15,
+      "max_recognition_side_length": 60,
+      "thresholds": [
+        [
+          29,
+          89,
+          -54,
+          -29,
+          2,
+          84
+        ]
+      ],
+      "clusters": [
+        {
+          "id": "obj_3_blank_1",
+          "name": "blank-1",
+          "threshold_index": 0
+        }
+      ]
+    },
+    {
+      "id": "obj_4",
+      "name": "blue",
+      "require_all_clusters": true,
+      "recognition_merge_gap": 3,
+      "min_recognition_block_area": 10,
+      "min_recognition_target_area": 20,
+      "max_recognition_side_length": 60,
+      "thresholds": [
+        [
+          32,
+          57,
+          -11,
+          12,
+          -50,
+          -23
+        ]
+      ],
+      "clusters": [
+        {
+          "id": "obj_4_blank_1",
+          "name": "blank-1",
+          "threshold_index": 0
+        }
+      ]
+    },
+    {
+      "id": "obj_5",
+      "name": "white",
+      "require_all_clusters": true,
+      "recognition_merge_gap": 3,
+      "min_recognition_block_area": 10,
+      "min_recognition_target_area": 30,
+      "max_recognition_side_length": 80,
+      "thresholds": [
+        [
+          58,
+          70,
+          -11,
+          9,
+          -11,
+          9
+        ]
+      ],
+      "clusters": [
+        {
+          "id": "obj_5_blank_1",
           "name": "blank-1",
           "threshold_index": 0
         }

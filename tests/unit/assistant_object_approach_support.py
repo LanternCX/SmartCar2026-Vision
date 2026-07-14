@@ -50,7 +50,7 @@ class FakeYoloTf:
 
     def detect(self, net, img):
         self.detect_calls.append((net, img))
-        return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
+        return [(0.25, 0.7916666667, 0.75, 0.875, 1, 0.95)]
 
 
 def load_assistant():
@@ -1545,6 +1545,9 @@ def test_assistant_run_applies_lens_correction_before_processing() -> None:
     class SnapshotImage:
         def __init__(self):
             self.lens_corr_called = False
+
+        def replace(self, **_kwargs):
+            return self
 
         def lens_corr(self, strength, zoom):
             _ = strength

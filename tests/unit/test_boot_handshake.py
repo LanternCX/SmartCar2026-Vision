@@ -134,6 +134,9 @@ def test_visual_boot_skips_yolo_inference_during_warm_up(role, monkeypatch) -> N
     events = []
 
     class Image:
+        def replace(self, **_kwargs):
+            return self
+
         def lens_corr(self, **_kwargs):
             events.append("lens_corr")
 

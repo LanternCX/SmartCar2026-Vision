@@ -64,6 +64,9 @@ def test_assistant_main_yolo_mode_runs_every_object_stage_without_pause(
         pass
 
     class SnapshotImage:
+        def replace(self, **_kwargs):
+            return self
+
         def width(self):
             return legacy_tests.IMAGE_WIDTH
 
@@ -138,6 +141,9 @@ def test_assistant_main_blob_mode_runs_every_object_stage(
     class SnapshotImage:
         def __init__(self):
             self.object_blob_calls = 0
+
+        def replace(self, **_kwargs):
+            return self
 
         def width(self):
             return legacy_tests.IMAGE_WIDTH
@@ -333,7 +339,7 @@ def test_assistant_main_object_candidates_use_yolo_when_enabled() -> None:
 
         def detect(self, net, img):
             self.detect_calls.append((net, img))
-            return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
+            return [(0.25, 0.7916666667, 0.75, 0.875, 1, 0.95)]
 
     class FakeImage:
         def __init__(self):
@@ -432,6 +438,27 @@ def test_assistant_main_exposes_master_style_runtime_api() -> None:
         "right",
         "bottom",
     )
+
+
+def test_assistant_capture_image_rotates_frame_once() -> None:
+    module = load_assistant_main()
+
+    class Image:
+        def __init__(self):
+            self.replace_calls = []
+
+        def replace(self, **kwargs):
+            self.replace_calls.append(kwargs)
+            return self
+
+    image = Image()
+    module.sensor.snapshot = lambda: image
+
+    assert module.capture_image() is image
+    assert image.replace_calls == [
+        {"vflip": True, "hmirror": True, "transpose": False}
+    ]
+    assert module.normalize_bbox_for_protocol(10, 20, 30, 40) == (10.0, 20.0, 30.0, 40.0)
     assert tuple(inspect.signature(module.build_search_velocity_from_observation).parameters) == (
         "observation",
     )
@@ -494,6 +521,25 @@ def test_assistant_main_object_task_config_keeps_only_filter_parameters() -> Non
         assert module._object_task_config(task_name) == expected
 
 
+def test_assistant_main_enables_all_yolo_object_classes() -> None:
+    module = load_assistant_main()
+
+    assert tuple(task[0] for task in module.OBJECT_TASKS) == (
+        "brown",
+        "red",
+        "green",
+        "blue",
+        "white",
+    )
+    assert tuple(module.object_task_name_from_id(index) for index in range(1, 6)) == (
+        "brown",
+        "red",
+        "green",
+        "blue",
+        "white",
+    )
+
+
 def test_assistant_main_object_task_config_accepts_legacy_threshold_layout() -> None:
     module = load_assistant_main()
     module.OBJECT_TASKS = (("red", ((16, 51, 21, 84, -11, 52),), 3, 30, 70, 90, True),)
@@ -530,7 +576,7 @@ def test_assistant_main_exposes_master_style_yolo_detect_api() -> None:
 
         def detect(self, net, img):
             self.detect_calls.append((net, img))
-            return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
+            return [(0.25, 0.7916666667, 0.75, 0.875, 1, 0.95)]
 
     class FakeImage:
         def __init__(self):
@@ -574,6 +620,9 @@ def test_assistant_main_run_applies_lens_correction_and_uses_yolo_detect_before_
     class SnapshotImage:
         def __init__(self):
             self.lens_corr_called = False
+
+        def replace(self, **_kwargs):
+            return self
 
         def width(self):
             return legacy_tests.IMAGE_WIDTH
@@ -628,6 +677,9 @@ def test_assistant_main_run_applies_lens_correction_and_uses_yolo_preview_withou
             self.rectangles = []
             self.strings = []
             self.crosses = []
+
+        def replace(self, **_kwargs):
+            return self
 
         def width(self):
             return legacy_tests.IMAGE_WIDTH
@@ -770,7 +822,9 @@ def test_assistant_main_disable_yolo_uses_blob_candidates_in_every_object_task()
 
     candidates = module.build_object_candidates(img, ())
 
-    assert tuple(candidate[:5] for candidate in candidates) == (("red", 160.0, 30.0, 220.0, 400.0),)
+    assert tuple(candidate[:5] for candidate in candidates) == (
+        ("brown", 160.0, 30.0, 40.0, 400.0),
+    )
     assert module.state.current_detection_source == "blob"
 
 
@@ -778,10 +832,10 @@ def test_assistant_main_build_object_observation_and_candidates_uses_current_obj
     module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
-            12,
-            module.State.APPROACH_OBJECT,
-            module.Target.OBJECT,
-            legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
+                12,
+                module.State.APPROACH_OBJECT,
+                module.Target.OBJECT,
+                legacy_tests.pack_task_arg(module.Task.SEARCH, module.object_task_id("red")),
         )
     )
     target_x, target_y = assistant_target_point(module)
@@ -904,10 +958,10 @@ def test_assistant_main_process_task_frame_uses_cached_yolo_candidates() -> None
     state = module.AssistantVisionState(stable_frames=99)
     state.handle_control_line(
         legacy_tests.assistant_sync_frame(
-            12,
-            module.State.APPROACH_OBJECT,
-            module.Target.OBJECT,
-            legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
+                12,
+                module.State.APPROACH_OBJECT,
+                module.Target.OBJECT,
+                legacy_tests.pack_task_arg(module.Task.SEARCH, module.object_task_id("red")),
         )
     )
     target_x, target_y = assistant_target_point(module)
@@ -1039,10 +1093,10 @@ def test_assistant_main_orbit_outputs_independent_xy_velocity_correction() -> No
     module.OBJECT_ORBIT_MAX_VY = 9.0
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
-            12,
-            module.State.ORBIT,
-            module.Target.OBJECT,
-            legacy_tests.pack_task_arg(module.Task.ORBIT, 1),
+                12,
+                module.State.ORBIT,
+                module.Target.OBJECT,
+                legacy_tests.pack_task_arg(module.Task.ORBIT, module.object_task_id("red")),
         )
     )
     target_x, target_y = assistant_target_point(module, module.Task.ORBIT)
@@ -1127,10 +1181,10 @@ def test_assistant_main_process_task_frame_uses_global_object_pipeline() -> None
     module = load_assistant_main()
     module.handle_control_frame(
         legacy_tests.assistant_sync_frame(
-            12,
-            module.State.APPROACH_OBJECT,
-            module.Target.OBJECT,
-            legacy_tests.pack_task_arg(module.Task.SEARCH, 1),
+                12,
+                module.State.APPROACH_OBJECT,
+                module.Target.OBJECT,
+                legacy_tests.pack_task_arg(module.Task.SEARCH, module.object_task_id("red")),
         )
     )
     target_x, target_y = assistant_target_point(module)
@@ -1360,6 +1414,9 @@ def test_assistant_run_applies_lens_correction_before_processing() -> None:
     class SnapshotImage:
         def __init__(self):
             self.lens_corr_called = False
+
+        def replace(self, **_kwargs):
+            return self
 
         def width(self):
             return legacy_tests.IMAGE_WIDTH

@@ -87,7 +87,7 @@ YOLO_IMAGE_COPY_SCALE = 0.75
 # YOLO 检测最小置信度阈值
 YOLO_MIN_SCORE = 0.50
 # YOLO 输出标签顺序, 需与模型保持一致
-YOLO_LABELS = ("tennis", "red", "blue", "brown", "white")
+YOLO_LABELS = ("green", "red", "blue", "brown", "white")
 # 视觉控制的参考帧率, 用于按时间尺度理解速度响应
 VISION_REFERENCE_FPS = 25
 
@@ -157,7 +157,11 @@ SEQ_HALF_RING = 128
 
 # 目标相关任务的筛选参数配置
 OBJECT_TASKS = (
-    ('red', ((14, 57, 24, 84, -4, 48),), 3, 30, 70, 220, True),
+    ('brown', ((15, 37, -11, 20, 8, 31),), 3, 10, 50, 80, False),
+    ('red', ((16, 39, 21, 60, 0, 49),), 3, 10, 15, 60, True),
+    ('green', ((29, 89, -54, -29, 2, 84),), 3, 10, 15, 60, True),
+    ('blue', ((32, 57, -11, 12, -50, -23),), 3, 10, 20, 60, True),
+    ('white', ((58, 70, -11, 9, -11, 9),), 3, 10, 30, 80, True),
 )
 
 # 有符号 16 位整数下界
@@ -506,10 +510,7 @@ def blob_rect_to_bbox(rect):
 
 
 def normalize_bbox_for_protocol(left, top, right, bottom):
-    image_height = state.current_image_height
-    normalized_top = image_height - bottom
-    normalized_bottom = image_height - top
-    return left, normalized_top, right, normalized_bottom
+    return left, top, right, bottom
 
 
 def blob_area(blob):
@@ -578,7 +579,7 @@ def object_task_id(task_name):
 def current_blob_task_name():
     if state.object_task_name is not None:
         return state.object_task_name
-    if OBJECT_TASKS:
+    if not OBJECT_DETECTION_USE_YOLO and OBJECT_TASKS:
         return OBJECT_TASKS[0][0]
     return None
 
@@ -896,11 +897,7 @@ def draw_selected_candidate_debug(img, task_name, blob):
 
 
 def draw_protocol_target_point_debug(img, target_x, target_y):
-    image_width = int(img.width())
-    image_height = int(img.height())
-    draw_x = image_width - 1 - int(target_x)
-    draw_y = image_height - 1 - int(target_y)
-    img.draw_cross(draw_x, draw_y, color=(255, 255, 0))
+    img.draw_cross(int(target_x), int(target_y), color=(255, 255, 0))
 
 
 def debug_log(tag, text):
@@ -1288,8 +1285,6 @@ def init_sensor():
     sensor.reset()
     sensor.set_pixformat(sensor.RGB565)
     sensor.set_framesize(sensor.QVGA)
-    sensor.set_vflip(True)
-    sensor.set_hmirror(True)
     sensor.skip_frames(0, time=2000)
     sensor.set_auto_gain(False)  # pyright: ignore[reportCallIssue]
     sensor.set_auto_whitebal(False)
@@ -1297,10 +1292,14 @@ def init_sensor():
     return sensor.width(), sensor.height()
 
 
+def capture_image():
+    return sensor.snapshot().replace(vflip=True, hmirror=True, transpose=False)
+
+
 def warm_up_detection():
     """使用正式照明完成首帧准备和色块检测预热."""
 
-    img = sensor.snapshot()
+    img = capture_image()
     img.lens_corr(strength=2.8, zoom=1.0)
     if not OBJECT_DETECTION_USE_YOLO:
         tuple(build_object_candidates(img, ()))
@@ -1407,7 +1406,7 @@ def run():
         while True:
             if not MASTER_DEBUG_DISPLAY_ENABLED:
                 state.rx_buffer = process_uart_input(state.rx_buffer)
-            img = sensor.snapshot()
+            img = capture_image()
             now_ms = default_now_ms()
             if now_ms >= last_frame_ms:
                 state.current_frame_interval_ms = now_ms - last_frame_ms
