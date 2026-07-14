@@ -15,7 +15,7 @@ from tests.test_support import (
 
 
 def load_master_main():
-    module = load_role_entry_module("master", "main.py", "vision_master_contract_module")
+    module = load_role_entry_module("master", "run.py", "vision_master_contract_module")
     module.reset_runtime_state()
     return module
 
@@ -23,7 +23,7 @@ def load_master_main():
 def load_assistant_main():
     module = load_role_entry_module(
         "assistant",
-        "main.py",
+        "run.py",
         "vision_assistant_contract_module",
     )
     module.reset_runtime_state()

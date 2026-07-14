@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ASSISTANT_MAIN_PATH = ROOT / "assistant" / "main.py"
+ASSISTANT_MAIN_PATH = ROOT / "assistant" / "run.py"
 
 FRAME_BODY_SIZE = 10
 FRAME_HEAD = 0xA5
@@ -27,28 +27,28 @@ TOPIC_ASSISTANT_VISION_EVENT_REPORT = 0x13
 _SCALE = 1000.0
 
 
-def role_entry_path(role: str, entry_name: str = "main.py") -> Path:
+def role_entry_path(role: str, entry_name: str = "run.py") -> Path:
     """返回指定角色的视觉入口路径."""
 
     return ROOT / role / entry_name
 
 
 def role_main_path(role: str) -> Path:
-    """返回指定角色的默认视觉入口路径."""
+    """返回指定角色的正式视觉运行脚本路径."""
 
-    return role_entry_path(role, "main.py")
+    return role_entry_path(role, "run.py")
 
 
 def load_main_module(module_name: str):
-    """按真实模块导入方式加载辅车 main.py, 但不触发运行入口."""
+    """按真实模块导入方式加载辅车 run.py, 但不触发运行入口."""
 
     return load_role_main_module("assistant", module_name)
 
 
 def load_role_main_module(role: str, module_name: str):
-    """按真实模块导入方式加载指定角色 main.py, 但不触发运行入口."""
+    """按真实模块导入方式加载指定角色 run.py, 但不触发运行入口."""
 
-    return load_role_entry_module(role, "main.py", module_name)
+    return load_role_entry_module(role, "run.py", module_name)
 
 
 def load_role_entry_module(role: str, entry_name: str, module_name: str):
@@ -88,7 +88,7 @@ def _install_board_runtime_stubs() -> None:
 
     if "tf" not in sys.modules:
         tf_module = types.ModuleType("tf")
-        tf_module.load = lambda path: path
+        tf_module.load = lambda path, load_to_fb=False: path
         tf_module.detect = lambda _net, _img: ()
         sys.modules["tf"] = tf_module
 
@@ -117,6 +117,25 @@ def _install_board_runtime_stubs() -> None:
 
         machine_module.UART = FakeUART
         sys.modules["machine"] = machine_module
+
+    if "pyb" not in sys.modules:
+        pyb_module = types.ModuleType("pyb")
+
+        class FakeLED:
+            def __init__(self, led_id):
+                self.led_id = int(led_id)
+
+            def on(self):
+                return None
+
+            def off(self):
+                return None
+
+            def toggle(self):
+                return None
+
+        pyb_module.LED = FakeLED
+        sys.modules["pyb"] = pyb_module
 
 
 def encode_frame(mode: int, topic: int, seq: int, body: bytes) -> bytes:

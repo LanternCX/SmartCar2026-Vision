@@ -25,7 +25,7 @@
 
 ## 入口接口风格
 
-- `master/main.py` 与 `assistant/main.py` 的接口风格保持一致。
+- `master/run.py` 与 `assistant/run.py` 的接口风格保持一致; 各角色 `main.py` 只负责导入 `run` 模块并启动正式运行函数。
 - 当前轮次真正处理的对象应显式传入接口, 例如 `img`。
 - 由当前处理对象可直接得到的派生信息, 例如图像宽高, 不作为参数层层下传。
 - 当前运行态只维护一份的共享状态, 统一放在入口级 `state` 对象中读取。
@@ -42,7 +42,7 @@
 
 ### OpenART Vision master
 
-`master/main.py` 运行在主车 OpenART 上, 负责物体搜索视觉链路:
+`master/run.py` 运行在主车 OpenART 上, 负责物体搜索视觉链路:
 
 - 接收 RT1021 下发的主车视觉同步帧, body 字段为 `context_id/state/target/arg`。
 - 使用主车视觉同步 topic 的 ACK 帧确认可靠同步包。
@@ -62,7 +62,7 @@
 
 ### OpenART Vision assistant
 
-`assistant/main.py` 运行在辅车 OpenART 上, 负责辅车跟随主车色标和辅车找目标物体:
+`assistant/run.py` 运行在辅车 OpenART 上, 负责辅车跟随主车色标和辅车找目标物体:
 
 - 跟随模式识别主车色标。
 - 找物体模式可通过代码开关选择色块阈值或 YOLO 模型识别目标物体。
@@ -93,13 +93,22 @@
 
 ## 主车视觉发送规则
 
-- `master/main.py` 的 `v` 数据流包直接写出, 不执行发送前后延时。
-- `master/main.py` 的 `v` 数据流包不等待 task 上下文建立。
-- `master/main.py` 的可靠帧在当前入口层直接写出, 不额外插入发送保护延时。
+- `master/run.py` 的 `v` 数据流包直接写出, 不执行发送前后延时。
+- `master/run.py` 的 `v` 数据流包不等待 task 上下文建立。
+- `master/run.py` 的可靠帧在当前入口层直接写出, 不额外插入发送保护延时。
 - 未确认的 `r` 事件按低频节奏重复发送, 不随每帧图像重复写出。
 - 主通信串口: `UART(12)`。
 - RT1021 接收串口: `UART6`。
 - 默认波特率: `115200`。
+
+## 上电状态指示
+
+- 白灯在相机初始化前开启, 视觉正常运行期间保持照明。
+- RGB 绿灯常亮表示初始化和首帧准备; YOLO 模型在相机初始化前加载且不执行上电推理, 色块模式在相机初始化后执行检测预热。每次成功写出启动 READY 后翻转一次。
+- 本地启动握手完成后蓝灯慢闪, 表示正在等待首个正式任务; 正式逐帧运行时每帧翻转一次。
+- 启动或运行发生致命错误时红灯常亮, 白灯关闭。
+- 致命错误的完整异常栈覆盖写入 `/sd/vision_error.log`, 保留最近一次错误。
+- 调试模式完成首帧准备后直接进入逐帧蓝灯指示, 不执行启动握手。
 
 ## 调试模式
 
@@ -109,7 +118,7 @@
 
 ## 角色部署
 
-每个角色目录各自维护独立构建脚本。脚本会读取角色目录外部 `calibration/` 下的共享标定文件，更新本角色源码入口，并上传到板端目录。
+每个角色目录各自维护独立构建脚本。脚本会读取角色目录外部 `calibration/` 下的共享标定文件，更新本角色 `run.py`, 并把 `main.py` 与 `run.py` 上传到板端目录。
 
 ```bash
 ./assistant/build.sh
@@ -132,8 +141,8 @@ TARGET_DIR=/path/to/device ./master/build.sh
 
 ## 物体识别开关
 
-- `master/main.py` 中的 `OBJECT_DETECTION_USE_YOLO`
-- `assistant/main.py` 中的 `OBJECT_DETECTION_USE_YOLO`
+- `master/run.py` 中的 `OBJECT_DETECTION_USE_YOLO`
+- `assistant/run.py` 中的 `OBJECT_DETECTION_USE_YOLO`
 
 设为 `False` 时使用当前色块阈值识别，设为 `True` 时使用 `yolo.tflite` 模型识别。
 
@@ -145,8 +154,8 @@ TARGET_DIR=/path/to/device ./master/build.sh
 
 ```bash
 uv run python calibration/chromaforge_export_adapter.py \
-  --source master/main.py \
-  --output /tmp/master-main.py \
+  --source master/run.py \
+  --output /tmp/master-run.py \
   --task-constant-name OBJECT_TASKS
 ```
 

@@ -41,11 +41,11 @@ class FakeYoloTf:
     """记录 YOLO 加载与检测调用的测试桩."""
 
     def __init__(self):
-        self.loaded_paths = []
+        self.load_calls = []
         self.detect_calls = []
 
-    def load(self, path):
-        self.loaded_paths.append(path)
+    def load(self, path, load_to_fb=False):
+        self.load_calls.append((path, load_to_fb))
         return "fake-yolo-net"
 
     def detect(self, net, img):
@@ -1440,7 +1440,7 @@ def test_assistant_object_candidates_use_yolo_when_flag_enabled() -> None:
 
     candidates = module.build_object_blob_candidates(img)
 
-    assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
+    assert module.tf.load_calls == [(module.YOLO_MODEL_PATH, True)]
     assert module.tf.detect_calls == [("fake-yolo-net", "detect-image")]
     assert img.copy_calls == [(module.YOLO_IMAGE_COPY_SCALE, 1)]
     assert candidates[0][0] == "red"

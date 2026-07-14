@@ -23,11 +23,12 @@ MASTER_LOG_PREFIX = "[master_" + "v" + "2]"
 
 
 def load_master_main():
-    module = load_role_entry_module("master", "main.py", "vision_master_test_module")
+    module = load_role_entry_module("master", "run.py", "vision_master_test_module")
     module.reset_runtime_state()
     module.MASTER_DEBUG_DISPLAY_ENABLED = False
     module.OBJECT_STABLE_FRAMES = 1
     module.state.yolo_net = "fake-net"
+    module.prepare_runtime = module.init_status_lights
     return module
 
 
@@ -50,7 +51,7 @@ def start_run_as_local_vision_paused(module):
 def test_master_main_default_configuration_reports_target_found_after_configured_observations() -> None:
     module = load_role_entry_module(
         "master",
-        "main.py",
+        "run.py",
         "vision_master_default_stable_frames_test_module",
     )
     module.reset_runtime_state()
@@ -138,7 +139,7 @@ def test_master_main_yolo_mode_runs_every_object_stage_without_pause(
     module.sensor = Sensor()
     module.init_uart = lambda: FakeUART()
     module.init_sensor = lambda: (IMAGE_WIDTH, IMAGE_HEIGHT)
-    module.tf.load = lambda _path: "fake-net"
+    module.tf.load = lambda _path, load_to_fb=False: "fake-net"
 
     def prime_object_task(rx_buffer):
         module.state.current_task = {
@@ -901,7 +902,7 @@ def test_master_main_debug_mode_bypasses_communication_and_previews_yolo() -> No
     module.write_reliable_line = lambda _frame: (_ for _ in ()).throw(
         AssertionError("调试模式不应发送可靠消息")
     )
-    module.tf.load = lambda _path: "fake-net"
+    module.tf.load = lambda _path, load_to_fb=False: "fake-net"
     module.yolo_detect = lambda current_img: (
         (("red", 160.0, 220.0, 400.0, blob),) if current_img is img else ()
     )

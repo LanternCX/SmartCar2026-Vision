@@ -17,7 +17,7 @@ from calibration.chromaforge_export_adapter import (
 def _run_role_build_script_preserving_sources(script_path, target_dir, preserved_sources=None):
     root_dir = DEFAULT_RULES_PATH.parent.parent
     if preserved_sources is None:
-        preserved_sources = ("master/main.py", "assistant/main.py")
+        preserved_sources = ("master/run.py", "assistant/run.py")
     originals = {}
     for relative_path in preserved_sources:
         source_path = root_dir / relative_path
@@ -235,7 +235,7 @@ def test_role_build_script_generates_master_output_from_shared_rules(tmp_path) -
 
     _run_role_build_script_preserving_sources("master/build.sh", target_dir)
 
-    uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+    uploaded = (target_dir / "run.py").read_text(encoding="utf-8")
     assert "OBJECT_TASKS = (" in uploaded
     assert "('red'" in uploaded
     assert "threshold_index" not in uploaded
@@ -245,7 +245,7 @@ def test_role_build_script_rewrites_master_source_from_shared_rules(tmp_path) ->
     target_dir = tmp_path / "master-copy-only-device"
     target_dir.mkdir()
     root_dir = DEFAULT_RULES_PATH.parent.parent
-    source_path = root_dir / "master" / "main.py"
+    source_path = root_dir / "master" / "run.py"
     original_text = source_path.read_text(encoding="utf-8")
     modified_text = original_text.replace(
         "OBJECT_TASKS = (",
@@ -265,7 +265,7 @@ def test_role_build_script_rewrites_master_source_from_shared_rules(tmp_path) ->
             capture_output=True,
             text=True,
         )
-        uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+        uploaded = (target_dir / "run.py").read_text(encoding="utf-8")
         generated_source = source_path.read_text(encoding="utf-8")
         assert generated_source != modified_text
         assert uploaded == generated_source
@@ -281,7 +281,7 @@ def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path
 
     _run_role_build_script_preserving_sources("assistant/build.sh", target_dir)
 
-    uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+    uploaded = (target_dir / "run.py").read_text(encoding="utf-8")
     assert "OBJECT_TASKS = (" in uploaded
     assert "('red'" in uploaded
 
@@ -290,7 +290,7 @@ def test_role_build_script_rewrites_assistant_source_from_shared_rules(tmp_path)
     target_dir = tmp_path / "assistant-copy-only-device"
     target_dir.mkdir()
     root_dir = DEFAULT_RULES_PATH.parent.parent
-    source_path = root_dir / "assistant" / "main.py"
+    source_path = root_dir / "assistant" / "run.py"
     original_text = source_path.read_text(encoding="utf-8")
     modified_text = original_text.replace(
         "OBJECT_TASKS = (",
@@ -310,7 +310,7 @@ def test_role_build_script_rewrites_assistant_source_from_shared_rules(tmp_path)
             capture_output=True,
             text=True,
         )
-        uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
+        uploaded = (target_dir / "run.py").read_text(encoding="utf-8")
         generated_source = source_path.read_text(encoding="utf-8")
         assert generated_source != modified_text
         assert uploaded == generated_source

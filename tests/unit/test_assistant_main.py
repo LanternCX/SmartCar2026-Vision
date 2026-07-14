@@ -15,10 +15,11 @@ ASSISTANT_LOG_PREFIX = "[assistant_" + "v" + "2]"
 def load_assistant_main():
     """加载辅车视觉默认入口模块."""
 
-    module = load_role_entry_module("assistant", "main.py", "assistant_main_test_module")
+    module = load_role_entry_module("assistant", "run.py", "assistant_main_test_module")
     module.reset_runtime_state()
     module.ASSISTANT_DEBUG_DISPLAY_ENABLED = False
     module.state.yolo_net = "fake-yolo-net"
+    module.prepare_runtime = module.init_status_lights
     return module
 
 
@@ -323,11 +324,11 @@ def test_assistant_main_object_candidates_use_yolo_when_enabled() -> None:
 
     class FakeYoloTf:
         def __init__(self):
-            self.loaded_paths = []
+            self.load_calls = []
             self.detect_calls = []
 
-        def load(self, path):
-            self.loaded_paths.append(path)
+        def load(self, path, load_to_fb=False):
+            self.load_calls.append((path, load_to_fb))
             return "fake-yolo-net"
 
         def detect(self, net, img):
@@ -359,11 +360,11 @@ def test_assistant_main_object_candidates_use_yolo_when_enabled() -> None:
     module.state.current_image_width = img.width()
     module.state.current_image_height = img.height()
 
-    module.load_yolo_model()
+    module.state.yolo_net = module.load_yolo_model()
     raw_yolo_candidates = module.yolo_detect(img)
     candidates = module.build_object_candidates(img, raw_yolo_candidates)
 
-    assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
+    assert module.tf.load_calls == [(module.YOLO_MODEL_PATH, True)]
     assert module.tf.detect_calls == [("fake-yolo-net", "detect-image")]
     assert img.copy_calls == [(module.YOLO_IMAGE_COPY_SCALE, 1)]
     assert candidates[0][0] == "red"

@@ -16,9 +16,19 @@ def test_role_main_files_are_maintained_under_role_directories() -> None:
     assert role_main_path("assistant").is_file()
     assert role_main_path("master").is_file()
     for role in ("assistant", "master"):
+        assert (ROOT / role / "main.py").is_file()
+        assert (ROOT / role / "run.py").is_file()
         assert not any(path.stem.endswith("_" + "v" + "2") for path in (ROOT / role).glob("main*.py"))
         assert not any(path.stem.endswith("_" + "v" + "2") for path in (ROOT / role).glob("build*.sh"))
     assert not (ROOT / "main.py").exists()
+
+
+def test_role_boot_entries_import_and_start_run_module() -> None:
+    for role in ("assistant", "master"):
+        source = (ROOT / role / "main.py").read_text(encoding="utf-8")
+        assert "gc.collect()" in source
+        assert "import run" in source
+        assert "run.run()" in source
 
 
 def test_role_main_modules_expose_role_protocol_api() -> None:
@@ -73,8 +83,9 @@ def test_role_build_scripts_generate_and_upload_role_entry(tmp_path) -> None:
             )
 
             built = role_main_path(role)
-            uploaded = target_dir / "main.py"
+            uploaded = target_dir / "run.py"
             assert built.is_file()
+            assert (target_dir / "main.py").is_file()
             assert uploaded.is_file()
             built_text = built.read_text(encoding="utf-8")
             uploaded_text = uploaded.read_text(encoding="utf-8")
@@ -111,6 +122,7 @@ def test_role_build_scripts_copy_yolo_model_when_requested(tmp_path) -> None:
             )
 
             assert (target_dir / "main.py").is_file()
+            assert (target_dir / "run.py").is_file()
             assert (target_dir / "yolo.tflite").read_bytes() == model_path.read_bytes()
     finally:
         if original_model is None:
@@ -126,7 +138,7 @@ def test_role_build_scripts_generate_default_entry_from_shared_rules(tmp_path) -
         target_dir = tmp_path / (role + "-default-device")
         target_dir.mkdir()
         script_path = ROOT / role / "build.sh"
-        source = ROOT / role / "main.py"
+        source = ROOT / role / "run.py"
         env = dict(os.environ)
         env["TARGET_DIR"] = str(target_dir)
 
@@ -139,8 +151,9 @@ def test_role_build_scripts_generate_default_entry_from_shared_rules(tmp_path) -
             text=True,
         )
 
-        uploaded = target_dir / "main.py"
+        uploaded = target_dir / "run.py"
         assert source.is_file()
+        assert (target_dir / "main.py").is_file()
         assert uploaded.is_file()
         source_text = source.read_text(encoding="utf-8")
         uploaded_text = uploaded.read_text(encoding="utf-8")
