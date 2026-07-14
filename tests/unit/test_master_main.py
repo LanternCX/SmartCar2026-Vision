@@ -264,6 +264,27 @@ def test_master_main_yolo_mode_keeps_category_without_tracking_box() -> None:
     assert not hasattr(module.state, "track_dynamic_threshold")
 
 
+def test_master_main_new_search_task_clears_previous_yolo_class_lock() -> None:
+    module = load_master_main()
+    module.OBJECT_DETECTION_USE_YOLO = True
+    module.handle_control_frame(task_sync_frame(module, context_id=1))
+    red_blob = module.YoloDetectionBlob(0.0, 0.0, 20.0, 20.0, 1, 0.95)
+    module.state.current_object_candidates = (("red", 10.0, 20.0, 400.0, red_blob),)
+    module.write_data_line = lambda _frame: None
+
+    module.process_task_frame(FakeImage())
+    module.handle_control_frame(task_sync_frame(module, seq=13, context_id=2))
+
+    green_blob = module.YoloDetectionBlob(150.0, 190.0, 170.0, 210.0, 2, 0.95)
+    candidates = module.build_object_candidates(
+        FakeImage(),
+        (("green", 160.0, 210.0, 400.0, green_blob),),
+    )
+
+    assert module.state.object_task_name is None
+    assert tuple(candidate[0] for candidate in candidates) == ("green",)
+
+
 @pytest.mark.parametrize("use_yolo", (True, False))
 def test_master_main_single_frame_miss_does_not_reuse_previous_candidate(use_yolo) -> None:
     module = load_master_main()

@@ -1190,6 +1190,8 @@ def handle_control_frame(frame_bytes):
             }
             state.last_task_context_id = context_id
             state.stable_frame_count = 0
+            if int(packet["arg"]) == int(Task.SEARCH):
+                state.object_task_name = None
         return format_ack_frame(packet["reliable_seq"])
 
     packet = parse_event_ack_packet(frame_bytes)
