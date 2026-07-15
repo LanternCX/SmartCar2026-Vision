@@ -972,6 +972,26 @@ def test_assistant_transport_candidate_window_covers_qvga_frame() -> None:
     assert float(module.OBJECT_TRANSPORT_WINDOW_Y_PX) == float(IMAGE_HEIGHT)
 
 
+def test_assistant_transport_candidate_stays_visible_after_crossing_target_line() -> None:
+    """搬运目标越过命中线后仍在配置窗口内时继续参与横向修正."""
+
+    module = load_assistant()
+    target_x, target_y = module.build_object_target_point(module.Task.TRANSPORT)
+    window_y = float(module.OBJECT_TRANSPORT_WINDOW_Y_PX)
+    candidate = ("red", target_x, 0.0, target_y + window_y / 2.0, 300.0, object())
+    outside = ("red", target_x, 0.0, target_y + window_y + 1.0, 300.0, object())
+
+    filtered = module.filter_candidates_in_target_window(
+        (candidate, outside),
+        target_x,
+        target_y,
+        module.OBJECT_TRANSPORT_WINDOW_X_PX,
+        module.OBJECT_TRANSPORT_WINDOW_Y_PX,
+    )
+
+    assert filtered == [candidate]
+
+
 def test_assistant_object_target_can_be_reconfigured(monkeypatch) -> None:
     """找物体目标点改动后, 候选选择和输出速度都要跟着变化."""
 

@@ -114,15 +114,15 @@ OBJECT_MISSING_SEARCH_VX = 0.0
 # 目标丢失时的默认搜索纵向速度
 OBJECT_MISSING_SEARCH_VY = 2.0
 # 接近目标阶段横向控制比例系数
-OBJECT_APPROACH_KP_X = 0.005
+OBJECT_APPROACH_KP_X = 0.020
 # 接近目标阶段纵向控制比例系数
-OBJECT_APPROACH_KP_Y = -0.10
+OBJECT_APPROACH_KP_Y = -0.20
 # 接近目标阶段最小输出速度
 OBJECT_APPROACH_MIN_SPEED = 2
 # 接近目标阶段横向死区, 单位为 px
-OBJECT_APPROACH_DEADZONE_X_PX = 30.0
+OBJECT_APPROACH_DEADZONE_X_PX = 20.0
 # 接近目标阶段纵向死区, 单位为 px
-OBJECT_APPROACH_DEADZONE_Y_PX = 15.0
+OBJECT_APPROACH_DEADZONE_Y_PX = 10.0
 # 目标横向对正容差, 单位为 px
 OBJECT_X_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_X_PX
 # 目标纵向对正容差, 单位为 px
@@ -873,12 +873,11 @@ def choose_largest_area_candidate(candidates):
 
 
 def filter_candidates_in_target_window(candidates, target_x, target_y, tolerance_x, tolerance_y):
-    _ = tolerance_y
     return [
         candidate
         for candidate in candidates
         if abs(float(candidate[1]) - float(target_x)) <= float(tolerance_x)
-        and float(candidate[3]) < float(target_y)
+        and abs(float(candidate[3]) - float(target_y)) <= float(tolerance_y)
     ]
 
 
