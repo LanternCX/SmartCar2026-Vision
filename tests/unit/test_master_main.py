@@ -676,8 +676,9 @@ def search_aligned_detection():
     return (150.0 / 320.0, 190.0 / 240.0, 170.0 / 320.0, 210.0 / 240.0, 1, 0.95)
 
 
-def transport_aligned_detection():
-    return (150.0 / 320.0, 220.0 / 240.0, 170.0 / 320.0, 1.0, 1, 0.95)
+def transport_aligned_detection(module):
+    target_x, target_y = module.build_search_target_point(module.Task.TRANSPORT)
+    return pixel_detection(target_x - 10.0, target_y - 20.0, target_x + 10.0, target_y)
 
 
 def pixel_detection(left, top, right, bottom, label=1, score=0.95):
@@ -1335,7 +1336,7 @@ def test_master_main_orbit_outputs_independent_xy_velocity_correction() -> None:
 
 def test_master_main_transport_alignment_reports_aligned_event() -> None:
     module = load_master_main()
-    module.tf.detect = lambda net, img: [transport_aligned_detection()]
+    module.tf.detect = lambda net, img: [transport_aligned_detection(module)]
     module.handle_control_frame(
         task_sync_frame(
             module,

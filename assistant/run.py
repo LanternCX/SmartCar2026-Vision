@@ -873,11 +873,12 @@ def choose_largest_area_candidate(candidates):
 
 
 def filter_candidates_in_target_window(candidates, target_x, target_y, tolerance_x, tolerance_y):
+    _ = tolerance_y
     return [
         candidate
         for candidate in candidates
         if abs(float(candidate[1]) - float(target_x)) <= float(tolerance_x)
-        and abs(float(candidate[3]) - float(target_y)) <= float(tolerance_y)
+        and float(candidate[3]) < float(target_y)
     ]
 
 
