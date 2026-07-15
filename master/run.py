@@ -14,7 +14,7 @@ import gc
 # 是否启用主车上电识别预览, 开启时绕过通信
 MASTER_DEBUG_DISPLAY_ENABLED = False
 # 是否使用决赛目标选择模式, False 使用初赛模式
-IS_FINAL_ROUND = True
+IS_FINAL_ROUND = False
 
 # 板载串口编号, 用于和主控通信
 UART_ID = 12
@@ -104,11 +104,11 @@ MASTER_SEARCH_KP_X = 0.02
 # 搜索阶段纵向控制比例系数
 MASTER_SEARCH_KP_Y = -0.20
 # 搜索阶段最小输出速度
-MASTER_SEARCH_MIN_SPEED = 2.0
+MASTER_SEARCH_MIN_SPEED = 1.2
 # 搜索阶段横向死区, 单位为 px
 MASTER_SEARCH_DEADZONE_X_PX = 20.0
 # 搜索阶段纵向死区, 单位为 px
-MASTER_SEARCH_DEADZONE_Y_PX = 10.0
+MASTER_SEARCH_DEADZONE_Y_PX = 12.0
 # 目标横向对齐容差, 单位为 px
 OBJECT_X_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_X_PX
 # 目标纵向对齐容差, 单位为 px
