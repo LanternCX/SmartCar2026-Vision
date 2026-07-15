@@ -265,8 +265,8 @@ def test_assistant_main_transport_window_keeps_x_outside_deadzone_candidate() ->
     ) == [candidate]
 
 
-def test_assistant_main_transport_window_rejects_y_outside_candidate() -> None:
-    """辅车搬运窗口必须过滤底边 Y 达到命中线外侧的候选."""
+def test_assistant_main_transport_window_keeps_candidate_on_target_line() -> None:
+    """辅车搬运窗口保留底边位于目标线的候选."""
 
     module = load_assistant_main()
     target_x, target_y = assistant_target_point(module, module.Task.TRANSPORT)
@@ -287,7 +287,7 @@ def test_assistant_main_transport_window_rejects_y_outside_candidate() -> None:
         target_y,
         module.OBJECT_TRANSPORT_WINDOW_X_PX,
         module.OBJECT_TRANSPORT_WINDOW_Y_PX,
-    ) == []
+    ) == candidates
 
 
 def test_assistant_main_transport_window_keeps_xy_inside_candidate() -> None:
@@ -306,8 +306,8 @@ def test_assistant_main_transport_window_keeps_xy_inside_candidate() -> None:
     ) == [candidate]
 
 
-def test_assistant_main_transport_window_rejects_y_above_hit_line_candidate() -> None:
-    """辅车搬运窗口按底边 Y 小于命中线判断纵向命中."""
+def test_assistant_main_transport_window_keeps_candidate_after_target_line() -> None:
+    """辅车搬运窗口保留底边越过目标线的候选."""
 
     module = load_assistant_main()
     target_x, target_y = assistant_target_point(module, module.Task.TRANSPORT)
@@ -319,7 +319,7 @@ def test_assistant_main_transport_window_rejects_y_above_hit_line_candidate() ->
         target_y,
         module.OBJECT_TRANSPORT_WINDOW_X_PX,
         module.OBJECT_TRANSPORT_WINDOW_Y_PX,
-    ) == []
+    ) == [candidate]
 
 
 def test_assistant_main_object_candidates_use_yolo_when_enabled() -> None:
