@@ -95,13 +95,13 @@ VISION_REFERENCE_FPS = 25.0
 # 跟随阶段的横向死区, 单位为 px
 FOLLOW_X_DEADZONE_PX = 5.0
 # 跟随阶段的目标纵向位置, 单位为 px
-FOLLOW_TARGET_Y = 45.0
+FOLLOW_TARGET_Y = 100.0
 # 跟随阶段的纵向死区, 单位为 px
 FOLLOW_Y_DEADZONE_PX = 8.0
 # 跟随阶段横向控制比例系数
 FOLLOW_CONTROL_KP_X = 0.03
 # 跟随阶段纵向控制比例系数
-FOLLOW_CONTROL_KP_Y = -0.10
+FOLLOW_CONTROL_KP_Y = -0.05
 # 跟随阶段最小输出速度
 FOLLOW_CONTROL_MIN_SPEED = 0
 # 跟随阶段纵向速度上限
