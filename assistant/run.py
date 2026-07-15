@@ -15,7 +15,7 @@ from pyb import LED
 ASSISTANT_DEBUG_DISPLAY_ENABLED = False
 
 # 板载串口编号, 用于和主控通信
-UART_ID = 2
+UART_ID = 12
 # 串口波特率, 单位为 bit/s
 UART_BAUDRATE = 115200
 # 图像曝光时间, 单位为 us
