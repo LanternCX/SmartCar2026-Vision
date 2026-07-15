@@ -147,7 +147,7 @@ MASTER_ORBIT_TARGET_X_PX = 160.0
 # 绕目标阶段期望的图像纵向位置, 单位为 px
 MASTER_ORBIT_TARGET_Y_PX = 210.0
 # 主车运输阶段期望的图像纵向位置, 单位为 px
-MASTER_TRANSPORT_TARGET_Y_PX = 240.0
+MASTER_TRANSPORT_TARGET_Y_PX = 210.0
 
 # 协议约定的图像宽度, 单位为 px
 PROTOCOL_IMAGE_WIDTH = 320
