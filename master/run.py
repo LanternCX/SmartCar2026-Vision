@@ -115,6 +115,8 @@ OBJECT_X_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_X_PX
 OBJECT_Y_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_Y_PX
 # 判定目标稳定所需连续帧数
 OBJECT_STABLE_FRAMES = 3
+# 搜索阶段锁定类别所需连续帧数
+OBJECT_SELECTION_STABLE_FRAMES = 3
 # 搜索阶段锁定类别连续丢失后重新选择所需帧数
 OBJECT_LOCK_MISS_FRAMES = 3
 
@@ -185,6 +187,7 @@ class RuntimeState:
         self.current_task = None
         self.last_task_context_id = None
         self.stable_frame_count = 0
+        self.object_selection_stable_count = 0
         self.object_lock_miss_count = 0
         self.next_event_seq = int(next_event_seq) % SEQ_RING_SIZE
         self.pending_event = None
@@ -195,6 +198,7 @@ class RuntimeState:
         self.uart_device = None
         self.current_object_candidates = ()
         self.object_task_name = None
+        self.object_selection_task_name = None
         self.last_object_edge_group = 2
         self.current_image = None
         self.current_image_width = PROTOCOL_IMAGE_WIDTH
@@ -752,6 +756,8 @@ def build_object_candidates(img, yolo_candidates):
             if state.object_lock_miss_count < int(OBJECT_LOCK_MISS_FRAMES):
                 return ()
             state.object_task_name = None
+            state.object_selection_task_name = None
+            state.object_selection_stable_count = 0
             state.object_lock_miss_count = 0
             return tuple(yolo_candidates)
         task_name = current_blob_task_name()
@@ -874,6 +880,20 @@ def choose_search_candidate(candidates):
         if object_edge_group(candidate[0]) == state.last_object_edge_group:
             return candidate
     return outer_candidates[0]
+
+
+def update_object_selection(task_name):
+    if not is_unconfirmed_search_task():
+        state.object_task_name = task_name
+        return
+    if task_name != state.object_selection_task_name:
+        state.object_selection_task_name = task_name
+        state.object_selection_stable_count = 1
+        state.stable_frame_count = 0
+    else:
+        state.object_selection_stable_count += 1
+    if state.object_selection_stable_count >= int(OBJECT_SELECTION_STABLE_FRAMES):
+        state.object_task_name = task_name
 
 
 def debug_color_for_task_name(task_name):
@@ -1307,6 +1327,8 @@ def handle_control_frame(frame_bytes):
             state.stable_frame_count = 0
             if int(packet["arg"]) == int(Task.SEARCH):
                 state.object_lock_miss_count = 0
+                state.object_selection_task_name = None
+                state.object_selection_stable_count = 0
                 if state.object_task_name is not None:
                     state.last_object_edge_group = object_edge_group(state.object_task_name)
                 state.object_task_name = None
@@ -1370,9 +1392,11 @@ def process_task_frame(img):
         return
     observation, best_blob, task_name, _candidates = build_observation_and_candidates()
     if best_blob is not None:
-        if task_name != state.object_task_name:
-            state.stable_frame_count = 0
-        state.object_task_name = task_name
+        update_object_selection(task_name)
+    elif state.object_task_name is None:
+        state.object_selection_task_name = None
+        state.object_selection_stable_count = 0
+        state.stable_frame_count = 0
     if is_orbit_task_context():
         velocity = build_orbit_correction_velocity_from_observation(observation)
     else:

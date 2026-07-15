@@ -27,6 +27,7 @@ def load_master_main():
     module.reset_runtime_state()
     module.MASTER_DEBUG_DISPLAY_ENABLED = False
     module.OBJECT_STABLE_FRAMES = 1
+    module.OBJECT_SELECTION_STABLE_FRAMES = 1
     module.state.yolo_net = "fake-net"
     module.prepare_runtime = module.init_status_lights
     return module
@@ -264,6 +265,28 @@ def test_master_main_yolo_mode_keeps_category_without_tracking_box() -> None:
     assert not hasattr(module.state, "track_dynamic_threshold")
 
 
+def test_master_main_search_locks_category_after_three_stable_frames() -> None:
+    module = load_master_main()
+    module.OBJECT_STABLE_FRAMES = 3
+    module.OBJECT_SELECTION_STABLE_FRAMES = 3
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.write_data_line = lambda _frame: None
+    red = object_candidate(module, "red", 150, 190, 170, 210)
+    brown = object_candidate(module, "brown", 150, 190, 170, 210)
+
+    for candidate in (red, red, brown, brown):
+        module.state.current_object_candidates = (candidate,)
+        module.process_task_frame(FakeImage())
+        assert module.state.object_task_name is None
+        assert module.state.pending_event is None
+
+    module.state.current_object_candidates = (brown,)
+    module.process_task_frame(FakeImage())
+
+    assert module.state.object_task_name == "brown"
+    assert module.state.pending_event is not None
+
+
 def test_master_main_new_search_task_clears_previous_yolo_class_lock() -> None:
     module = load_master_main()
     module.OBJECT_DETECTION_USE_YOLO = True
@@ -287,26 +310,29 @@ def test_master_main_new_search_task_clears_previous_yolo_class_lock() -> None:
 
 def test_master_main_search_lock_reselects_before_target_found_and_hardens_afterward() -> None:
     module = load_master_main()
-    module.OBJECT_STABLE_FRAMES = 3
+    module.OBJECT_STABLE_FRAMES = 99
+    module.OBJECT_SELECTION_STABLE_FRAMES = 3
     assert module.OBJECT_LOCK_MISS_FRAMES == 3
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     module.write_data_line = lambda _frame: None
-    red = object_candidate(module, "red", 150, 190, 170, 210)
-    brown = object_candidate(module, "brown", 150, 190, 170, 210)
-    module.state.current_object_candidates = (red,)
+    red = object_candidate(module, "red", 150, 20, 170, 40)
+    brown = object_candidate(module, "brown", 150, 20, 170, 40)
 
-    module.process_task_frame(FakeImage())
+    for _ in range(module.OBJECT_SELECTION_STABLE_FRAMES):
+        module.state.current_object_candidates = (red,)
+        module.process_task_frame(FakeImage())
     first_miss = module.build_object_candidates(FakeImage(), (brown,))
     second_miss = module.build_object_candidates(FakeImage(), (brown,))
     candidates = module.build_object_candidates(FakeImage(), (brown,))
-    module.state.current_object_candidates = candidates
-    module.process_task_frame(FakeImage())
+    for _ in range(module.OBJECT_SELECTION_STABLE_FRAMES):
+        module.state.current_object_candidates = candidates
+        module.process_task_frame(FakeImage())
 
     assert first_miss == ()
     assert second_miss == ()
     assert tuple(candidate[0] for candidate in candidates) == ("brown",)
     assert module.state.object_task_name == "brown"
-    assert module.state.stable_frame_count == 1
+    assert module.state.stable_frame_count == 0
 
     module.state.last_event_context_id = 7
 
