@@ -13,6 +13,8 @@ import gc
 
 # 是否启用主车上电识别预览, 开启时绕过通信
 MASTER_DEBUG_DISPLAY_ENABLED = False
+# 是否使用决赛目标选择模式, False 使用初赛模式
+IS_FINAL_ROUND = True
 
 # 板载串口编号, 用于和主控通信
 UART_ID = 12
@@ -190,6 +192,7 @@ class RuntimeState:
         self.uart_device = None
         self.current_object_candidates = ()
         self.object_task_name = None
+        self.last_object_edge_group = 2
         self.current_image = None
         self.current_image_width = PROTOCOL_IMAGE_WIDTH
         self.current_image_height = PROTOCOL_IMAGE_HEIGHT
@@ -576,6 +579,11 @@ def object_task_id(task_name):
     return 0
 
 
+def object_edge_group(task_name):
+    object_id = object_task_id(task_name)
+    return (object_id + 1) // 2
+
+
 def current_blob_task_name():
     if state.object_task_name is not None:
         return state.object_task_name
@@ -784,8 +792,63 @@ def choose_largest_area_candidate(candidates):
     return max(candidates, key=lambda item: float(item[3]))
 
 
+def is_candidate_occluded(candidate, candidates):
+    target_x = float(candidate[1])
+    _, target_top, _, target_bottom = blob_rect_to_bbox(
+        candidate[4].rect()
+    )
+    target_center_y = (float(target_top) + float(target_bottom)) / 2.0
+    for other in candidates:
+        if other is candidate or float(other[2]) <= float(candidate[2]):
+            continue
+        other_left, other_top, other_right, other_bottom = blob_rect_to_bbox(
+            other[4].rect()
+        )
+        if (
+            float(other_left) <= target_x <= float(other_right)
+            and float(other_top) <= float(target_bottom)
+            and float(other_bottom) >= target_center_y
+        ):
+            return True
+    return False
+
+
+def candidate_matches_target_side(candidate):
+    last_edge = state.last_object_edge_group
+    target_edge = object_edge_group(candidate[0])
+    center_x = float(state.current_image_width) / 2.0
+    candidate_x = float(candidate[1])
+    if (last_edge == 1 and target_edge == 3) or (last_edge == 3 and target_edge == 2):
+        return candidate_x < center_x
+    if (last_edge == 2 and target_edge == 3) or (last_edge == 3 and target_edge == 1):
+        return candidate_x > center_x
+    return True
+
+
+def choose_search_candidate(candidates):
+    if len(candidates) == 1:
+        return candidates[0]
+    image_center_x = float(state.current_image_width) / 2.0
+    outer_candidates = sorted(
+        (
+            candidate
+            for candidate in candidates
+            if candidate_matches_target_side(candidate)
+            and not is_candidate_occluded(candidate, candidates)
+        ),
+        key=lambda item: abs(float(item[1]) - image_center_x),
+        reverse=True,
+    )[:2]
+    if not outer_candidates:
+        return None
+    for candidate in outer_candidates:
+        if object_edge_group(candidate[0]) == state.last_object_edge_group:
+            return candidate
+    return outer_candidates[0]
+
+
 def debug_color_for_task_name(task_name):
-    if task_name == "tennis":
+    if task_name == "green":
         return (191, 255, 0)
     if task_name == "red":
         return (255, 0, 0)
@@ -854,11 +917,20 @@ def build_observation_and_candidates():
         return build_observation(0, 0, 0, 0), None, None, current_object_candidates
     candidates = current_object_candidates
     target_x, target_y = build_search_target_point(current_task_config_id())
-    task_name, center_x, bottom_y, area, best_blob = choose_best_candidate(
-        candidates,
-        target_x,
-        target_y,
-    )
+    current_task = state.current_task
+    if (
+        current_task is not None
+        and int(current_task["state"]) == int(State.SEARCH_OBJECT)
+        and int(current_task["target"]) == int(Target.OBJECT)
+        and int(current_task["arg"]) == int(Task.SEARCH)
+        and IS_FINAL_ROUND
+    ):
+        selected = choose_search_candidate(candidates)
+        if selected is None:
+            return build_observation(0, 0, 0, 0), None, None, candidates
+    else:
+        selected = choose_best_candidate(candidates, target_x, target_y)
+    task_name, center_x, bottom_y, area, best_blob = selected
     return (
         build_observation(1, center_x, bottom_y, area),
         best_blob,
@@ -910,8 +982,13 @@ def draw_search_preview_debug(img, candidates):
     draw_object_candidates_debug(img, candidates)
     if candidates:
         target_x, target_y = build_search_target_point(Task.SEARCH)
-        task_name, _, _, _, best_blob = choose_best_candidate(candidates, target_x, target_y)
-        draw_selected_candidate_debug(img, task_name, best_blob)
+        if IS_FINAL_ROUND:
+            selected = choose_search_candidate(candidates)
+        else:
+            selected = choose_best_candidate(candidates, target_x, target_y)
+        if selected is not None:
+            task_name, _, _, _, best_blob = selected
+            draw_selected_candidate_debug(img, task_name, best_blob)
         draw_protocol_target_point_debug(img, target_x, target_y)
     img.flush()
 
@@ -1191,6 +1268,8 @@ def handle_control_frame(frame_bytes):
             state.last_task_context_id = context_id
             state.stable_frame_count = 0
             if int(packet["arg"]) == int(Task.SEARCH):
+                if state.object_task_name is not None:
+                    state.last_object_edge_group = object_edge_group(state.object_task_name)
                 state.object_task_name = None
         return format_ack_frame(packet["reliable_seq"])
 

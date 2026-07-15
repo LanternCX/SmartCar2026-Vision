@@ -350,7 +350,7 @@ def test_master_main_disable_yolo_uses_blob_candidates_in_every_object_task() ->
 
     candidates = module.build_object_candidates(img, ())
 
-    assert tuple(candidate[:4] for candidate in candidates) == (("brown", 160.0, 30, 400.0),)
+    assert tuple(candidate[:4] for candidate in candidates) == (("red", 160.0, 30, 400.0),)
     assert module.state.current_detection_source == "blob"
 
 
@@ -404,18 +404,18 @@ def test_master_main_enables_all_yolo_object_classes() -> None:
     module = load_master_main()
 
     assert tuple(task[0] for task in module.OBJECT_TASKS) == (
-        "brown",
         "red",
-        "green",
         "blue",
+        "brown",
         "white",
+        "green",
     )
     assert tuple(module.object_task_id(name) for name in module.YOLO_LABELS) == (
-        3,
-        2,
-        4,
-        1,
         5,
+        1,
+        2,
+        3,
+        4,
     )
 
 
@@ -635,6 +635,11 @@ def pixel_detection(left, top, right, bottom, label=1, score=0.95):
         label,
         score,
     )
+
+
+def object_candidate(module, task_name, left, top, right, bottom):
+    blob = module.YoloDetectionBlob(left, top, right, bottom, 0, 0.95)
+    return task_name, blob.cx(), float(bottom), blob.area(), blob
 
 
 def latest_velocity(uart):
@@ -905,8 +910,108 @@ def test_master_main_search_uses_yolo_candidates_for_velocity_and_target_found()
     assert latest_event(type("U", (), {"writes": [uart.writes[1]]})()) == {
         "context_id": 7,
         "event": module.Event.TARGET_FOUND,
-        "value": 2,
+        "value": 1,
     }
+
+
+def test_master_main_search_prefers_previous_target_edge_among_two_outer_candidates() -> None:
+    module = load_master_main()
+    module.state.object_task_name = "brown"
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    red = object_candidate(module, "red", 10, 20, 30, 60)
+    white = object_candidate(module, "white", 280, 20, 300, 60)
+    blue = object_candidate(module, "blue", 80, 20, 100, 60)
+    module.state.current_object_candidates = (red, white, blue)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is white[4]
+    assert task_name == "white"
+
+
+def test_master_main_first_search_prefers_right_target_edge() -> None:
+    module = load_master_main()
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    brown = object_candidate(module, "brown", 10, 20, 30, 60)
+    red = object_candidate(module, "red", 280, 20, 300, 60)
+    white = object_candidate(module, "white", 80, 20, 100, 60)
+    module.state.current_object_candidates = (brown, red, white)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is brown[4]
+    assert task_name == "brown"
+
+
+def test_master_main_preliminary_mode_uses_nearest_target_candidate() -> None:
+    module = load_master_main()
+    module.IS_FINAL_ROUND = False
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    red = object_candidate(module, "red", 10, 190, 30, 210)
+    brown = object_candidate(module, "brown", 150, 190, 170, 210)
+    module.state.current_object_candidates = (red, brown)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is brown[4]
+    assert task_name == "brown"
+
+
+@pytest.mark.parametrize(
+    ("previous_task_name", "candidate_task_name", "left_x", "right_x", "expected_side"),
+    (
+        ("red", "green", 40, 300, "left"),
+        ("brown", "green", 20, 280, "right"),
+        ("green", "brown", 40, 300, "left"),
+        ("green", "red", 20, 280, "right"),
+    ),
+)
+def test_master_main_final_mode_matches_candidate_side_to_target_edge(
+    previous_task_name,
+    candidate_task_name,
+    left_x,
+    right_x,
+    expected_side,
+) -> None:
+    module = load_master_main()
+    module.state.object_task_name = previous_task_name
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    left = object_candidate(module, candidate_task_name, left_x - 10, 20, left_x + 10, 60)
+    right = object_candidate(module, candidate_task_name, right_x - 10, 20, right_x + 10, 60)
+    module.state.current_object_candidates = (left, right)
+
+    _, best_blob, _, _ = module.build_observation_and_candidates()
+
+    expected = left if expected_side == "left" else right
+    assert best_blob is expected[4]
+
+
+def test_master_main_final_mode_selects_single_tennis_on_any_side() -> None:
+    module = load_master_main()
+    module.state.object_task_name = "red"
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    tennis = object_candidate(module, "green", 280, 20, 300, 60)
+    module.state.current_object_candidates = (tennis,)
+
+    observation, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert observation[3] == tennis[3]
+    assert best_blob is tennis[4]
+    assert task_name == "green"
+
+
+def test_master_main_search_ignores_candidate_occluded_on_lower_center_line() -> None:
+    module = load_master_main()
+    module.state.object_task_name = "red"
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    red = object_candidate(module, "red", 100, 120, 120, 200)
+    brown = object_candidate(module, "brown", 80, 170, 115, 220)
+    module.state.current_object_candidates = (red, brown)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is brown[4]
+    assert task_name == "brown"
 
 
 def test_master_main_yolo_detect_filters_small_area_candidates() -> None:
@@ -998,7 +1103,7 @@ def test_master_main_blob_debug_preview_reports_detected_object() -> None:
     module._process_debug_preview_frame(img)
 
     assert any(call == (tuple(brown_threshold), None) for call in img.find_blobs_calls)
-    assert any(entry[2] == "brown" for entry in img.strings)
+    assert any(entry[2] == "red" for entry in img.strings)
     assert not any("touch=" in entry[2] for entry in img.strings)
     assert img.flush_count == 1
 
@@ -1199,10 +1304,10 @@ def test_master_main_transport_alignment_reports_aligned_event() -> None:
     }
 
 
-def test_master_main_candidate_selection_uses_configured_target_point() -> None:
+def test_master_main_transport_candidate_selection_uses_configured_target_point() -> None:
     module = load_master_main()
     module.state.yolo_net = "fake-net"
-    target_x, target_y = module.build_search_target_point(module.Task.SEARCH)
+    target_x, target_y = module.build_search_target_point(module.Task.TRANSPORT)
     module.tf.detect = lambda net, img: [
         pixel_detection(target_x - 40, target_y - 20.0, target_x + 40, target_y),
         pixel_detection(
@@ -1212,7 +1317,7 @@ def test_master_main_candidate_selection_uses_configured_target_point() -> None:
             target_y + 20.0,
         ),
     ]
-    module.handle_control_frame(task_sync_frame(module))
+    module.handle_control_frame(task_sync_frame(module, arg=int(module.Task.TRANSPORT)))
 
     cache_yolo_candidates(module)
     observation, best_blob, _, _ = module.build_observation_and_candidates()
@@ -1279,11 +1384,11 @@ def test_master_main_blob_debug_preview_replaces_previous_candidates() -> None:
     module._process_debug_preview_frame(image)
 
     assert tuple(module.state.current_object_candidates[:1])[0][:4] == (
-        "brown",
+        "red",
         135.0,
         50,
         900.0,
     )
     assert any(call == (tuple(brown_threshold), None) for call in image.find_blobs_calls)
-    assert any(entry[2] == "brown" for entry in image.strings)
+    assert any(entry[2] == "red" for entry in image.strings)
     assert image.flush_count == 1

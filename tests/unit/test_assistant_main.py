@@ -525,18 +525,18 @@ def test_assistant_main_enables_all_yolo_object_classes() -> None:
     module = load_assistant_main()
 
     assert tuple(task[0] for task in module.OBJECT_TASKS) == (
-        "brown",
         "red",
-        "green",
         "blue",
+        "brown",
         "white",
+        "green",
     )
     assert tuple(module.object_task_name_from_id(index) for index in range(1, 6)) == (
-        "brown",
         "red",
-        "green",
         "blue",
+        "brown",
         "white",
+        "green",
     )
 
 
@@ -823,7 +823,7 @@ def test_assistant_main_disable_yolo_uses_blob_candidates_in_every_object_task()
     candidates = module.build_object_candidates(img, ())
 
     assert tuple(candidate[:5] for candidate in candidates) == (
-        ("brown", 160.0, 30.0, 40.0, 400.0),
+        ("red", 160.0, 30.0, 40.0, 400.0),
     )
     assert module.state.current_detection_source == "blob"
 
