@@ -41,16 +41,16 @@ class FakeYoloTf:
     """记录 YOLO 加载与检测调用的测试桩."""
 
     def __init__(self):
-        self.loaded_paths = []
+        self.load_calls = []
         self.detect_calls = []
 
-    def load(self, path):
-        self.loaded_paths.append(path)
+    def load(self, path, load_to_fb=False):
+        self.load_calls.append((path, load_to_fb))
         return "fake-yolo-net"
 
     def detect(self, net, img):
         self.detect_calls.append((net, img))
-        return [(0.25, 0.125, 0.75, 0.2083333333, 1, 0.95)]
+        return [(0.25, 0.7916666667, 0.75, 0.875, 1, 0.95)]
 
 
 def load_assistant():
@@ -76,21 +76,6 @@ def test_assistant_exposes_grouped_enum_constants() -> None:
     assert not hasattr(module, "TARGET_OBJECT")
     assert not hasattr(module, "OBJECT_APPROACH_CONFIG_ID")
     assert not hasattr(module, "EVENT_TARGET_FOUND")
-
-
-def yellow_pixel_for(module):
-    """根据当前回库黄线阈值构造命中像素."""
-
-    return tuple(
-        int((float(min_value) + float(max_value)) / 2)
-        for min_value, max_value in (
-            module.RETURN_LINE_YELLOW_THRESHOLD[0:2],
-            module.RETURN_LINE_YELLOW_THRESHOLD[2:4],
-            module.RETURN_LINE_YELLOW_THRESHOLD[4:6],
-        )
-    )
-
-
 IMAGE_WIDTH = 320
 IMAGE_HEIGHT = 240
 
@@ -987,6 +972,26 @@ def test_assistant_transport_candidate_window_covers_qvga_frame() -> None:
     assert float(module.OBJECT_TRANSPORT_WINDOW_Y_PX) == float(IMAGE_HEIGHT)
 
 
+def test_assistant_transport_candidate_stays_visible_after_crossing_target_line() -> None:
+    """搬运目标越过命中线后仍在配置窗口内时继续参与横向修正."""
+
+    module = load_assistant()
+    target_x, target_y = module.build_object_target_point(module.Task.TRANSPORT)
+    window_y = float(module.OBJECT_TRANSPORT_WINDOW_Y_PX)
+    candidate = ("red", target_x, 0.0, target_y + window_y / 2.0, 300.0, object())
+    outside = ("red", target_x, 0.0, target_y + window_y + 1.0, 300.0, object())
+
+    filtered = module.filter_candidates_in_target_window(
+        (candidate, outside),
+        target_x,
+        target_y,
+        module.OBJECT_TRANSPORT_WINDOW_X_PX,
+        module.OBJECT_TRANSPORT_WINDOW_Y_PX,
+    )
+
+    assert filtered == [candidate]
+
+
 def test_assistant_object_target_can_be_reconfigured(monkeypatch) -> None:
     """找物体目标点改动后, 候选选择和输出速度都要跟着变化."""
 
@@ -1455,7 +1460,7 @@ def test_assistant_object_candidates_use_yolo_when_flag_enabled() -> None:
 
     candidates = module.build_object_blob_candidates(img)
 
-    assert module.tf.loaded_paths == [module.YOLO_MODEL_PATH]
+    assert module.tf.load_calls == [(module.YOLO_MODEL_PATH, True)]
     assert module.tf.detect_calls == [("fake-yolo-net", "detect-image")]
     assert img.copy_calls == [(module.YOLO_IMAGE_COPY_SCALE, 1)]
     assert candidates[0][0] == "red"
@@ -1549,344 +1554,6 @@ def test_assistant_process_uart_input_writes_local_ack() -> None:
 
     assert module.process_uart_input(uart, b"", state) == b""
     assert uart.writes == [module.format_ack_frame(12)]
-
-
-def test_assistant_return_line_sync_switches_to_yellow_line_mode() -> None:
-    """辅车回库同步切换到黄线巡线模式."""
-
-    module = load_assistant()
-    state = module.AssistantVisionState()
-    uart = FakeUART(
-        assistant_sync_frame(
-            12,
-            module.State.RETURN_FOLLOW,
-            module.Target.NONE,
-            module.Task.RETURN_GARAGE_LINE,
-        )
-    )
-
-    assert module.process_uart_input(uart, b"", state) == b""
-    assert uart.writes == [module.format_ack_frame(12)]
-    assert state.mode == module.RunMode.RETURN_LINE
-
-
-def test_assistant_return_line_frame_outputs_yellow_line_velocity() -> None:
-    """辅车回库黄线模式只根据本地黄线输出速度."""
-
-    module = load_assistant()
-    yellow_pixel = yellow_pixel_for(module)
-    module.RETURN_LINE_DEADZONE_Y_PX = 2.0
-    module.RETURN_LINE_KP_Y = -0.5
-    module.RETURN_LINE_MAX_VY = 10.0
-    module.RETURN_LINE_MIN_SPEED = 0.0
-    state = module.AssistantVisionState()
-    state.handle_control_line(
-        assistant_sync_frame(
-            12,
-            module.State.RETURN_FOLLOW,
-            module.Target.NONE,
-            module.Task.RETURN_GARAGE_LINE,
-        )
-    )
-    uart = FakeUART()
-
-    class YellowBlob:
-        def rect(self):
-            return (150, 180, 20, 20)
-
-        def area(self):
-            return 400
-
-    class YellowImage:
-        def __init__(self):
-            self.pixel_reads = []
-
-        def height(self):
-            return IMAGE_HEIGHT
-
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            _ = thresholds
-            _ = pixels_threshold
-            _ = area_threshold
-            _ = merge
-            raise AssertionError("回库黄线算法不应调用 find_blobs")
-
-        def get_pixel(self, x, y):
-            self.pixel_reads.append((int(x), int(y)))
-            logical_x = IMAGE_WIDTH - 1 - int(x)
-            logical_y = IMAGE_HEIGHT - 1 - int(y)
-            if 130 <= logical_x <= 190 and 180 <= logical_y <= 200:
-                return yellow_pixel
-            return (0, 0, 0)
-
-    img = YellowImage()
-    module.process_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
-
-    frame = module.decode_frame(uart.writes[0])
-    assert frame is not None
-    body = module.decode_velocity_body(frame["body"])
-    assert body["vx"] == pytest.approx(0.0)
-    assert body["vy"] == pytest.approx(10.0)
-    assert img.pixel_reads
-
-
-def test_assistant_return_line_does_not_filter_y_before_160() -> None:
-    """辅车回库黄线不再按固定 160px 顶边过滤黄线."""
-
-    module = load_assistant()
-    yellow_pixel = yellow_pixel_for(module)
-    module.RETURN_LINE_TARGET_Y_PX = 220.0
-    module.RETURN_LINE_DEADZONE_Y_PX = 2.0
-    module.RETURN_LINE_KP_Y = -0.5
-    module.RETURN_LINE_MAX_VY = 10.0
-    module.RETURN_LINE_MIN_SPEED = 0.0
-    state = module.AssistantVisionState()
-    state.handle_control_line(
-        assistant_sync_frame(
-            12,
-            module.State.RETURN_FOLLOW,
-            module.Target.NONE,
-            module.Task.RETURN_GARAGE_LINE,
-        )
-    )
-    uart = FakeUART()
-
-    class OutsideImage:
-        def height(self):
-            return IMAGE_HEIGHT
-
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            _ = thresholds
-            _ = pixels_threshold
-            _ = area_threshold
-            _ = merge
-            raise AssertionError("回库黄线算法不应调用 find_blobs")
-
-        def get_pixel(self, x, y):
-            logical_x = IMAGE_WIDTH - 1 - int(x)
-            logical_y = IMAGE_HEIGHT - 1 - int(y)
-            if 130 <= logical_x <= 190 and 80 <= logical_y <= 100:
-                return yellow_pixel
-            return (0, 0, 0)
-
-    module.process_frame(uart, state, OutsideImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
-
-    frame = module.decode_frame(uart.writes[0])
-    assert frame is not None
-    body = module.decode_velocity_body(frame["body"])
-    assert body["vx"] == pytest.approx(0.0)
-    assert body["vy"] == pytest.approx(10.0)
-
-
-def test_assistant_return_line_limits_wide_yellow_to_lower_30px() -> None:
-    """辅车回库黄线过厚时保留下界并限制参与计算的厚度."""
-
-    module = load_assistant()
-    yellow_pixel = yellow_pixel_for(module)
-    module.RETURN_LINE_MAX_THICKNESS_PX = 30
-
-    class WideYellowImage:
-        def get_pixel(self, x, y):
-            logical_x = IMAGE_WIDTH - 1 - int(x)
-            logical_y = IMAGE_HEIGHT - 1 - int(y)
-            if 130 <= logical_x <= 190 and 80 <= logical_y <= 200:
-                return yellow_pixel
-            return (0, 0, 0)
-
-    line_y = module.build_return_line_y_from_image(
-        WideYellowImage(),
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-    )
-
-    assert line_y == pytest.approx(185.0)
-
-
-def test_assistant_return_line_keeps_previous_when_horizontal_connected_is_too_short() -> None:
-    """辅车回库黄线候选点左右水平联通不足时沿用上一帧有效值."""
-
-    module = load_assistant()
-    yellow_pixel = yellow_pixel_for(module)
-    module.RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
-
-    class NarrowYellowImage:
-        def get_pixel(self, x, y):
-            logical_x = IMAGE_WIDTH - 1 - int(x)
-            logical_y = IMAGE_HEIGHT - 1 - int(y)
-            if 150 <= logical_x <= 170 and 180 <= logical_y <= 200:
-                return yellow_pixel
-            return (0, 0, 0)
-
-    line_y = module.build_return_line_y_from_image(
-        NarrowYellowImage(),
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-        188.0,
-    )
-
-    assert line_y == pytest.approx(188.0)
-
-
-def test_assistant_return_line_stops_horizontal_scan_after_required_connected_pixels() -> None:
-    """辅车回库黄线水平联通满足阈值后不继续扫完整行."""
-
-    module = load_assistant()
-    yellow_pixel = yellow_pixel_for(module)
-    module.RETURN_LINE_MIN_HORIZONTAL_CONNECTED_PX = 50
-
-    class LongYellowImage:
-        def __init__(self):
-            self.pixel_reads = []
-
-        def get_pixel(self, x, y):
-            self.pixel_reads.append((int(x), int(y)))
-            logical_y = IMAGE_HEIGHT - 1 - int(y)
-            if 180 <= logical_y <= 200:
-                return yellow_pixel
-            return (0, 0, 0)
-
-    img = LongYellowImage()
-    line_y = module.build_return_line_y_from_image(img, IMAGE_WIDTH, IMAGE_HEIGHT)
-
-    assert line_y == pytest.approx(190.0)
-    assert len(img.pixel_reads) < 400
-
-
-def test_assistant_return_line_missing_yellow_keeps_following_without_finished_event() -> None:
-    """辅车回库黄线模式连续丢线后不回报完成事件."""
-
-    module = load_assistant()
-    state = module.AssistantVisionState()
-    state.handle_control_line(
-        assistant_sync_frame(
-            30,
-            module.State.RETURN_FOLLOW,
-            module.Target.NONE,
-            module.Task.RETURN_GARAGE_LINE,
-        )
-    )
-    uart = FakeUART()
-
-    class EmptyImage:
-        def height(self):
-            return IMAGE_HEIGHT
-
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            _ = thresholds
-            _ = pixels_threshold
-            _ = area_threshold
-            _ = merge
-            raise AssertionError("回库黄线算法不应调用 find_blobs")
-
-        def get_pixel(self, x, y):
-            _ = x
-            _ = y
-            return (0, 0, 0)
-
-    img = EmptyImage()
-    for _ in range(5):
-        module.process_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
-
-    module.process_frame(uart, state, img, IMAGE_WIDTH, IMAGE_HEIGHT)
-
-    event_frames = [
-        module.decode_frame(frame)
-        for frame in uart.writes
-        if module.decode_frame(frame) is not None
-        and module.decode_frame(frame)["topic"] == module.Topic.ASSISTANT_VISION_EVENT_REPORT
-    ]
-    assert event_frames == []
-
-
-def test_assistant_return_line_below_target_y_does_not_report_finished_event() -> None:
-    """辅车回库黄线模式保留 Y 大于 160 的黄线判定."""
-
-    module = load_assistant()
-    yellow_pixel = yellow_pixel_for(module)
-    state = module.AssistantVisionState()
-    state.handle_control_line(
-        assistant_sync_frame(
-            30,
-            module.State.RETURN_FOLLOW,
-            module.Target.NONE,
-            module.Task.RETURN_GARAGE_LINE,
-        )
-    )
-    uart = FakeUART()
-
-    class LowerYellowBlob:
-        def rect(self):
-            return (150, 230, 20, 20)
-
-        def area(self):
-            return 400
-
-    class LowerYellowImage:
-        def height(self):
-            return IMAGE_HEIGHT
-
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            _ = thresholds
-            _ = pixels_threshold
-            _ = area_threshold
-            _ = merge
-            raise AssertionError("回库黄线算法不应调用 find_blobs")
-
-        def get_pixel(self, x, y):
-            logical_x = IMAGE_WIDTH - 1 - int(x)
-            logical_y = IMAGE_HEIGHT - 1 - int(y)
-            if 130 <= logical_x <= 190 and 230 <= logical_y <= 250:
-                return yellow_pixel
-            return (0, 0, 0)
-
-    for _ in range(6):
-        module.process_frame(uart, state, LowerYellowImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
-
-    event_frames = [
-        module.decode_frame(frame)
-        for frame in uart.writes
-        if module.decode_frame(frame) is not None
-        and module.decode_frame(frame)["topic"] == module.Topic.ASSISTANT_VISION_EVENT_REPORT
-    ]
-    assert event_frames == []
-
-
-def test_assistant_return_line_runtime_does_not_use_blob_detection() -> None:
-    """辅车回库黄线正式路径不使用色块检测."""
-
-    module = load_assistant()
-    state = module.AssistantVisionState()
-    state.handle_control_line(
-        assistant_sync_frame(
-            12,
-            module.State.RETURN_FOLLOW,
-            module.Target.NONE,
-            module.Task.RETURN_GARAGE_LINE,
-        )
-    )
-    uart = FakeUART()
-
-    class RawPixelForbiddenImage:
-        def height(self):
-            return IMAGE_HEIGHT
-
-        def find_blobs(self, thresholds, pixels_threshold, area_threshold, merge):
-            _ = thresholds
-            _ = pixels_threshold
-            _ = area_threshold
-            _ = merge
-            raise AssertionError("回库黄线算法不应调用 find_blobs")
-
-        def get_pixel(self, x, y):
-            _ = x
-            _ = y
-            return (0, 0, 0)
-
-    module.process_frame(uart, state, RawPixelForbiddenImage(), IMAGE_WIDTH, IMAGE_HEIGHT)
-
-    assert len(uart.writes) == 1
-
-
 def test_assistant_run_applies_lens_correction_before_processing() -> None:
     """辅车入口先校准翻转后图像再进入业务处理."""
 
@@ -1898,6 +1565,9 @@ def test_assistant_run_applies_lens_correction_before_processing() -> None:
     class SnapshotImage:
         def __init__(self):
             self.lens_corr_called = False
+
+        def replace(self, **_kwargs):
+            return self
 
         def lens_corr(self, strength, zoom):
             _ = strength

@@ -8,12 +8,6 @@ from pathlib import Path
 _FORMAT = "chromaforge-v1"
 _TARGET = "openmv-find-blobs"
 DEFAULT_RULES_PATH = Path(__file__).with_name("chromaforge-rules.json")
-YELLOW_TASK_NAME = "yellow"
-YELLOW_THRESHOLD_CONSTANTS = (
-    "FINISH_HOOK_YELLOW_THRESHOLD",
-    "RETURN_GARAGE_LINE_YELLOW_THRESHOLD",
-    "RETURN_LINE_YELLOW_THRESHOLD",
-)
 
 
 def _require_document(document):
@@ -43,21 +37,6 @@ def _threshold_tuple(threshold):
 
 def _normalized_object_name(item):
     return str(item.get("name", "")).strip().lower()
-
-
-def _is_yellow_item(item):
-    return _normalized_object_name(item) == YELLOW_TASK_NAME
-
-
-def _yellow_threshold(document):
-    for item in document["objects"]:
-        if not _is_yellow_item(item):
-            continue
-        thresholds = item.get("thresholds", [])
-        if not thresholds:
-            return None
-        return _threshold_tuple(thresholds[0])
-    return None
 
 
 def _object_blob_params(document, item):
@@ -90,8 +69,6 @@ def _task_entries(document, objects):
         name = _normalized_object_name(item)
         if not name:
             raise ValueError("物体名称不能为空")
-        if name == YELLOW_TASK_NAME:
-            continue
         thresholds = [_threshold_tuple(threshold) for threshold in item.get("thresholds", [])]
         if not thresholds:
             continue
@@ -168,15 +145,6 @@ def _find_assignment_line(lines, constant_name):
     raise ValueError("未找到 %s 配置入口" % constant_name)
 
 
-def _replace_assignment_if_present(lines, constant_name, value):
-    prefix = "%s = " % constant_name
-    formatted = "%s = %s" % (constant_name, _format_threshold(value))
-    for index, line in enumerate(lines):
-        if line.startswith(prefix):
-            lines[index] = formatted
-    return lines
-
-
 def _find_task_block(lines, task_constant_name):
     task_start = None
     for index, line in enumerate(lines):
@@ -207,14 +175,6 @@ def build_role_source(source_text, export_json, task_constant_name="TASKS"):
     task_lines.extend(_format_task(entry) for entry in entries)
     task_lines.append(")")
     lines = lines[:start] + task_lines + lines[end:]
-    yellow_threshold = _yellow_threshold(document)
-    if yellow_threshold is not None:
-        for constant_name in YELLOW_THRESHOLD_CONSTANTS:
-            lines = _replace_assignment_if_present(
-                lines,
-                constant_name,
-                yellow_threshold,
-            )
     return "\n".join(lines) + "\n"
 
 

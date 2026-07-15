@@ -25,7 +25,7 @@
 
 ## 入口接口风格
 
-- `master/main.py` 与 `assistant/main.py` 的接口风格保持一致。
+- `master/run.py` 与 `assistant/run.py` 的接口风格保持一致; 各角色 `main.py` 只负责导入 `run` 模块并启动正式运行函数。
 - 当前轮次真正处理的对象应显式传入接口, 例如 `img`。
 - 由当前处理对象可直接得到的派生信息, 例如图像宽高, 不作为参数层层下传。
 - 当前运行态只维护一份的共享状态, 统一放在入口级 `state` 对象中读取。
@@ -42,12 +42,12 @@
 
 ### OpenART Vision master
 
-`master/main.py` 运行在主车 OpenART 上, 负责物体搜索视觉链路:
+`master/run.py` 运行在主车 OpenART 上, 负责物体搜索视觉链路:
 
 - 接收 RT1021 下发的主车视觉同步帧, body 字段为 `context_id/state/target/arg`。
 - 使用主车视觉同步 topic 的 ACK 帧确认可靠同步包。
-- `master/main.py` 按阶段切换识别方式：第一次找目标使用 YOLO 与色块混合，搬运前最后对正只使用 YOLO，绕行修正与搬运结束判定只使用色块，回库黄线任务跳过物体 YOLO。
-- 主车纯 YOLO 阶段按可调的隔帧间隔触发模型推理，间隔帧沿用上一帧目标结果，避免每帧都发停车控制。
+- 主车物体阶段由本地开关选择纯 YOLO 或纯色块模式, 每张图像只运行当前模式对应的检测器。
+- 主车搜索候选类别连续三帧保持一致后才锁定, 类别变化或空帧会重新计数。
 - 基于候选目标识别框中心点计算搜索 P 环。
 - 输出主车搜索速度短帧, body 字段为 `vx/vy/omega/has_omega`, 其中 `omega=0`、`has_omega=0`。
 - 主车绕行修正阶段输出独立 `vx/vy` 平移修正, 底盘侧负责绕行动作解算。
@@ -55,7 +55,6 @@
 - 在 task 条件满足时输出主车视觉事件回报帧, body 字段为 `context_id/event/value`。
 - `arg=1` 表示主车物体搜索 task 配置, 稳定满足条件后回报 `TARGET_FOUND=6`。
 - `arg=2` 表示主车搬运入口对正 task 配置, 稳定满足条件后回报 `ALIGNED=7`。
-- `arg=5` 表示主车回库黄线 task 配置, 只在允许判定窗口打开后按黄线 touch 判据回报 `RETURN_LINE_ALIGNED=10`。
 - 主车搜索目标点按 task 配置编号切换：`arg=1` 使用寻找阶段目标点，默认 `x=160, y=210`；`arg=2` 使用搬运入口对正目标点，默认 `x=160, y=240`。
 - task 判定使用物体中心相对目标点的横向误差。
 - task 判定使用物体底边相对目标点的纵向误差。
@@ -64,12 +63,12 @@
 
 ### OpenART Vision assistant
 
-`assistant/main.py` 运行在辅车 OpenART 上, 负责辅车跟随主车色标和辅车找目标物体:
+`assistant/run.py` 运行在辅车 OpenART 上, 负责辅车跟随主车色标和辅车找目标物体:
 
 - 跟随模式识别主车色标。
 - 找物体模式可通过代码开关选择色块阈值或 YOLO 模型识别目标物体。
-- `assistant/main.py` 按阶段切换识别方式：第一次找目标使用 YOLO 与色块混合，搬运前最后对正只使用 YOLO，绕行修正与正式搬运只使用色块，跟随与回库黄线任务跳过物体 YOLO。
-- 辅车纯 YOLO 阶段按可调的隔帧间隔触发模型推理，间隔帧沿用上一帧目标结果，避免每帧都发停车控制。
+- 辅车物体阶段由本地开关选择纯 YOLO 或纯色块模式, 每张图像只运行当前模式对应的检测器。
+- 色标跟随使用独立的色块算法, 不进入物体识别模式路由。
 - 在 OpenART 端完成角色内阶段判断。
 - 输出辅车视觉速度修正短帧, body 字段为 `vx/vy/omega/has_omega`, 其中 `omega=0`、`has_omega=0`。
 - 辅车绕行修正阶段输出独立 `vx/vy` 平移修正, 底盘侧负责绕行动作解算。
@@ -82,8 +81,8 @@
 ## 辅车找物体规则
 
 - 找物体模式可通过代码开关选择色块阈值或 YOLO 模型，与主车目标搜索保持一致。
-- `assistant/main.py` 在混合识别阶段先基于 YOLO ROI 和标定阈值尝试短期跟踪, 跟踪失手时短时保留预测目标, 连续失败或达到上限后回退到 YOLO；纯 YOLO 阶段不允许回退到色块，纯色块阶段不触发 YOLO。
-- 纯 YOLO 阶段的隔帧间隔可分别通过 `MASTER_YOLO_ONLY_INTERVAL_FRAMES` 与 `ASSISTANT_YOLO_ONLY_INTERVAL_FRAMES` 调整。
+- YOLO 模式逐图执行模型, 色块模式逐图使用本地标定阈值。
+- 单帧无有效候选时按目标丢失处理, 不复用上一张图像的候选或检测框。
 - 找物体目标点按同步配置编号切换，可通过对应目标点参数调整。
 - 找物体同步 `arg=1` 使用寻找阶段目标点，默认 `x=160, y=210`。
 - 搬运入口同步 `arg=2` 使用推行前对正目标点，默认 `x=160, y=240`。
@@ -91,22 +90,36 @@
 - 纵向控制目标为目标底边对齐当前目标点。
 - 无有效目标时使用配置的搜索速度。
 - 目标满足面积下限并连续进入横向、纵向容差窗口后, 按当前同步配置回报 `TARGET_FOUND` 或 `ALIGNED`。
-- 纯预测帧只用于补连续控制, 不触发可靠事件。
 - 未确认的可靠事件按低频节奏重复发送。
 
 ## 主车视觉发送规则
 
-- `master/main.py` 的 `v` 数据流包直接写出, 不执行发送前后延时。
-- `master/main.py` 的 `v` 数据流包不等待 task 上下文建立。
-- `master/main.py` 的可靠帧在当前入口层直接写出, 不额外插入发送保护延时。
+- `master/run.py` 的 `v` 数据流包直接写出, 不执行发送前后延时。
+- `master/run.py` 的 `v` 数据流包不等待 task 上下文建立。
+- `master/run.py` 的可靠帧在当前入口层直接写出, 不额外插入发送保护延时。
 - 未确认的 `r` 事件按低频节奏重复发送, 不随每帧图像重复写出。
-- 主通信串口: `UART(2)`。
+- 主通信串口: `UART(12)`。
 - RT1021 接收串口: `UART6`。
 - 默认波特率: `115200`。
 
+## 上电状态指示
+
+- 白灯在视觉启动和正常运行期间保持关闭。
+- RGB 绿灯常亮表示初始化和首帧准备; YOLO 模型在相机初始化前加载且不执行上电推理, 色块模式在相机初始化后执行检测预热。每次成功写出启动 READY 后翻转一次。
+- 本地启动握手完成后蓝灯慢闪, 表示正在等待首个正式任务; 正式逐帧运行时每帧翻转一次。
+- 启动或运行发生致命错误时红灯常亮, 白灯关闭。
+- 致命错误的完整异常栈覆盖写入 `/sd/vision_error.log`, 保留最近一次错误。
+- 调试模式完成首帧准备后直接进入逐帧蓝灯指示, 不执行启动握手。
+
+## 调试模式
+
+- 调试模式上电后直接持续显示物体识别结果, 不初始化或处理通信。
+- 识别来源由 `OBJECT_DETECTION_USE_YOLO` 决定, YOLO 与色块模式使用同一套候选绘制行为。
+- 调试画面显示候选框、选中目标和目标点, 不发送速度、事件或 ACK。
+
 ## 角色部署
 
-每个角色目录各自维护独立构建脚本。脚本会读取角色目录外部 `calibration/` 下的共享标定文件，更新本角色源码入口，并上传到板端目录。
+每个角色目录各自维护独立构建脚本。脚本会把本角色的 `main.py` 与 `run.py` 上传到板端目录。
 
 ```bash
 ./assistant/build.sh
@@ -129,8 +142,8 @@ TARGET_DIR=/path/to/device ./master/build.sh
 
 ## 物体识别开关
 
-- `master/main.py` 中的 `OBJECT_DETECTION_USE_YOLO`
-- `assistant/main.py` 中的 `OBJECT_DETECTION_USE_YOLO`
+- `master/run.py` 中的 `OBJECT_DETECTION_USE_YOLO`
+- `assistant/run.py` 中的 `OBJECT_DETECTION_USE_YOLO`
 
 设为 `False` 时使用当前色块阈值识别，设为 `True` 时使用 `yolo.tflite` 模型识别。
 
@@ -142,8 +155,8 @@ TARGET_DIR=/path/to/device ./master/build.sh
 
 ```bash
 uv run python calibration/chromaforge_export_adapter.py \
-  --source master/main.py \
-  --output /tmp/master-main.py \
+  --source master/run.py \
+  --output /tmp/master-run.py \
   --task-constant-name OBJECT_TASKS
 ```
 

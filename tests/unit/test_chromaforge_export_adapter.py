@@ -3,7 +3,6 @@
 # pyright: reportAttributeAccessIssue=false
 
 import json
-import os
 import subprocess
 
 from calibration.chromaforge_export_adapter import (
@@ -12,43 +11,6 @@ from calibration.chromaforge_export_adapter import (
     build_role_source,
     load_rules_json,
 )
-
-
-def _run_role_build_script_preserving_sources(script_path, target_dir, preserved_sources=None):
-    root_dir = DEFAULT_RULES_PATH.parent.parent
-    if preserved_sources is None:
-        preserved_sources = ("master/main.py", "assistant/main.py")
-    originals = {}
-    for relative_path in preserved_sources:
-        source_path = root_dir / relative_path
-        originals[source_path] = source_path.read_text(encoding="utf-8")
-    try:
-        return subprocess.run(
-            ["bash", script_path],
-            check=True,
-            cwd=root_dir,
-            env={
-                "PATH": os.environ["PATH"],
-                "TARGET_DIR": str(target_dir),
-            },
-            capture_output=True,
-            text=True,
-        )
-    finally:
-        for source_path, original_text in originals.items():
-            source_path.write_text(original_text, encoding="utf-8")
-
-
-def _first_yellow_threshold(document):
-    for item in document["objects"]:
-        if str(item.get("name", "")).strip().lower() != "yellow":
-            continue
-        thresholds = item.get("thresholds", [])
-        if not thresholds:
-            return None
-        return "(" + ", ".join(str(value) for value in thresholds[0]) + ")"
-    return None
-
 
 def test_chromaforge_export_builds_openart_threshold_config() -> None:
     document = {
@@ -212,76 +174,6 @@ def test_chromaforge_export_preserves_other_task_tables() -> None:
     assert "('marker', ((1, 2, 3, 4, 5, 6),), 4, 11, 33, 48, False)" in result
 
 
-def test_chromaforge_export_excludes_yellow_from_task_entries() -> None:
-    document = {
-        "format": "chromaforge-v1",
-        "target": "openmv-find-blobs",
-        "objects": [
-            {
-                "id": "obj_red",
-                "name": "red",
-                "require_all_clusters": True,
-                "thresholds": [[1, 2, 3, 4, 5, 6]],
-                "clusters": [],
-            },
-            {
-                "id": "obj_yellow",
-                "name": "Yellow",
-                "require_all_clusters": True,
-                "thresholds": [[7, 8, 9, 10, 11, 12]],
-                "clusters": [],
-            },
-        ],
-    }
-
-    config = build_openart_config(json.dumps(document), task_constant_name="TASKS")
-
-    assert "'red'" in config
-    assert "'Yellow'" not in config
-    assert "(7, 8, 9, 10, 11, 12)" not in config
-
-
-def test_chromaforge_export_binds_yellow_threshold_to_role_source() -> None:
-    document = {
-        "format": "chromaforge-v1",
-        "target": "openmv-find-blobs",
-        "objects": [
-            {
-                "id": "obj_red",
-                "name": "red",
-                "require_all_clusters": True,
-                "thresholds": [[1, 2, 3, 4, 5, 6]],
-                "clusters": [],
-            },
-            {
-                "id": "obj_yellow",
-                "name": "yellow",
-                "require_all_clusters": True,
-                "thresholds": [[7, 8, 9, 10, 11, 12], [13, 14, 15, 16, 17, 18]],
-                "clusters": [],
-            },
-        ],
-    }
-    source = "\n".join(
-        [
-            "TASKS = (",
-            "    ('old', ((0, 0, 0, 0, 0, 0),), 0, 1, 1, 0, True),",
-            ")",
-            "FINISH_HOOK_YELLOW_THRESHOLD = (0, 0, 0, 0, 0, 0)",
-            "RETURN_GARAGE_LINE_YELLOW_THRESHOLD = (1, 1, 1, 1, 1, 1)",
-            "RETURN_LINE_YELLOW_THRESHOLD = (2, 2, 2, 2, 2, 2)",
-        ]
-    )
-
-    result = build_role_source(source, json.dumps(document), task_constant_name="TASKS")
-
-    assert "('red', ((1, 2, 3, 4, 5, 6),), 0, 1, 1, 0, True)" in result
-    assert "'yellow'" not in result
-    assert "FINISH_HOOK_YELLOW_THRESHOLD = (7, 8, 9, 10, 11, 12)" in result
-    assert "RETURN_GARAGE_LINE_YELLOW_THRESHOLD = (7, 8, 9, 10, 11, 12)" in result
-    assert "RETURN_LINE_YELLOW_THRESHOLD = (7, 8, 9, 10, 11, 12)" in result
-
-
 def test_chromaforge_export_loads_default_rules_from_tool_directory() -> None:
     rules = json.loads(load_rules_json())
 
@@ -308,107 +200,3 @@ def test_chromaforge_export_cli_uses_default_rules_file() -> None:
 
     assert "TASKS = (" in result.stdout
     assert "obj_1" not in result.stdout
-
-
-def test_role_build_script_generates_master_output_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "master-device"
-    target_dir.mkdir()
-
-    _run_role_build_script_preserving_sources("master/build.sh", target_dir)
-
-    uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
-    rules = json.loads(load_rules_json())
-    yellow_threshold = _first_yellow_threshold(rules)
-
-    assert "OBJECT_TASKS = (" in uploaded
-    assert "('red'" in uploaded
-    assert "'yellow'" not in uploaded
-    if yellow_threshold is not None:
-        assert "FINISH_HOOK_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
-        assert "RETURN_GARAGE_LINE_YELLOW_THRESHOLD" not in uploaded
-    assert "threshold_index" not in uploaded
-
-
-def test_role_build_script_rewrites_master_source_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "master-copy-only-device"
-    target_dir.mkdir()
-    root_dir = DEFAULT_RULES_PATH.parent.parent
-    source_path = root_dir / "master" / "main.py"
-    original_text = source_path.read_text(encoding="utf-8")
-    modified_text = original_text.replace(
-        "OBJECT_TASKS = (",
-        "OBJECT_TASKS = (\n    ('runtime_only_marker', 1, 2, 3, 4, False),",
-        1,
-    )
-    source_path.write_text(modified_text, encoding="utf-8")
-    try:
-        subprocess.run(
-            ["bash", "master/build.sh"],
-            check=True,
-            cwd=root_dir,
-            env={
-                "PATH": os.environ["PATH"],
-                "TARGET_DIR": str(target_dir),
-            },
-            capture_output=True,
-            text=True,
-        )
-        uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
-        generated_source = source_path.read_text(encoding="utf-8")
-        assert generated_source != modified_text
-        assert uploaded == generated_source
-        assert "runtime_only_marker" not in generated_source
-        assert "threshold_index" not in generated_source
-    finally:
-        source_path.write_text(original_text, encoding="utf-8")
-
-
-def test_role_build_script_generates_assistant_output_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "assistant-device"
-    target_dir.mkdir()
-
-    _run_role_build_script_preserving_sources("assistant/build.sh", target_dir)
-
-    uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
-    rules = json.loads(load_rules_json())
-    yellow_threshold = _first_yellow_threshold(rules)
-
-    assert "OBJECT_TASKS = (" in uploaded
-    assert "('red'" in uploaded
-    assert "'yellow'" not in uploaded
-    if yellow_threshold is not None:
-        assert "RETURN_LINE_YELLOW_THRESHOLD = %s" % yellow_threshold in uploaded
-
-
-def test_role_build_script_rewrites_assistant_source_from_shared_rules(tmp_path) -> None:
-    target_dir = tmp_path / "assistant-copy-only-device"
-    target_dir.mkdir()
-    root_dir = DEFAULT_RULES_PATH.parent.parent
-    source_path = root_dir / "assistant" / "main.py"
-    original_text = source_path.read_text(encoding="utf-8")
-    modified_text = original_text.replace(
-        "OBJECT_TASKS = (",
-        "OBJECT_TASKS = (\n    ('runtime_only_marker', 1, 2, 3, 4, False),",
-        1,
-    )
-    source_path.write_text(modified_text, encoding="utf-8")
-    try:
-        subprocess.run(
-            ["bash", "assistant/build.sh"],
-            check=True,
-            cwd=root_dir,
-            env={
-                "PATH": os.environ["PATH"],
-                "TARGET_DIR": str(target_dir),
-            },
-            capture_output=True,
-            text=True,
-        )
-        uploaded = (target_dir / "main.py").read_text(encoding="utf-8")
-        generated_source = source_path.read_text(encoding="utf-8")
-        assert generated_source != modified_text
-        assert uploaded == generated_source
-        assert "runtime_only_marker" not in generated_source
-        assert "threshold_index" not in generated_source
-    finally:
-        source_path.write_text(original_text, encoding="utf-8")

@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ASSISTANT_MAIN_PATH = ROOT / "assistant" / "main.py"
+ASSISTANT_MAIN_PATH = ROOT / "assistant" / "run.py"
 
 FRAME_BODY_SIZE = 10
 FRAME_HEAD = 0xA5
@@ -27,28 +27,28 @@ TOPIC_ASSISTANT_VISION_EVENT_REPORT = 0x13
 _SCALE = 1000.0
 
 
-def role_entry_path(role: str, entry_name: str = "main.py") -> Path:
+def role_entry_path(role: str, entry_name: str = "run.py") -> Path:
     """返回指定角色的视觉入口路径."""
 
     return ROOT / role / entry_name
 
 
 def role_main_path(role: str) -> Path:
-    """返回指定角色的默认视觉入口路径."""
+    """返回指定角色的正式视觉运行脚本路径."""
 
-    return role_entry_path(role, "main.py")
+    return role_entry_path(role, "run.py")
 
 
 def load_main_module(module_name: str):
-    """按真实模块导入方式加载辅车 main.py, 但不触发运行入口."""
+    """按真实模块导入方式加载辅车 run.py, 但不触发运行入口."""
 
     return load_role_main_module("assistant", module_name)
 
 
 def load_role_main_module(role: str, module_name: str):
-    """按真实模块导入方式加载指定角色 main.py, 但不触发运行入口."""
+    """按真实模块导入方式加载指定角色 run.py, 但不触发运行入口."""
 
-    return load_role_entry_module(role, "main.py", module_name)
+    return load_role_entry_module(role, "run.py", module_name)
 
 
 def load_role_entry_module(role: str, entry_name: str, module_name: str):
@@ -88,7 +88,7 @@ def _install_board_runtime_stubs() -> None:
 
     if "tf" not in sys.modules:
         tf_module = types.ModuleType("tf")
-        tf_module.load = lambda path: path
+        tf_module.load = lambda path, load_to_fb=False: path
         tf_module.detect = lambda _net, _img: ()
         sys.modules["tf"] = tf_module
 
@@ -117,6 +117,25 @@ def _install_board_runtime_stubs() -> None:
 
         machine_module.UART = FakeUART
         sys.modules["machine"] = machine_module
+
+    if "pyb" not in sys.modules:
+        pyb_module = types.ModuleType("pyb")
+
+        class FakeLED:
+            def __init__(self, led_id):
+                self.led_id = int(led_id)
+
+            def on(self):
+                return None
+
+            def off(self):
+                return None
+
+            def toggle(self):
+                return None
+
+        pyb_module.LED = FakeLED
+        sys.modules["pyb"] = pyb_module
 
 
 def encode_frame(mode: int, topic: int, seq: int, body: bytes) -> bytes:
@@ -221,56 +240,30 @@ def decode_master_vision_hook_sync_body(body: bytes):
     }
 
 
-def _pack_i8(value: int) -> int:
-    value = int(value)
-    if value < 0:
-        value += 256
-    return value
-
-
-def _unpack_i8(value: int) -> int:
-    value = int(value)
-    if value >= 128:
-        return value - 256
-    return value
-
-
-def encode_assistant_vision_task_sync_body(state: int, target: int, arg: int, threshold=None) -> bytes:
+def encode_assistant_vision_task_sync_body(state: int, target: int, arg: int) -> bytes:
     """编码辅车视觉同步 body."""
 
-    if threshold is None:
-        threshold = (0, 0, 0, 0, 0, 0)
-    return bytes([int(state), int(target)]) + _pack_i16(arg) + bytes(
-        _pack_i8(value) for value in threshold
-    )
+    return bytes([int(state), int(target)]) + _pack_i16(arg)
 
 
 def decode_assistant_vision_task_sync_body(body: bytes):
     """解码辅车视觉同步 body."""
 
-    packet = {
+    return {
         "state": int(body[0]),
         "target": int(body[1]),
         "arg": _unpack_i16(body, 2),
     }
-    threshold = tuple(_unpack_i8(value) for value in body[4:10])
-    if any(threshold):
-        packet["threshold"] = threshold
-    return packet
 
 
 def decode_master_vision_event_report_body(body: bytes):
     """解码主车视觉事件 body."""
 
-    packet = {
+    return {
         "context_id": int(body[0]),
         "event": int(body[1]),
         "value": _unpack_i16(body, 2),
     }
-    threshold = tuple(_unpack_i8(value) for value in body[4:10])
-    if any(threshold):
-        packet["threshold"] = threshold
-    return packet
 
 
 def decode_assistant_vision_event_report_body(body: bytes):
@@ -282,14 +275,14 @@ def decode_assistant_vision_event_report_body(body: bytes):
     }
 
 
-def assistant_sync_frame(seq: int, state: int, target: int, arg: int, threshold=None) -> bytes:
+def assistant_sync_frame(seq: int, state: int, target: int, arg: int) -> bytes:
     """构造辅车视觉同步帧."""
 
     return encode_frame(
         MODE_TCP,
         TOPIC_ASSISTANT_VISION_TASK_SYNC,
         seq,
-        encode_assistant_vision_task_sync_body(state, target, arg, threshold),
+        encode_assistant_vision_task_sync_body(state, target, arg),
     )
 
 
