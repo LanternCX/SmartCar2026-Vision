@@ -285,6 +285,34 @@ def test_master_main_new_search_task_clears_previous_yolo_class_lock() -> None:
     assert tuple(candidate[0] for candidate in candidates) == ("green",)
 
 
+def test_master_main_search_lock_reselects_before_target_found_and_hardens_afterward() -> None:
+    module = load_master_main()
+    module.OBJECT_STABLE_FRAMES = 3
+    assert module.OBJECT_LOCK_MISS_FRAMES == 3
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.write_data_line = lambda _frame: None
+    red = object_candidate(module, "red", 150, 190, 170, 210)
+    brown = object_candidate(module, "brown", 150, 190, 170, 210)
+    module.state.current_object_candidates = (red,)
+
+    module.process_task_frame(FakeImage())
+    first_miss = module.build_object_candidates(FakeImage(), (brown,))
+    second_miss = module.build_object_candidates(FakeImage(), (brown,))
+    candidates = module.build_object_candidates(FakeImage(), (brown,))
+    module.state.current_object_candidates = candidates
+    module.process_task_frame(FakeImage())
+
+    assert first_miss == ()
+    assert second_miss == ()
+    assert tuple(candidate[0] for candidate in candidates) == ("brown",)
+    assert module.state.object_task_name == "brown"
+    assert module.state.stable_frame_count == 1
+
+    module.state.last_event_context_id = 7
+
+    assert module.build_object_candidates(FakeImage(), (red,)) == ()
+
+
 @pytest.mark.parametrize("use_yolo", (True, False))
 def test_master_main_single_frame_miss_does_not_reuse_previous_candidate(use_yolo) -> None:
     module = load_master_main()

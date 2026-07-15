@@ -115,6 +115,8 @@ OBJECT_X_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_X_PX
 OBJECT_Y_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_Y_PX
 # 判定目标稳定所需连续帧数
 OBJECT_STABLE_FRAMES = 3
+# 搜索阶段锁定类别连续丢失后重新选择所需帧数
+OBJECT_LOCK_MISS_FRAMES = 3
 
 # 搜索阶段横向速度上限
 MASTER_SEARCH_MAX_VX = 5.0
@@ -183,6 +185,7 @@ class RuntimeState:
         self.current_task = None
         self.last_task_context_id = None
         self.stable_frame_count = 0
+        self.object_lock_miss_count = 0
         self.next_event_seq = int(next_event_seq) % SEQ_RING_SIZE
         self.pending_event = None
         self.pending_event_last_sent_ms = None
@@ -592,6 +595,17 @@ def current_blob_task_name():
     return None
 
 
+def is_unconfirmed_search_task():
+    current_task = state.current_task
+    return (
+        current_task is not None
+        and int(current_task["state"]) == int(State.SEARCH_OBJECT)
+        and int(current_task["target"]) == int(Target.OBJECT)
+        and int(current_task["arg"]) == int(Task.SEARCH)
+        and state.last_event_context_id != int(current_task["context_id"])
+    )
+
+
 def _object_task_thresholds(task_name):
     for task in OBJECT_TASKS:
         if task[0] == task_name:
@@ -725,6 +739,21 @@ def build_object_candidates(img, yolo_candidates):
         and int(current_task["target"]) == int(Target.OBJECT)
     ):
         state.current_detection_source = "yolo"
+        if is_unconfirmed_search_task():
+            locked_task_name = state.object_task_name
+            if locked_task_name is None:
+                state.object_lock_miss_count = 0
+                return tuple(yolo_candidates)
+            for candidate in yolo_candidates:
+                if candidate[0] == locked_task_name:
+                    state.object_lock_miss_count = 0
+                    return tuple(yolo_candidates)
+            state.object_lock_miss_count += 1
+            if state.object_lock_miss_count < int(OBJECT_LOCK_MISS_FRAMES):
+                return ()
+            state.object_task_name = None
+            state.object_lock_miss_count = 0
+            return tuple(yolo_candidates)
         task_name = current_blob_task_name()
         if task_name is None:
             return tuple(yolo_candidates)
@@ -916,6 +945,15 @@ def build_observation_and_candidates():
     if not current_object_candidates:
         return build_observation(0, 0, 0, 0), None, None, current_object_candidates
     candidates = current_object_candidates
+    selection_candidates = candidates
+    if is_unconfirmed_search_task() and state.object_task_name is not None:
+        locked_candidates = tuple(
+            candidate
+            for candidate in list(candidates)
+            if candidate[0] == state.object_task_name
+        )
+        if locked_candidates:
+            selection_candidates = locked_candidates
     target_x, target_y = build_search_target_point(current_task_config_id())
     current_task = state.current_task
     if (
@@ -925,11 +963,11 @@ def build_observation_and_candidates():
         and int(current_task["arg"]) == int(Task.SEARCH)
         and IS_FINAL_ROUND
     ):
-        selected = choose_search_candidate(candidates)
+        selected = choose_search_candidate(selection_candidates)
         if selected is None:
             return build_observation(0, 0, 0, 0), None, None, candidates
     else:
-        selected = choose_best_candidate(candidates, target_x, target_y)
+        selected = choose_best_candidate(selection_candidates, target_x, target_y)
     task_name, center_x, bottom_y, area, best_blob = selected
     return (
         build_observation(1, center_x, bottom_y, area),
@@ -1268,6 +1306,7 @@ def handle_control_frame(frame_bytes):
             state.last_task_context_id = context_id
             state.stable_frame_count = 0
             if int(packet["arg"]) == int(Task.SEARCH):
+                state.object_lock_miss_count = 0
                 if state.object_task_name is not None:
                     state.last_object_edge_group = object_edge_group(state.object_task_name)
                 state.object_task_name = None
@@ -1331,6 +1370,8 @@ def process_task_frame(img):
         return
     observation, best_blob, task_name, _candidates = build_observation_and_candidates()
     if best_blob is not None:
+        if task_name != state.object_task_name:
+            state.stable_frame_count = 0
         state.object_task_name = task_name
     if is_orbit_task_context():
         velocity = build_orbit_correction_velocity_from_observation(observation)
