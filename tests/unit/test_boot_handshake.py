@@ -194,7 +194,7 @@ def test_visual_boot_ready_accepts_confirm_and_sends_ack(role) -> None:
 
 
 @pytest.mark.parametrize("role", ("master", "assistant"))
-def test_visual_prepares_lighting_and_model_before_opening_uart(role) -> None:
+def test_visual_keeps_fill_light_off_before_opening_uart(role) -> None:
     module = load_role_main_module(role, "vision_%s_boot_order" % role)
     module.reset_runtime_state()
     module.MASTER_DEBUG_DISPLAY_ENABLED = False if role == "master" else getattr(
@@ -214,7 +214,8 @@ def test_visual_prepares_lighting_and_model_before_opening_uart(role) -> None:
 
     module.prepare_runtime()
 
-    assert events.index("led4_on") < events.index("model")
+    assert events.index("led4_off") < events.index("model")
+    assert "led4_on" not in events
     assert events.index("model") < events.index("sensor")
     assert events.index("sensor") < events.index("warmup")
     assert events.index("warmup") < events.index("uart")

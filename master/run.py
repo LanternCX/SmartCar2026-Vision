@@ -1419,7 +1419,7 @@ def capture_image():
 
 
 def warm_up_detection():
-    """使用正式照明完成首帧准备和色块检测预热."""
+    """完成首帧准备和色块检测预热."""
 
     img = capture_image()
     img.lens_corr(strength=2.8, zoom=1.0)
@@ -1435,7 +1435,7 @@ def init_status_lights():
     white = LED(4)
     red.off()
     blue.off()
-    white.on()
+    white.off()
     green.on()
     return red, green, blue, white
 
