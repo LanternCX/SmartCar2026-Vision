@@ -1060,14 +1060,8 @@ def _build_object_y_velocity(err_y):
     err_y = float(err_y)
     if abs(err_y) <= float(OBJECT_APPROACH_DEADZONE_Y_PX):
         return 0.0
-    image_height = float(state.current_image_height)
-    scaled_error = err_y * (
-        float(OBJECT_APPROACH_MAX_VY)
-        / abs(float(OBJECT_APPROACH_KP_Y))
-        / float(image_height)
-    )
     return _apply_min_speed(
-        scaled_error * float(OBJECT_APPROACH_KP_Y) * current_frame_time_scale(),
+        err_y * float(OBJECT_APPROACH_KP_Y) * current_frame_time_scale(),
         float(OBJECT_APPROACH_MIN_SPEED) * current_frame_time_scale(),
         float(OBJECT_APPROACH_MAX_VY) * current_frame_time_scale(),
     )
@@ -1103,14 +1097,8 @@ def _build_object_orbit_y_velocity(err_y):
         return 0.0
     if float(OBJECT_ORBIT_KP_Y) == 0.0:
         return 0.0
-    image_height = float(state.current_image_height)
-    scaled_error = err_y * (
-        float(OBJECT_ORBIT_MAX_VY)
-        / abs(float(OBJECT_ORBIT_KP_Y))
-        / float(image_height)
-    )
     return _apply_min_speed(
-        scaled_error * float(OBJECT_ORBIT_KP_Y) * current_frame_time_scale(),
+        err_y * float(OBJECT_ORBIT_KP_Y) * current_frame_time_scale(),
         float(OBJECT_ORBIT_MIN_SPEED) * current_frame_time_scale(),
         float(OBJECT_ORBIT_MAX_VY) * current_frame_time_scale(),
     )

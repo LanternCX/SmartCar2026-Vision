@@ -1151,11 +1151,7 @@ def test_assistant_main_orbit_outputs_independent_xy_velocity_correction() -> No
 
     frame = module.decode_frame(uart.writes[0])
     body = module.decode_velocity_body(frame["body"])
-    expected_y = -20.0 * (
-        float(module.OBJECT_ORBIT_MAX_VY)
-        / abs(float(module.OBJECT_ORBIT_KP_Y))
-        / float(legacy_tests.IMAGE_HEIGHT)
-    ) * float(module.OBJECT_ORBIT_KP_Y)
+    expected_y = -20.0 * float(module.OBJECT_ORBIT_KP_Y)
     assert body["vx"] == pytest.approx(40.0 * module.OBJECT_ORBIT_KP_X)
     assert body["vy"] == pytest.approx(expected_y)
 

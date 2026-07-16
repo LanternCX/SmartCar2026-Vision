@@ -1109,14 +1109,8 @@ def _build_search_y_velocity(err_y):
     if abs(err_y) <= float(MASTER_SEARCH_DEADZONE_Y_PX):
         return 0.0
     time_scale = current_frame_time_scale()
-    image_height = float(state.current_image_height)
-    scaled_error = err_y * (
-        float(MASTER_SEARCH_MAX_VY)
-        / abs(float(MASTER_SEARCH_KP_Y))
-        / float(image_height)
-    )
     return _apply_min_speed(
-        scaled_error * float(MASTER_SEARCH_KP_Y) * time_scale,
+        err_y * float(MASTER_SEARCH_KP_Y) * time_scale,
         float(MASTER_SEARCH_MAX_VY) * time_scale,
         float(MASTER_SEARCH_MIN_SPEED) * time_scale,
     )
@@ -1145,14 +1139,8 @@ def _build_orbit_y_velocity(err_y):
     if float(MASTER_ORBIT_KP_Y) == 0.0:
         return 0.0
     time_scale = current_frame_time_scale()
-    image_height = float(state.current_image_height)
-    scaled_error = err_y * (
-        float(MASTER_ORBIT_MAX_VY)
-        / abs(float(MASTER_ORBIT_KP_Y))
-        / float(image_height)
-    )
     return _apply_min_speed(
-        scaled_error * float(MASTER_ORBIT_KP_Y) * time_scale,
+        err_y * float(MASTER_ORBIT_KP_Y) * time_scale,
         float(MASTER_ORBIT_MAX_VY) * time_scale,
         float(MASTER_ORBIT_MIN_SPEED) * time_scale,
     )
