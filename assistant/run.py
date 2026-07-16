@@ -116,19 +116,19 @@ OBJECT_MISSING_SEARCH_VY = 2.0
 # 接近目标阶段横向控制比例系数
 OBJECT_APPROACH_KP_X = 0.02
 # 接近目标阶段纵向控制比例系数
-OBJECT_APPROACH_KP_Y = -0.20
+OBJECT_APPROACH_KP_Y = -0.05
 # 接近目标阶段最小输出速度
-OBJECT_APPROACH_MIN_SPEED = 1.2
+OBJECT_APPROACH_MIN_SPEED = 1.5
 # 接近目标阶段横向死区, 单位为 px
-OBJECT_APPROACH_DEADZONE_X_PX = 20.0
+OBJECT_APPROACH_DEADZONE_X_PX = 30.0
 # 接近目标阶段纵向死区, 单位为 px
-OBJECT_APPROACH_DEADZONE_Y_PX = 12.0
+OBJECT_APPROACH_DEADZONE_Y_PX = 30.0
 # 目标横向对正容差, 单位为 px
 OBJECT_X_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_X_PX
 # 目标纵向对正容差, 单位为 px
 OBJECT_Y_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_Y_PX
 # 判定目标稳定所需连续帧数
-OBJECT_STABLE_FRAMES = 3
+OBJECT_STABLE_FRAMES = 1
 
 # 接近目标阶段横向速度上限
 OBJECT_APPROACH_MAX_VX = 5.0
@@ -138,7 +138,7 @@ OBJECT_APPROACH_MAX_VY = 5.0
 # 绕目标阶段横向速度修正比例系数
 OBJECT_ORBIT_KP_X = 0.015
 # 绕目标阶段纵向速度修正比例系数
-OBJECT_ORBIT_KP_Y = -0.30
+OBJECT_ORBIT_KP_Y = -0.05
 # 绕目标阶段最小输出速度
 OBJECT_ORBIT_MIN_SPEED = 0.0
 # 绕目标阶段横向死区, 单位为 px
@@ -1280,7 +1280,7 @@ class RuntimeState:
                 return (
                     float(value) >= self.min_area
                     and abs(float(x)) <= self.tolerance_x
-                    and float(y) < 0.0
+                    and abs(float(y)) <= self.tolerance_y
                 )
         return (
             float(value) >= self.min_area

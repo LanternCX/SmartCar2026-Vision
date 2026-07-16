@@ -1399,6 +1399,35 @@ def test_assistant_main_event_helpers_reflect_global_state() -> None:
         "event": module.Event.TARGET_FOUND,
         "value": 300,
     }
+
+
+def test_assistant_transport_alignment_accepts_error_inside_stopping_deadzone() -> None:
+    """搬运入口停车范围内应直接完成对正."""
+
+    module = load_assistant_main()
+    state = module.AssistantVisionState(stable_frames=1)
+    state.handle_control_line(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+
+    state.accept_object_observation(
+        (0.0, module.OBJECT_APPROACH_DEADZONE_Y_PX, 300.0)
+    )
+
+    legacy_tests.assert_assistant_event(
+        module,
+        state.next_event_frame(),
+        12,
+        module.Event.ALIGNED,
+        300,
+    )
+
+
 def test_assistant_run_applies_lens_correction_before_processing() -> None:
     """辅车非物体任务先做镜头校正, 且不缓存物体候选."""
 
