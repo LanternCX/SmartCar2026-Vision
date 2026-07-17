@@ -971,6 +971,7 @@ def test_master_main_search_uses_yolo_candidates_for_velocity_and_target_found()
 
 def test_master_main_search_prefers_previous_target_edge_among_two_outer_candidates() -> None:
     module = load_master_main()
+    module.IS_FINAL_ROUND = True
     module.state.object_task_name = "brown"
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     red = object_candidate(module, "red", 10, 20, 30, 60)
@@ -986,6 +987,7 @@ def test_master_main_search_prefers_previous_target_edge_among_two_outer_candida
 
 def test_master_main_first_search_prefers_right_target_edge() -> None:
     module = load_master_main()
+    module.IS_FINAL_ROUND = True
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     brown = object_candidate(module, "brown", 10, 20, 30, 60)
     red = object_candidate(module, "red", 280, 20, 300, 60)
@@ -1029,6 +1031,7 @@ def test_master_main_final_mode_matches_candidate_side_to_target_edge(
     expected_side,
 ) -> None:
     module = load_master_main()
+    module.IS_FINAL_ROUND = True
     module.state.object_task_name = previous_task_name
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     left = object_candidate(module, candidate_task_name, left_x - 10, 20, left_x + 10, 60)
@@ -1043,6 +1046,7 @@ def test_master_main_final_mode_matches_candidate_side_to_target_edge(
 
 def test_master_main_final_mode_selects_single_tennis_on_any_side() -> None:
     module = load_master_main()
+    module.IS_FINAL_ROUND = True
     module.state.object_task_name = "red"
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     tennis = object_candidate(module, "green", 280, 20, 300, 60)
@@ -1057,6 +1061,7 @@ def test_master_main_final_mode_selects_single_tennis_on_any_side() -> None:
 
 def test_master_main_search_ignores_candidate_occluded_on_lower_center_line() -> None:
     module = load_master_main()
+    module.IS_FINAL_ROUND = True
     module.state.object_task_name = "red"
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     red = object_candidate(module, "red", 100, 120, 120, 200)
