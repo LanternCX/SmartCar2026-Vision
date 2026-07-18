@@ -223,13 +223,8 @@ def expected_object_y_velocity(module, err_y):
     err_y = float(err_y)
     if abs(err_y) <= float(module.OBJECT_APPROACH_DEADZONE_Y_PX):
         return 0.0
-    scaled_error = err_y * (
-        float(module.OBJECT_APPROACH_MAX_VY)
-        / abs(float(module.OBJECT_APPROACH_KP_Y))
-        / float(IMAGE_HEIGHT)
-    )
     return expected_axis_velocity(
-        scaled_error,
+        err_y,
         module.OBJECT_APPROACH_KP_Y,
         module.OBJECT_APPROACH_MIN_SPEED,
         module.OBJECT_APPROACH_MAX_VY,

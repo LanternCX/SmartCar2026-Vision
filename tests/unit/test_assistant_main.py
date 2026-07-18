@@ -265,8 +265,8 @@ def test_assistant_main_transport_window_keeps_x_outside_deadzone_candidate() ->
     ) == [candidate]
 
 
-def test_assistant_main_transport_window_rejects_y_outside_candidate() -> None:
-    """辅车搬运窗口必须过滤底边 Y 达到命中线外侧的候选."""
+def test_assistant_main_transport_window_keeps_candidate_on_target_line() -> None:
+    """辅车搬运窗口保留底边位于目标线的候选."""
 
     module = load_assistant_main()
     target_x, target_y = assistant_target_point(module, module.Task.TRANSPORT)
@@ -287,7 +287,7 @@ def test_assistant_main_transport_window_rejects_y_outside_candidate() -> None:
         target_y,
         module.OBJECT_TRANSPORT_WINDOW_X_PX,
         module.OBJECT_TRANSPORT_WINDOW_Y_PX,
-    ) == []
+    ) == candidates
 
 
 def test_assistant_main_transport_window_keeps_xy_inside_candidate() -> None:
@@ -306,8 +306,8 @@ def test_assistant_main_transport_window_keeps_xy_inside_candidate() -> None:
     ) == [candidate]
 
 
-def test_assistant_main_transport_window_rejects_y_above_hit_line_candidate() -> None:
-    """辅车搬运窗口按底边 Y 小于命中线判断纵向命中."""
+def test_assistant_main_transport_window_keeps_candidate_after_target_line() -> None:
+    """辅车搬运窗口保留底边越过目标线的候选."""
 
     module = load_assistant_main()
     target_x, target_y = assistant_target_point(module, module.Task.TRANSPORT)
@@ -319,7 +319,7 @@ def test_assistant_main_transport_window_rejects_y_above_hit_line_candidate() ->
         target_y,
         module.OBJECT_TRANSPORT_WINDOW_X_PX,
         module.OBJECT_TRANSPORT_WINDOW_Y_PX,
-    ) == []
+    ) == [candidate]
 
 
 def test_assistant_main_object_candidates_use_yolo_when_enabled() -> None:
@@ -1151,11 +1151,7 @@ def test_assistant_main_orbit_outputs_independent_xy_velocity_correction() -> No
 
     frame = module.decode_frame(uart.writes[0])
     body = module.decode_velocity_body(frame["body"])
-    expected_y = -20.0 * (
-        float(module.OBJECT_ORBIT_MAX_VY)
-        / abs(float(module.OBJECT_ORBIT_KP_Y))
-        / float(legacy_tests.IMAGE_HEIGHT)
-    ) * float(module.OBJECT_ORBIT_KP_Y)
+    expected_y = -20.0 * float(module.OBJECT_ORBIT_KP_Y)
     assert body["vx"] == pytest.approx(40.0 * module.OBJECT_ORBIT_KP_X)
     assert body["vy"] == pytest.approx(expected_y)
 
@@ -1403,6 +1399,35 @@ def test_assistant_main_event_helpers_reflect_global_state() -> None:
         "event": module.Event.TARGET_FOUND,
         "value": 300,
     }
+
+
+def test_assistant_transport_alignment_accepts_error_inside_stopping_deadzone() -> None:
+    """搬运入口停车范围内应直接完成对正."""
+
+    module = load_assistant_main()
+    state = module.AssistantVisionState(stable_frames=1)
+    state.handle_control_line(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 1),
+        )
+    )
+
+    state.accept_object_observation(
+        (0.0, module.OBJECT_APPROACH_DEADZONE_Y_PX, 300.0)
+    )
+
+    legacy_tests.assert_assistant_event(
+        module,
+        state.next_event_frame(),
+        12,
+        module.Event.ALIGNED,
+        300,
+    )
+
+
 def test_assistant_run_applies_lens_correction_before_processing() -> None:
     """辅车非物体任务先做镜头校正, 且不缓存物体候选."""
 

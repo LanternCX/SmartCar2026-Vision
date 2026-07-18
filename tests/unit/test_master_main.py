@@ -971,6 +971,7 @@ def test_master_main_search_uses_yolo_candidates_for_velocity_and_target_found()
 
 def test_master_main_search_prefers_previous_target_edge_among_two_outer_candidates() -> None:
     module = load_master_main()
+    module.IS_FINAL_ROUND = True
     module.state.object_task_name = "brown"
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     red = object_candidate(module, "red", 10, 20, 30, 60)
@@ -986,6 +987,7 @@ def test_master_main_search_prefers_previous_target_edge_among_two_outer_candida
 
 def test_master_main_first_search_prefers_right_target_edge() -> None:
     module = load_master_main()
+    module.IS_FINAL_ROUND = True
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     brown = object_candidate(module, "brown", 10, 20, 30, 60)
     red = object_candidate(module, "red", 280, 20, 300, 60)
@@ -1029,6 +1031,7 @@ def test_master_main_final_mode_matches_candidate_side_to_target_edge(
     expected_side,
 ) -> None:
     module = load_master_main()
+    module.IS_FINAL_ROUND = True
     module.state.object_task_name = previous_task_name
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     left = object_candidate(module, candidate_task_name, left_x - 10, 20, left_x + 10, 60)
@@ -1043,6 +1046,7 @@ def test_master_main_final_mode_matches_candidate_side_to_target_edge(
 
 def test_master_main_final_mode_selects_single_tennis_on_any_side() -> None:
     module = load_master_main()
+    module.IS_FINAL_ROUND = True
     module.state.object_task_name = "red"
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     tennis = object_candidate(module, "green", 280, 20, 300, 60)
@@ -1057,6 +1061,7 @@ def test_master_main_final_mode_selects_single_tennis_on_any_side() -> None:
 
 def test_master_main_search_ignores_candidate_occluded_on_lower_center_line() -> None:
     module = load_master_main()
+    module.IS_FINAL_ROUND = True
     module.state.object_task_name = "red"
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     red = object_candidate(module, "red", 100, 120, 120, 200)
@@ -1208,15 +1213,22 @@ def test_master_main_search_velocity_deadzone_zeroes_each_axis() -> None:
     assert velocity == (0.0, 0.0)
 
 
-def test_master_main_search_velocity_applies_min_speed_outside_deadzone() -> None:
+def test_master_main_search_velocity_applies_min_speed_outside_deadzone(monkeypatch) -> None:
     module = load_master_main()
     module.state.current_image_height = IMAGE_HEIGHT
+    y_error = float(module.MASTER_SEARCH_DEADZONE_Y_PX) + 0.1
+    kp_sign = 1.0 if float(module.MASTER_SEARCH_KP_Y) > 0.0 else -1.0
+    monkeypatch.setattr(
+        module,
+        "MASTER_SEARCH_KP_Y",
+        kp_sign * float(module.MASTER_SEARCH_MIN_SPEED) / (2.0 * y_error),
+    )
     positive = module.build_search_velocity_from_observation(
         build_search_observation(
             module,
             150.0,
             err_x=float(module.MASTER_SEARCH_DEADZONE_X_PX) + 0.1,
-            err_y=float(module.MASTER_SEARCH_DEADZONE_Y_PX) + 0.1,
+            err_y=y_error,
         )
     )
     negative = module.build_search_velocity_from_observation(
@@ -1224,7 +1236,7 @@ def test_master_main_search_velocity_applies_min_speed_outside_deadzone() -> Non
             module,
             150.0,
             err_x=-(float(module.MASTER_SEARCH_DEADZONE_X_PX) + 0.1),
-            err_y=-(float(module.MASTER_SEARCH_DEADZONE_Y_PX) + 0.1),
+            err_y=-y_error,
         )
     )
 
@@ -1242,7 +1254,7 @@ def test_master_main_search_velocity_clamps_vx_and_vy() -> None:
     module = load_master_main()
     module.state.current_image_height = IMAGE_HEIGHT
     clamp_x = abs(float(module.MASTER_SEARCH_MAX_VX) / float(module.MASTER_SEARCH_KP_X)) + 1.0
-    clamp_y = float(module.state.current_image_height) + 1.0
+    clamp_y = abs(float(module.MASTER_SEARCH_MAX_VY) / float(module.MASTER_SEARCH_KP_Y)) + 1.0
     positive = module.build_search_velocity_from_observation((7, clamp_x, clamp_y, 300.0))
     negative = module.build_search_velocity_from_observation((7, -clamp_x, -clamp_y, 300.0))
 
@@ -1284,10 +1296,19 @@ def test_master_main_slow_frame_interval_reduces_search_velocity() -> None:
 def test_master_main_search_y_velocity_decreases_when_target_gets_closer() -> None:
     module = load_master_main()
     module.state.current_image_height = IMAGE_HEIGHT
-    far_velocity = module.build_search_velocity_from_observation((7, 0.0, -200.0, 1000.0))
-    close_velocity = module.build_search_velocity_from_observation((7, 0.0, -100.0, 1000.0))
+    close_error = -(
+        max(
+            float(module.MASTER_SEARCH_DEADZONE_Y_PX),
+            float(module.MASTER_SEARCH_MIN_SPEED) / abs(float(module.MASTER_SEARCH_KP_Y)),
+        )
+        + 1.0
+    )
+    far_error = close_error - 1.0
+    far_velocity = module.build_search_velocity_from_observation((7, 0.0, far_error, 1000.0))
+    close_velocity = module.build_search_velocity_from_observation((7, 0.0, close_error, 1000.0))
 
     assert close_velocity[1] < far_velocity[1]
+    assert close_velocity[1] == pytest.approx(close_error * module.MASTER_SEARCH_KP_Y)
 
 
 def test_master_main_orbit_outputs_independent_xy_velocity_correction() -> None:
@@ -1324,11 +1345,7 @@ def test_master_main_orbit_outputs_independent_xy_velocity_correction() -> None:
     module.process_task_frame(img)
 
     velocity = latest_velocity(uart)
-    expected_y = -20.0 * (
-        float(module.MASTER_ORBIT_MAX_VY)
-        / abs(float(module.MASTER_ORBIT_KP_Y))
-        / float(IMAGE_HEIGHT)
-    ) * float(module.MASTER_ORBIT_KP_Y)
+    expected_y = -20.0 * float(module.MASTER_ORBIT_KP_Y)
     assert velocity["vx"] == pytest.approx(40.0 * module.MASTER_ORBIT_KP_X)
     assert velocity["vy"] == pytest.approx(expected_y)
     assert len(uart.writes) == 1
