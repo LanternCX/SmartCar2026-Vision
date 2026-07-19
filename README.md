@@ -154,14 +154,14 @@ TARGET_DIR=/path/to/device ./master/build.sh
 - `_ObjectSelectionMode.EDGE`：按候选所在外侧和上一次目标边分组选择。
 - `_ObjectSelectionMode.NEAREST_BOTTOM`：选择离图像底边最近的候选。
 
-默认使用 `_ObjectSelectionMode.NEAREST_BOTTOM`。
+默认使用 `_ObjectSelectionMode.EDGE`。
 
 主车决赛红色目标策略由 `master/run.py` 中的 `RED_SELECTION_MODE` 选择：
 
 - `_RedSelectionMode.ALL`：每次搜索都允许红色参与决赛目标选择。
-- `_RedSelectionMode.LAST`：非最后一次排除红色, 最后一次允许所有颜色参与决赛目标选择。
+- `_RedSelectionMode.LAST`：非最后一次排除红色, 最后一次允许所有颜色参与中心距离选择。
 - `_RedSelectionMode.NEVER`：每次搜索都排除红色。
-- `_RedSelectionMode.FIRST`：第一次只保留红色, 后续排除红色。
+- `_RedSelectionMode.FIRST`：第一次只保留红色并使用中心距离选择, 后续排除红色。
 
 默认使用 `_RedSelectionMode.FIRST`。第一次和最后一次由 RT1021 根据已完成数量和配置总数标记, 识别侧不写死搬运次数。
 

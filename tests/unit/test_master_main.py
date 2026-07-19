@@ -810,7 +810,7 @@ def test_master_main_runtime_state_uses_state_object() -> None:
     assert module.IS_FINAL_ROUND is True
     assert (
         module.FINAL_ROUND_SELECTION_MODE
-        == module._ObjectSelectionMode.NEAREST_BOTTOM
+        == module._ObjectSelectionMode.EDGE
     )
     assert module.RED_SELECTION_MODE == module._RedSelectionMode.FIRST
     assert not hasattr(module, "FINAL_RED_SELECTION_MODE")
@@ -1046,19 +1046,19 @@ def test_master_main_preliminary_mode_uses_nearest_target_candidate() -> None:
     assert task_name == "brown"
 
 
-def test_master_main_final_mode_selects_candidate_nearest_bottom_edge() -> None:
+def test_master_main_final_mode_uses_edge_selection() -> None:
     module = load_master_main()
     module.IS_FINAL_ROUND = True
     module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
     module.handle_control_frame(task_sync_frame(module, context_id=7))
-    centered = object_candidate(module, "red", 150, 180, 170, 200)
-    nearest_bottom = object_candidate(module, "brown", 20, 190, 40, 230)
-    module.state.current_object_candidates = (centered, nearest_bottom)
+    edge = object_candidate(module, "red", 10, 180, 30, 200)
+    centered = object_candidate(module, "brown", 150, 190, 170, 230)
+    module.state.current_object_candidates = (edge, centered)
 
     _, best_blob, task_name, _ = module.build_observation_and_candidates()
 
-    assert best_blob is nearest_bottom[4]
-    assert task_name == "brown"
+    assert best_blob is edge[4]
+    assert task_name == "red"
 
 
 def test_master_main_final_all_mode_keeps_red_in_selection() -> None:
@@ -1071,8 +1071,9 @@ def test_master_main_final_all_mode_keeps_red_in_selection() -> None:
     white = object_candidate(module, "white", 150, 20, 170, 60)
     module.state.current_object_candidates = (red, white)
 
-    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+    _, best_blob, task_name, candidates = module.build_observation_and_candidates()
 
+    assert tuple(candidate[0] for candidate in candidates) == ("red", "white")
     assert best_blob is red[4]
     assert task_name == "red"
 

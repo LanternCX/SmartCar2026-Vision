@@ -25,7 +25,7 @@ class _ObjectSelectionMode:
 
 
 # 决赛目标选择策略
-FINAL_ROUND_SELECTION_MODE = const(_ObjectSelectionMode.NEAREST_BOTTOM)
+FINAL_ROUND_SELECTION_MODE = const(_ObjectSelectionMode.EDGE)
 
 
 # 决赛红色目标策略编号分组
@@ -946,6 +946,8 @@ def choose_search_candidate(candidates):
 
 
 def choose_final_round_candidate(candidates, target_x, target_y):
+    if uses_nearest_final_round_selection():
+        return choose_best_candidate(candidates, target_x, target_y)
     mode = int(FINAL_ROUND_SELECTION_MODE)
     if mode == int(_ObjectSelectionMode.CENTER):
         return choose_best_candidate(candidates, target_x, target_y)
@@ -1037,6 +1039,17 @@ def filter_final_round_candidates(candidates):
     if mode == int(_RedSelectionMode.LAST) and current_task_marks_final_object():
         return tuple(candidates)
     return tuple(candidate for candidate in candidates if candidate[0] != "red")
+
+
+def uses_nearest_final_round_selection():
+    mode = int(RED_SELECTION_MODE)
+    return (
+        mode == int(_RedSelectionMode.LAST)
+        and current_task_marks_final_object()
+    ) or (
+        mode == int(_RedSelectionMode.FIRST)
+        and current_task_marks_first_object()
+    )
 
 
 def build_observation(valid, center_x, bottom_y, area):
