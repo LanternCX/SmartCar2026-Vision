@@ -808,6 +808,10 @@ def test_master_main_runtime_state_uses_state_object() -> None:
     assert module.Topic.MASTER_VISION_EVENT_REPORT == 0x12
     assert module.Task.SEARCH == 1
     assert module.IS_FINAL_ROUND is True
+    assert (
+        module.FINAL_ROUND_SELECTION_MODE
+        == module._ObjectSelectionMode.NEAREST_BOTTOM
+    )
     assert module.RED_SELECTION_MODE == module._RedSelectionMode.FIRST
     assert not hasattr(module, "FINAL_RED_SELECTION_MODE")
     assert module.Event.TARGET_FOUND == 6
@@ -998,17 +1002,16 @@ def test_master_main_final_object_marker_keeps_target_found_event() -> None:
     }
 
 
-def test_master_main_search_prefers_previous_target_edge_among_two_outer_candidates() -> None:
+def test_master_main_edge_selection_prefers_previous_target_edge_among_two_outer_candidates() -> None:
     module = load_master_main()
-    module.IS_FINAL_ROUND = True
-    module.state.object_task_name = "brown"
-    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.state.last_object_edge_group = module.object_edge_group("brown")
     red = object_candidate(module, "red", 10, 20, 30, 60)
     white = object_candidate(module, "white", 280, 20, 300, 60)
     blue = object_candidate(module, "blue", 80, 20, 100, 60)
-    module.state.current_object_candidates = (red, white, blue)
 
-    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+    task_name, _, _, _, best_blob = module.choose_search_candidate(
+        (red, white, blue)
+    )
 
     assert best_blob is white[4]
     assert task_name == "white"
@@ -1043,7 +1046,22 @@ def test_master_main_preliminary_mode_uses_nearest_target_candidate() -> None:
     assert task_name == "brown"
 
 
-def test_master_main_final_all_mode_keeps_red_in_edge_selection() -> None:
+def test_master_main_final_mode_selects_candidate_nearest_bottom_edge() -> None:
+    module = load_master_main()
+    module.IS_FINAL_ROUND = True
+    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    centered = object_candidate(module, "red", 150, 180, 170, 200)
+    nearest_bottom = object_candidate(module, "brown", 20, 190, 40, 230)
+    module.state.current_object_candidates = (centered, nearest_bottom)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is nearest_bottom[4]
+    assert task_name == "brown"
+
+
+def test_master_main_final_all_mode_keeps_red_in_selection() -> None:
     module = load_master_main()
     module.IS_FINAL_ROUND = True
     module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
@@ -1170,7 +1188,7 @@ def test_master_main_final_red_first_mode_excludes_red_after_first_object() -> N
         ("green", "red", 20, 280, "right"),
     ),
 )
-def test_master_main_final_mode_matches_candidate_side_to_target_edge(
+def test_master_main_edge_selection_matches_candidate_side_to_target_edge(
     previous_task_name,
     candidate_task_name,
     left_x,
@@ -1178,15 +1196,11 @@ def test_master_main_final_mode_matches_candidate_side_to_target_edge(
     expected_side,
 ) -> None:
     module = load_master_main()
-    module.IS_FINAL_ROUND = True
-    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
-    module.state.object_task_name = previous_task_name
-    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.state.last_object_edge_group = module.object_edge_group(previous_task_name)
     left = object_candidate(module, candidate_task_name, left_x - 10, 20, left_x + 10, 60)
     right = object_candidate(module, candidate_task_name, right_x - 10, 20, right_x + 10, 60)
-    module.state.current_object_candidates = (left, right)
 
-    _, best_blob, _, _ = module.build_observation_and_candidates()
+    _, _, _, _, best_blob = module.choose_search_candidate((left, right))
 
     expected = left if expected_side == "left" else right
     assert best_blob is expected[4]

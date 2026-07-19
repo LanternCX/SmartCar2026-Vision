@@ -18,6 +18,16 @@ MASTER_DEBUG_DISPLAY_ENABLED = False
 IS_FINAL_ROUND = True
 
 
+class _ObjectSelectionMode:
+    CENTER = const(0)
+    EDGE = const(1)
+    NEAREST_BOTTOM = const(2)
+
+
+# 决赛目标选择策略
+FINAL_ROUND_SELECTION_MODE = const(_ObjectSelectionMode.NEAREST_BOTTOM)
+
+
 # 决赛红色目标策略编号分组
 class _RedSelectionMode:
     ALL = const(0)
@@ -863,6 +873,10 @@ def choose_best_candidate(candidates, target_x, target_y):
     )
 
 
+def choose_nearest_bottom_candidate(candidates):
+    return max(candidates, key=lambda item: float(item[2]))
+
+
 def choose_largest_area_candidate(candidates):
     return max(candidates, key=lambda item: float(item[3]))
 
@@ -920,6 +934,15 @@ def choose_search_candidate(candidates):
         if object_edge_group(candidate[0]) == state.last_object_edge_group:
             return candidate
     return outer_candidates[0]
+
+
+def choose_final_round_candidate(candidates, target_x, target_y):
+    mode = int(FINAL_ROUND_SELECTION_MODE)
+    if mode == int(_ObjectSelectionMode.CENTER):
+        return choose_best_candidate(candidates, target_x, target_y)
+    if mode == int(_ObjectSelectionMode.EDGE):
+        return choose_search_candidate(candidates)
+    return choose_nearest_bottom_candidate(candidates)
 
 
 def update_object_selection(task_name):
@@ -1007,17 +1030,6 @@ def filter_final_round_candidates(candidates):
     return tuple(candidate for candidate in candidates if candidate[0] != "red")
 
 
-def uses_nearest_final_round_selection():
-    mode = int(RED_SELECTION_MODE)
-    return (
-        mode == int(_RedSelectionMode.LAST)
-        and current_task_marks_final_object()
-    ) or (
-        mode == int(_RedSelectionMode.FIRST)
-        and current_task_marks_first_object()
-    )
-
-
 def build_observation(valid, center_x, bottom_y, area):
     context_id = 0
     current_task = state.current_task
@@ -1054,15 +1066,8 @@ def build_observation_and_candidates():
         if locked_candidates:
             selection_candidates = locked_candidates
     target_x, target_y = build_search_target_point(current_task_config_id())
-    current_task = state.current_task
-    if (
-        search_task_context
-        and IS_FINAL_ROUND
-    ):
-        if uses_nearest_final_round_selection():
-            selected = choose_best_candidate(selection_candidates, target_x, target_y)
-        else:
-            selected = choose_search_candidate(selection_candidates)
+    if search_task_context and IS_FINAL_ROUND:
+        selected = choose_final_round_candidate(selection_candidates, target_x, target_y)
         if selected is None:
             return build_observation(0, 0, 0, 0), None, None, candidates
     else:
@@ -1122,13 +1127,8 @@ def draw_search_preview_debug(img, candidates):
         selection_candidates = filter_final_round_candidates(selection_candidates)
     if selection_candidates:
         target_x, target_y = build_search_target_point(Task.SEARCH)
-        if (
-            IS_FINAL_ROUND
-            and uses_nearest_final_round_selection()
-        ):
-            selected = choose_best_candidate(selection_candidates, target_x, target_y)
-        elif IS_FINAL_ROUND:
-            selected = choose_search_candidate(selection_candidates)
+        if IS_FINAL_ROUND:
+            selected = choose_final_round_candidate(selection_candidates, target_x, target_y)
         else:
             selected = choose_best_candidate(selection_candidates, target_x, target_y)
         if selected is not None:
