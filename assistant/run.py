@@ -86,7 +86,7 @@ YOLO_MODEL_PATH = "/sd/yolo.tflite"
 # YOLO 输入图像复制缩放比例
 YOLO_IMAGE_COPY_SCALE = 0.75
 # YOLO 检测最小置信度阈值
-YOLO_MIN_SCORE = 0.50
+YOLO_MIN_SCORE = 0.80
 # YOLO 输出标签顺序, 需与模型保持一致
 YOLO_LABELS = ("green", "red", "blue", "brown", "white")
 # 视觉控制的参考帧率, 用于按时间尺度理解速度响应
@@ -696,6 +696,19 @@ def current_blob_task_name():
     return None
 
 
+def filter_locked_object_candidates(candidates, task_name):
+    exact_candidates = tuple(
+        candidate for candidate in candidates if candidate[0] == task_name
+    )
+    if exact_candidates or task_name not in ("brown", "white"):
+        return exact_candidates
+    # 棕熊和白熊共用搬运目标边, 精确类别缺失时允许互相兜底
+    fallback_task_name = "white" if task_name == "brown" else "brown"
+    return tuple(
+        candidate for candidate in candidates if candidate[0] == fallback_task_name
+    )
+
+
 def _object_task_thresholds(task_name):
     for task in OBJECT_TASKS:
         if task[0] == task_name:
@@ -855,7 +868,7 @@ def build_object_candidates(img, yolo_candidates):
         state.current_detection_source = "yolo"
         if task_name is None:
             return tuple(yolo_candidates)
-        return tuple(candidate for candidate in yolo_candidates if candidate[0] == task_name)
+        return filter_locked_object_candidates(yolo_candidates, task_name)
     state.current_detection_source = "blob"
     return build_object_blob_candidates(img)
 
@@ -901,7 +914,9 @@ def build_object_observation_and_candidates():
     if object_id > 0:
         selected_task_name = object_task_name_from_id(object_id)
         if selected_task_name is not None:
-            candidates = [candidate for candidate in candidates if candidate[0] == selected_task_name]
+            candidates = list(
+                filter_locked_object_candidates(candidates, selected_task_name)
+            )
     if not candidates:
         return build_object_observation(0, 0, 0, 0), None, None, candidates
     config_id = state.current_object_config_id()
@@ -1083,6 +1098,8 @@ def build_object_approach_velocity_from_error(err_x, err_y):
 def build_object_approach_velocity_from_observation(observation):
     x, y, value = observation
     if float(value) <= 0.0:
+        if int(current_task_config_id()) == int(Task.TRANSPORT):
+            return 0.0, 0.0
         return float(OBJECT_MISSING_SEARCH_VX), float(OBJECT_MISSING_SEARCH_VY)
     return build_object_approach_velocity_from_error(x, y)
 

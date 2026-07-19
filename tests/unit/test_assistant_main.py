@@ -1082,6 +1082,87 @@ def test_assistant_main_missing_target_uses_configured_search_velocity() -> None
     )
 
 
+@pytest.mark.parametrize(
+    ("object_id", "fallback_task_name"),
+    ((3, "white"), (4, "brown")),
+)
+def test_assistant_main_locked_brown_white_uses_paired_fallback(
+    object_id,
+    fallback_task_name,
+) -> None:
+    module = load_assistant_main()
+    module.state.handle_control_line(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, object_id),
+        )
+    )
+
+    class Image:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+    blob = object()
+    fallback = (fallback_task_name, 160.0, 200.0, 210.0, 400.0, blob)
+    candidates = module.build_object_candidates(Image(), (fallback,))
+    module.state.current_object_candidates = candidates
+    _, best_blob, task_name, _ = module.build_object_observation_and_candidates()
+
+    assert candidates == (fallback,)
+    assert best_blob is blob
+    assert task_name == fallback_task_name
+
+
+def test_assistant_main_locked_brown_white_prefers_exact_candidate() -> None:
+    module = load_assistant_main()
+    module.state.handle_control_line(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 3),
+        )
+    )
+
+    class Image:
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+    exact = ("brown", 190.0, 200.0, 210.0, 400.0, object())
+    fallback = ("white", 160.0, 200.0, 210.0, 400.0, object())
+
+    candidates = module.build_object_candidates(Image(), (fallback, exact))
+
+    assert candidates == (exact,)
+
+
+def test_assistant_main_transport_alignment_missing_target_outputs_zero_velocity() -> None:
+    """辅车搬运前对正暂时丢失目标时保持静止."""
+
+    module = load_assistant_main()
+    module.state.handle_control_line(
+        legacy_tests.assistant_sync_frame(
+            12,
+            module.State.APPROACH_OBJECT,
+            module.Target.OBJECT,
+            legacy_tests.pack_task_arg(module.Task.TRANSPORT, 2),
+        )
+    )
+
+    assert module.build_search_velocity_from_observation((0.0, 0.0, 0.0)) == (
+        0.0,
+        0.0,
+    )
+
+
 def test_assistant_main_orbit_outputs_independent_xy_velocity_correction() -> None:
     """辅车绕行修正直接输出独立 vx/vy 平移修正."""
 

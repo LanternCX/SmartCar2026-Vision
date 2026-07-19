@@ -289,6 +289,33 @@ def test_master_main_search_locks_category_after_three_stable_frames() -> None:
     assert module.state.pending_event is not None
 
 
+def test_master_main_default_search_locks_category_after_two_frames() -> None:
+    module = load_role_entry_module(
+        "master",
+        "run.py",
+        "vision_master_default_selection_frames_test_module",
+    )
+    module.reset_runtime_state()
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=7,
+            arg=int(module.Task.SEARCH) | 0x200,
+        )
+    )
+    module.write_data_line = lambda _frame: None
+    red = object_candidate(module, "red", 150, 190, 170, 210)
+
+    module.state.current_object_candidates = (red,)
+    module.process_task_frame(FakeImage())
+
+    assert module.state.object_task_name is None
+
+    module.process_task_frame(FakeImage())
+
+    assert module.state.object_task_name == "red"
+
+
 def test_master_main_new_search_task_clears_previous_yolo_class_lock() -> None:
     module = load_master_main()
     module.OBJECT_DETECTION_USE_YOLO = True
@@ -340,6 +367,44 @@ def test_master_main_search_lock_reselects_before_target_found_and_hardens_after
     module.state.last_event_context_id = 7
 
     assert module.build_object_candidates(FakeImage(), (red,)) == ()
+
+
+@pytest.mark.parametrize(
+    ("locked_task_name", "fallback_task_name"),
+    (("brown", "white"), ("white", "brown")),
+)
+def test_master_main_locked_brown_white_uses_paired_fallback(
+    locked_task_name,
+    fallback_task_name,
+) -> None:
+    module = load_master_main()
+    module.state.object_task_name = locked_task_name
+    module.handle_control_frame(
+        task_sync_frame(module, context_id=9, arg=int(module.Task.TRANSPORT))
+    )
+    fallback = object_candidate(module, fallback_task_name, 150, 190, 170, 210)
+
+    candidates = module.build_object_candidates(FakeImage(), (fallback,))
+    module.state.current_object_candidates = candidates
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert candidates == (fallback,)
+    assert best_blob is fallback[4]
+    assert task_name == fallback_task_name
+
+
+def test_master_main_locked_brown_white_prefers_exact_candidate() -> None:
+    module = load_master_main()
+    module.state.object_task_name = "brown"
+    module.handle_control_frame(
+        task_sync_frame(module, context_id=9, arg=int(module.Task.TRANSPORT))
+    )
+    exact = object_candidate(module, "brown", 180, 190, 200, 210)
+    fallback = object_candidate(module, "white", 150, 190, 170, 210)
+
+    candidates = module.build_object_candidates(FakeImage(), (fallback, exact))
+
+    assert candidates == (exact,)
 
 
 @pytest.mark.parametrize("use_yolo", (True, False))
@@ -1373,6 +1438,16 @@ def test_master_main_missing_target_outputs_configured_search_velocity() -> None
     velocity = module.build_search_velocity_from_observation((7, 0.0, 0.0, 0.0))
 
     assert velocity == (module.MASTER_MISSING_SEARCH_VX, module.MASTER_MISSING_SEARCH_VY)
+
+
+def test_master_main_transport_alignment_missing_target_outputs_zero_velocity() -> None:
+    module = load_master_main()
+    module.handle_control_frame(task_sync_frame(module, arg=int(module.Task.TRANSPORT)))
+
+    assert module.build_search_velocity_from_observation((7, 0.0, 0.0, 0.0)) == (
+        0.0,
+        0.0,
+    )
 
 
 def test_master_main_search_velocity_deadzone_zeroes_each_axis() -> None:

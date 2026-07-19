@@ -110,7 +110,7 @@ YOLO_MODEL_PATH = "/sd/yolo.tflite"
 # YOLO 输入图像复制缩放比例
 YOLO_IMAGE_COPY_SCALE = 0.75
 # YOLO 检测最小置信度阈值
-YOLO_MIN_SCORE = 0.50
+YOLO_MIN_SCORE = 0.80
 # YOLO 输出标签顺序, 需与模型保持一致
 YOLO_LABELS = ("green", "red", "blue", "brown", "white")
 # 视觉控制的参考帧率, 用于按时间尺度理解速度响应
@@ -139,7 +139,7 @@ OBJECT_Y_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_Y_PX
 # 判定目标稳定所需连续帧数
 OBJECT_STABLE_FRAMES = 2
 # 搜索阶段锁定类别所需连续帧数
-OBJECT_SELECTION_STABLE_FRAMES = 1
+OBJECT_SELECTION_STABLE_FRAMES = 2
 # 搜索阶段锁定类别连续丢失后重新选择所需帧数
 OBJECT_LOCK_MISS_FRAMES = 5
 
@@ -640,6 +640,19 @@ def current_blob_task_name():
     return None
 
 
+def filter_locked_object_candidates(candidates, task_name):
+    exact_candidates = tuple(
+        candidate for candidate in candidates if candidate[0] == task_name
+    )
+    if exact_candidates or task_name not in ("brown", "white"):
+        return exact_candidates
+    # 棕熊和白熊共用搬运目标边, 精确类别缺失时允许互相兜底
+    fallback_task_name = "white" if task_name == "brown" else "brown"
+    return tuple(
+        candidate for candidate in candidates if candidate[0] == fallback_task_name
+    )
+
+
 def is_unconfirmed_search_task():
     current_task = state.current_task
     if current_task is None:
@@ -798,10 +811,13 @@ def build_object_candidates(img, yolo_candidates):
             if locked_task_name is None:
                 state.object_lock_miss_count = 0
                 return tuple(yolo_candidates)
-            for candidate in yolo_candidates:
-                if candidate[0] == locked_task_name:
-                    state.object_lock_miss_count = 0
-                    return tuple(yolo_candidates)
+            locked_candidates = filter_locked_object_candidates(
+                yolo_candidates,
+                locked_task_name,
+            )
+            if locked_candidates:
+                state.object_lock_miss_count = 0
+                return locked_candidates
             state.object_lock_miss_count += 1
             if state.object_lock_miss_count < int(OBJECT_LOCK_MISS_FRAMES):
                 return ()
@@ -813,7 +829,7 @@ def build_object_candidates(img, yolo_candidates):
         task_name = current_blob_task_name()
         if task_name is None:
             return tuple(yolo_candidates)
-        return tuple(candidate for candidate in yolo_candidates if candidate[0] == task_name)
+        return filter_locked_object_candidates(yolo_candidates, task_name)
     if current_task is not None and int(current_task["target"]) != int(Target.OBJECT):
         state.current_detection_source = "miss"
         return ()
@@ -1228,6 +1244,8 @@ def _build_search_y_velocity(err_y):
 def build_search_velocity_from_observation(observation):
     _, x, y, value = observation
     if float(value) <= 0.0:
+        if int(current_task_config_id()) == int(Task.TRANSPORT):
+            return 0.0, 0.0
         return float(MASTER_MISSING_SEARCH_VX), float(MASTER_MISSING_SEARCH_VY)
     return (
         _axis_p_velocity(
