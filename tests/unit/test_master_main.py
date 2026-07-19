@@ -315,7 +315,6 @@ def test_master_main_search_lock_reselects_before_target_found_and_hardens_after
     module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
     module.OBJECT_STABLE_FRAMES = 99
     module.OBJECT_SELECTION_STABLE_FRAMES = 3
-    assert module.OBJECT_LOCK_MISS_FRAMES == 3
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     module.write_data_line = lambda _frame: None
     red = object_candidate(module, "red", 150, 20, 170, 40)
@@ -324,15 +323,16 @@ def test_master_main_search_lock_reselects_before_target_found_and_hardens_after
     for _ in range(module.OBJECT_SELECTION_STABLE_FRAMES):
         module.state.current_object_candidates = (red,)
         module.process_task_frame(FakeImage())
-    first_miss = module.build_object_candidates(FakeImage(), (brown,))
-    second_miss = module.build_object_candidates(FakeImage(), (brown,))
-    candidates = module.build_object_candidates(FakeImage(), (brown,))
+    miss_results = [
+        module.build_object_candidates(FakeImage(), (brown,))
+        for _ in range(module.OBJECT_LOCK_MISS_FRAMES)
+    ]
+    candidates = miss_results[-1]
     for _ in range(module.OBJECT_SELECTION_STABLE_FRAMES):
         module.state.current_object_candidates = candidates
         module.process_task_frame(FakeImage())
 
-    assert first_miss == ()
-    assert second_miss == ()
+    assert all(result == () for result in miss_results[:-1])
     assert tuple(candidate[0] for candidate in candidates) == ("brown",)
     assert module.state.object_task_name == "brown"
     assert module.state.stable_frame_count == 0
