@@ -3,10 +3,16 @@
 import seekfree, pyb
 import sensor, image, time, tf, gc
 
+# 图像曝光时间, 单位为 us
+EXP_TIME_US = 1000
+
 sensor.reset()                      # Reset and initialize the sensor.
 sensor.set_pixformat(sensor.RGB565) # Set pixel format to RGB565 (or GRAYSCALE)
 sensor.set_framesize(sensor.QVGA)   # Set frame size to QVGA (320x240)
 sensor.skip_frames(time = 2000)     # Wait for settings take effect.
+sensor.set_auto_gain(False)  # pyright: ignore[reportCallIssue]
+sensor.set_auto_whitebal(False)
+sensor.set_auto_exposure(False, exposure_us=EXP_TIME_US)
 clock = time.clock()                # Create a clock object to track the FPS.
 
 #设置模型路径
@@ -16,7 +22,12 @@ net = tf.load(face_detect)
 
 while(True):
     clock.tick()
-    img = sensor.snapshot()
+    img = sensor.snapshot().replace(
+        vflip=True,
+        hmirror=True,
+        transpose=False
+    )
+
     img.lens_corr(strength=2.8, zoom=1.0)
 
     img1 = img.copy(0.75, 1)
@@ -24,11 +35,11 @@ while(True):
     for obj in tf.detect(net,img1):
         x1,y1,x2,y2,label,scores = obj
 
-        if(scores>0.90):
+        if(scores>0.50):
             print(obj)
             w = x2- x1
             h = y2 - y1
-            x1 = int((x1)*img.width())
+            x1 = int(x1*img.width())
             y1 = int(y1*img.height())
             w = int(w*img.width())
             h = int(h*img.height())
@@ -49,4 +60,3 @@ while(True):
                 img.draw_string(x1, y1-15, "white", color = (255, 255, 255), scale = 2, mono_space = False)
                 img.draw_rectangle((x1,y1,w,h),color=(255, 255, 255),thickness=2)
     print(clock.fps())
-    img.flush()
