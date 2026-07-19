@@ -53,9 +53,10 @@
 - 主车绕行修正阶段输出独立 `vx/vy` 平移修正, 底盘侧负责绕行动作解算。
 - 速度短帧独立于 task 上下文, 每帧直接根据当前识别开关选择的结果输出。
 - 在 task 条件满足时输出主车视觉事件回报帧, body 字段为 `context_id/event/value`。
-- `arg=1` 表示主车物体搜索 task 配置, 稳定满足条件后回报 `TARGET_FOUND=6`。
-- `arg=2` 表示主车搬运入口对正 task 配置, 稳定满足条件后回报 `ALIGNED=7`。
-- 主车搜索目标点按 task 配置编号切换：`arg=1` 使用寻找阶段目标点，默认 `x=160, y=210`；`arg=2` 使用搬运入口对正目标点，默认 `x=160, y=240`。
+- `arg` 低字节为主车视觉 task 配置编号, `0x0100` 标记最后一次搬运, `0x0200` 标记第一次搬运。
+- 配置编号 `1` 表示主车物体搜索 task, 稳定满足条件后回报 `TARGET_FOUND=6`。
+- 配置编号 `2` 表示主车搬运入口对正 task, 稳定满足条件后回报 `ALIGNED=7`。
+- 主车搜索目标点按 task 配置编号切换：配置编号 `1` 使用寻找阶段目标点，默认 `x=160, y=210`；配置编号 `2` 使用搬运入口对正目标点，默认 `x=160, y=240`。
 - task 判定使用物体中心相对目标点的横向误差。
 - task 判定使用物体底边相对目标点的纵向误差。
 - task 判定使用候选目标面积。
@@ -146,6 +147,15 @@ TARGET_DIR=/path/to/device ./master/build.sh
 - `assistant/run.py` 中的 `OBJECT_DETECTION_USE_YOLO`
 
 设为 `False` 时使用当前色块阈值识别，设为 `True` 时使用 `yolo.tflite` 模型识别。
+
+主车决赛红色目标策略由 `master/run.py` 中的 `RED_SELECTION_MODE` 选择：
+
+- `_RedSelectionMode.ALL`：每次搜索都允许红色参与当前决赛边缘选择。
+- `_RedSelectionMode.LAST`：非最后一次排除红色, 最后一次允许所有颜色参与初赛最近目标选择。
+- `_RedSelectionMode.NEVER`：每次搜索都排除红色并使用当前决赛边缘选择。
+- `_RedSelectionMode.FIRST`：第一次只保留红色并使用初赛最近目标选择, 后续排除红色并使用当前决赛边缘选择。
+
+默认使用 `_RedSelectionMode.FIRST`。第一次和最后一次由 RT1021 根据已完成数量和配置总数标记, 识别侧不写死搬运次数。
 
 ## ChromaForge 色彩标定接入
 

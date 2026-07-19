@@ -128,7 +128,7 @@ OBJECT_X_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_X_PX
 # 目标纵向对正容差, 单位为 px
 OBJECT_Y_TOLERANCE_PX = OBJECT_APPROACH_DEADZONE_Y_PX
 # 判定目标稳定所需连续帧数
-OBJECT_STABLE_FRAMES = 1
+OBJECT_STABLE_FRAMES = 2
 
 # 接近目标阶段横向速度上限
 OBJECT_APPROACH_MAX_VX = 5.0
@@ -182,7 +182,7 @@ OBJECT_BLOB_PIXELS_THRESHOLD = 200
 # 色块最小面积阈值
 OBJECT_BLOB_AREA_THRESHOLD = 200
 # 跟随任务的颜色阈值配置
-FOLLOW_TASKS = (("marker", (50, 100, 41, 127, -60, 127)),)
+FOLLOW_TASKS = (("marker", (30, 100, 70, 127, -128, 0)),)
 # 目标相关任务的筛选参数配置
 OBJECT_TASKS = (
     ('red', ((16, 39, 21, 60, 0, 49),), 3, 10, 15, 60, True),

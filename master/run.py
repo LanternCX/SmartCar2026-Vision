@@ -8,13 +8,26 @@ import sys
 import tf
 import time
 from machine import UART
+from micropython import const
 from pyb import LED
 import gc
 
 # 是否启用主车上电识别预览, 开启时绕过通信
 MASTER_DEBUG_DISPLAY_ENABLED = False
 # 是否使用决赛目标选择模式, False 使用初赛模式
-IS_FINAL_ROUND = False
+IS_FINAL_ROUND = True
+
+
+# 决赛红色目标策略编号分组
+class _RedSelectionMode:
+    ALL = const(0)
+    LAST = const(1)
+    NEVER = const(2)
+    FIRST = const(3)
+
+
+# 决赛红色目标策略, 默认第一次只识别红色, 后续排除红色
+RED_SELECTION_MODE = const(_RedSelectionMode.FIRST)
 
 # 板载串口编号, 用于和主控通信
 UART_ID = 12
@@ -114,7 +127,7 @@ OBJECT_X_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_X_PX
 # 目标纵向对齐容差, 单位为 px
 OBJECT_Y_TOLERANCE_PX = MASTER_SEARCH_DEADZONE_Y_PX
 # 判定目标稳定所需连续帧数
-OBJECT_STABLE_FRAMES = 1
+OBJECT_STABLE_FRAMES = 2
 # 搜索阶段锁定类别所需连续帧数
 OBJECT_SELECTION_STABLE_FRAMES = 3
 # 搜索阶段锁定类别连续丢失后重新选择所需帧数
@@ -160,6 +173,12 @@ PROTOCOL_IMAGE_HEIGHT = 240
 SEQ_RING_SIZE = 256
 # 半环阈值, 用于比较环形序号前后关系
 SEQ_HALF_RING = 128
+# 主车视觉 task 参数低字节保存配置编号
+_TASK_CONFIG_ID_MASK = const(0xFF)
+# 主车视觉搜索 task 的最后一次搬运标记位
+_TASK_FINAL_OBJECT_FLAG = const(0x100)
+# 主车视觉搜索 task 的第一次搬运标记位
+_TASK_FIRST_OBJECT_FLAG = const(0x200)
 
 # 目标相关任务的筛选参数配置
 OBJECT_TASKS = (
@@ -199,7 +218,7 @@ class RuntimeState:
         self.current_object_candidates = ()
         self.object_task_name = None
         self.object_selection_task_name = None
-        self.last_object_edge_group = 2
+        self.last_object_edge_group = 1
         self.current_image = None
         self.current_image_width = PROTOCOL_IMAGE_WIDTH
         self.current_image_height = PROTOCOL_IMAGE_HEIGHT
@@ -591,6 +610,18 @@ def object_edge_group(task_name):
     return (object_id + 1) // 2
 
 
+def task_config_id(task_arg):
+    return int(task_arg) & _TASK_CONFIG_ID_MASK
+
+
+def task_marks_final_object(task_arg):
+    return bool(int(task_arg) & _TASK_FINAL_OBJECT_FLAG)
+
+
+def task_marks_first_object(task_arg):
+    return bool(int(task_arg) & _TASK_FIRST_OBJECT_FLAG)
+
+
 def current_blob_task_name():
     if state.object_task_name is not None:
         return state.object_task_name
@@ -601,12 +632,21 @@ def current_blob_task_name():
 
 def is_unconfirmed_search_task():
     current_task = state.current_task
+    if current_task is None:
+        return False
+    return (
+        is_search_task_context()
+        and state.last_event_context_id != int(current_task["context_id"])
+    )
+
+
+def is_search_task_context():
+    current_task = state.current_task
     return (
         current_task is not None
         and int(current_task["state"]) == int(State.SEARCH_OBJECT)
         and int(current_task["target"]) == int(Target.OBJECT)
-        and int(current_task["arg"]) == int(Task.SEARCH)
-        and state.last_event_context_id != int(current_task["context_id"])
+        and task_config_id(current_task["arg"]) == int(Task.SEARCH)
     )
 
 
@@ -931,7 +971,17 @@ def current_task_config_id():
     current_task = state.current_task
     if current_task is None:
         return Task.SEARCH
-    return int(current_task["arg"])
+    return task_config_id(current_task["arg"])
+
+
+def current_task_marks_final_object():
+    current_task = state.current_task
+    return current_task is not None and task_marks_final_object(current_task["arg"])
+
+
+def current_task_marks_first_object():
+    current_task = state.current_task
+    return current_task is not None and task_marks_first_object(current_task["arg"])
 
 
 def is_orbit_task_context():
@@ -940,7 +990,31 @@ def is_orbit_task_context():
         current_task is not None
         and int(current_task["state"]) == int(State.ORBITING)
         and int(current_task["target"]) == int(Target.OBJECT)
-        and int(current_task["arg"]) == int(Task.ORBIT)
+        and task_config_id(current_task["arg"]) == int(Task.ORBIT)
+    )
+
+
+def filter_final_round_candidates(candidates):
+    mode = int(RED_SELECTION_MODE)
+    if mode == int(_RedSelectionMode.ALL):
+        return tuple(candidates)
+    if mode == int(_RedSelectionMode.FIRST):
+        if current_task_marks_first_object():
+            return tuple(candidate for candidate in candidates if candidate[0] == "red")
+        return tuple(candidate for candidate in candidates if candidate[0] != "red")
+    if mode == int(_RedSelectionMode.LAST) and current_task_marks_final_object():
+        return tuple(candidates)
+    return tuple(candidate for candidate in candidates if candidate[0] != "red")
+
+
+def uses_nearest_final_round_selection():
+    mode = int(RED_SELECTION_MODE)
+    return (
+        mode == int(_RedSelectionMode.LAST)
+        and current_task_marks_final_object()
+    ) or (
+        mode == int(_RedSelectionMode.FIRST)
+        and current_task_marks_first_object()
     )
 
 
@@ -966,10 +1040,15 @@ def build_observation_and_candidates():
         return build_observation(0, 0, 0, 0), None, None, current_object_candidates
     candidates = current_object_candidates
     selection_candidates = candidates
+    search_task_context = is_search_task_context()
+    if IS_FINAL_ROUND and search_task_context:
+        selection_candidates = filter_final_round_candidates(selection_candidates)
+        if not selection_candidates:
+            return build_observation(0, 0, 0, 0), None, None, candidates
     if is_unconfirmed_search_task() and state.object_task_name is not None:
         locked_candidates = tuple(
             candidate
-            for candidate in list(candidates)
+            for candidate in selection_candidates
             if candidate[0] == state.object_task_name
         )
         if locked_candidates:
@@ -977,13 +1056,13 @@ def build_observation_and_candidates():
     target_x, target_y = build_search_target_point(current_task_config_id())
     current_task = state.current_task
     if (
-        current_task is not None
-        and int(current_task["state"]) == int(State.SEARCH_OBJECT)
-        and int(current_task["target"]) == int(Target.OBJECT)
-        and int(current_task["arg"]) == int(Task.SEARCH)
+        search_task_context
         and IS_FINAL_ROUND
     ):
-        selected = choose_search_candidate(selection_candidates)
+        if uses_nearest_final_round_selection():
+            selected = choose_best_candidate(selection_candidates, target_x, target_y)
+        else:
+            selected = choose_search_candidate(selection_candidates)
         if selected is None:
             return build_observation(0, 0, 0, 0), None, None, candidates
     else:
@@ -1038,12 +1117,20 @@ def debug_log(tag, text):
 
 def draw_search_preview_debug(img, candidates):
     draw_object_candidates_debug(img, candidates)
-    if candidates:
+    selection_candidates = candidates
+    if IS_FINAL_ROUND:
+        selection_candidates = filter_final_round_candidates(selection_candidates)
+    if selection_candidates:
         target_x, target_y = build_search_target_point(Task.SEARCH)
-        if IS_FINAL_ROUND:
-            selected = choose_search_candidate(candidates)
+        if (
+            IS_FINAL_ROUND
+            and uses_nearest_final_round_selection()
+        ):
+            selected = choose_best_candidate(selection_candidates, target_x, target_y)
+        elif IS_FINAL_ROUND:
+            selected = choose_search_candidate(selection_candidates)
         else:
-            selected = choose_best_candidate(candidates, target_x, target_y)
+            selected = choose_best_candidate(selection_candidates, target_x, target_y)
         if selected is not None:
             task_name, _, _, _, best_blob = selected
             draw_selected_candidate_debug(img, task_name, best_blob)
@@ -1170,7 +1257,7 @@ def build_task_event_value(img, best_blob, task_name=None):
         current_task is not None
         and int(current_task["state"]) == int(State.SEARCH_OBJECT)
         and int(current_task["target"]) == int(Target.OBJECT)
-        and int(current_task["arg"]) == int(Task.SEARCH)
+        and current_task_config_id() == int(Task.SEARCH)
         and task_name is not None
     ):
         return object_task_id(task_name)
@@ -1183,7 +1270,7 @@ def current_event_type():
         return None
     task_state = int(current_task["state"])
     target = int(current_task["target"])
-    arg = int(current_task["arg"])
+    arg = task_config_id(current_task["arg"])
     if task_state == State.SEARCH_OBJECT and target == Target.OBJECT and arg == Task.SEARCH:
         return Event.TARGET_FOUND
     if task_state == State.SEARCH_OBJECT and target == Target.OBJECT and arg == Task.TRANSPORT:
@@ -1201,7 +1288,7 @@ def resolve_event_value(observation_value, event_value):
         current_task is not None
         and int(current_task["state"]) == int(State.SEARCH_OBJECT)
         and int(current_task["target"]) == int(Target.OBJECT)
-        and int(current_task["arg"]) == int(Task.SEARCH)
+        and current_task_config_id() == int(Task.SEARCH)
         and event_value is not None
     ):
         return int(event_value)
@@ -1313,7 +1400,7 @@ def handle_control_frame(frame_bytes):
             }
             state.last_task_context_id = context_id
             state.stable_frame_count = 0
-            if int(packet["arg"]) == int(Task.SEARCH):
+            if task_config_id(packet["arg"]) == int(Task.SEARCH):
                 state.object_lock_miss_count = 0
                 state.object_selection_task_name = None
                 state.object_selection_stable_count = 0
