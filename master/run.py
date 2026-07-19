@@ -922,12 +922,21 @@ def choose_search_candidate(candidates):
         (
             candidate
             for candidate in candidates
+            if not is_candidate_occluded(candidate, candidates)
+        ),
+        key=lambda item: float(item[1]),
+    )
+    if len(outer_candidates) > 2:
+        outer_candidates = (outer_candidates[0], outer_candidates[-1])
+    outer_candidates = sorted(
+        (
+            candidate
+            for candidate in outer_candidates
             if candidate_matches_target_side(candidate)
-            and not is_candidate_occluded(candidate, candidates)
         ),
         key=lambda item: abs(float(item[1]) - image_center_x),
         reverse=True,
-    )[:2]
+    )
     if not outer_candidates:
         return None
     for candidate in outer_candidates:

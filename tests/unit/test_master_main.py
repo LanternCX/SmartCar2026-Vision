@@ -1221,16 +1221,29 @@ def test_master_main_final_mode_selects_single_tennis_on_any_side() -> None:
     assert task_name == "green"
 
 
-def test_master_main_search_ignores_candidate_occluded_on_lower_center_line() -> None:
+def test_master_main_edge_selection_keeps_physical_outer_candidates_before_side_filter() -> None:
+    """三目标整体偏向一侧时仍应从真实左右两端选择."""
     module = load_master_main()
-    module.IS_FINAL_ROUND = True
-    module.state.object_task_name = "red"
-    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.state.last_object_edge_group = module.object_edge_group("red")
+    white = object_candidate(module, "white", 105, 20, 135, 60)
+    brown = object_candidate(module, "brown", 215, 20, 245, 60)
+    tennis = object_candidate(module, "green", 275, 20, 305, 60)
+
+    task_name, _, _, _, best_blob = module.choose_search_candidate(
+        (white, brown, tennis)
+    )
+
+    assert best_blob is white[4]
+    assert task_name == "white"
+
+
+def test_master_main_edge_selection_ignores_candidate_occluded_on_lower_center_line() -> None:
+    module = load_master_main()
+    module.state.last_object_edge_group = module.object_edge_group("red")
     red = object_candidate(module, "red", 100, 120, 120, 200)
     brown = object_candidate(module, "brown", 80, 170, 115, 220)
-    module.state.current_object_candidates = (red, brown)
 
-    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+    task_name, _, _, _, best_blob = module.choose_search_candidate((red, brown))
 
     assert best_blob is brown[4]
     assert task_name == "brown"
