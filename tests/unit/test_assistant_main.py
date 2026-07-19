@@ -339,7 +339,7 @@ def test_assistant_main_object_candidates_use_yolo_when_enabled() -> None:
 
         def detect(self, net, img):
             self.detect_calls.append((net, img))
-            return [(0.25, 0.7916666667, 0.75, 0.875, 1, 0.95)]
+            return [(0.46875, 0.7916666667, 0.53125, 0.875, 1, 0.95)]
 
     class FakeImage:
         def __init__(self):
@@ -376,7 +376,7 @@ def test_assistant_main_object_candidates_use_yolo_when_enabled() -> None:
     assert candidates[0][0] == "red"
     assert candidates[0][1] == pytest.approx(160.0)
     assert candidates[0][3] == pytest.approx(210.0)
-    assert candidates[0][4] == pytest.approx(3200.0)
+    assert candidates[0][4] == pytest.approx(400.0)
 
 
 def test_assistant_main_yolo_detect_filters_small_area_candidates() -> None:
@@ -405,6 +405,35 @@ def test_assistant_main_yolo_detect_filters_small_area_candidates() -> None:
     img = FakeImage()
 
     assert module.yolo_detect(img) == []
+
+
+def test_assistant_main_yolo_detect_filters_red_candidates_by_bbox_aspect_ratio() -> None:
+    module = load_assistant_main()
+
+    class FakeImage:
+        def copy(self, scale, copy_to_fb):
+            _ = (scale, copy_to_fb)
+            return "detect-image"
+
+        def width(self):
+            return legacy_tests.IMAGE_WIDTH
+
+        def height(self):
+            return legacy_tests.IMAGE_HEIGHT
+
+    module.tf.detect = lambda net, img: [
+        (100 / 320, 100 / 240, 120 / 320, 120 / 240, 1, 0.95),
+        (120 / 320, 100 / 240, 132 / 320, 120 / 240, 1, 0.95),
+        (140 / 320, 100 / 240, 168 / 320, 120 / 240, 1, 0.95),
+        (140 / 320, 100 / 240, 180 / 320, 120 / 240, 1, 0.95),
+    ]
+
+    candidates = module.yolo_detect(FakeImage())
+
+    assert tuple(candidate[5].rect() for candidate in candidates) == (
+        (100, 100, 20, 20),
+        (140, 100, 28, 20),
+    )
 
 
 def test_assistant_main_exposes_master_style_runtime_api() -> None:
@@ -576,7 +605,7 @@ def test_assistant_main_exposes_master_style_yolo_detect_api() -> None:
 
         def detect(self, net, img):
             self.detect_calls.append((net, img))
-            return [(0.25, 0.7916666667, 0.75, 0.875, 1, 0.95)]
+            return [(0.46875, 0.7916666667, 0.53125, 0.875, 1, 0.95)]
 
     class FakeImage:
         def __init__(self):
@@ -606,7 +635,7 @@ def test_assistant_main_exposes_master_style_yolo_detect_api() -> None:
     assert candidates[0][0] == "red"
     assert candidates[0][1] == pytest.approx(160.0)
     assert candidates[0][3] == pytest.approx(210.0)
-    assert candidates[0][4] == pytest.approx(3200.0)
+    assert candidates[0][4] == pytest.approx(400.0)
 
 
 def test_assistant_main_run_applies_lens_correction_and_uses_yolo_detect_before_processing() -> None:

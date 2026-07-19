@@ -1045,6 +1045,24 @@ def test_master_main_search_uses_yolo_candidates_for_velocity_and_target_found()
     }
 
 
+def test_master_main_search_filters_red_yolo_candidates_by_bbox_aspect_ratio() -> None:
+    module = load_master_main()
+    module.handle_control_frame(task_sync_frame(module, context_id=7, arg=0x201))
+    module.tf.detect = lambda net, img: [
+        pixel_detection(100, 100, 120, 120, label=1),
+        pixel_detection(120, 100, 132, 120, label=1),
+        pixel_detection(140, 100, 168, 120, label=1),
+        pixel_detection(140, 100, 180, 120, label=1),
+    ]
+
+    candidates = module.yolo_detect(FakeImage())
+
+    assert tuple(candidate[4].rect() for candidate in candidates) == (
+        (100, 100, 20, 20),
+        (140, 100, 28, 20),
+    )
+
+
 def test_master_main_final_object_marker_keeps_target_found_event() -> None:
     module = load_master_main()
     module.IS_FINAL_ROUND = True

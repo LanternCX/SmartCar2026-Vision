@@ -111,6 +111,8 @@ YOLO_MODEL_PATH = "/sd/yolo.tflite"
 YOLO_IMAGE_COPY_SCALE = 0.75
 # YOLO 检测最小置信度阈值
 YOLO_MIN_SCORE = 0.80
+# 红色沙包目标框最大长宽比
+RED_SANDBAG_MAX_ASPECT_RATIO = 1.5
 # YOLO 输出标签顺序, 需与模型保持一致
 YOLO_LABELS = ("green", "red", "blue", "brown", "white")
 # 视觉控制的参考帧率, 用于按时间尺度理解速度响应
@@ -744,6 +746,12 @@ def yolo_detect(img):
         bottom = float(y2) * image_height
         if right <= left or bottom <= top:
             continue
+        if task_name == "red" and is_search_task_context():
+            width = right - left
+            height = bottom - top
+            aspect_ratio = max(width, height) / min(width, height)
+            if aspect_ratio > RED_SANDBAG_MAX_ASPECT_RATIO:
+                continue
         blob = YoloDetectionBlob(left, top, right, bottom, label, score)
         if blob.area() < float(OBJECT_MIN_AREA):
             continue
