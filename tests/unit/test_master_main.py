@@ -198,6 +198,7 @@ def test_master_main_yolo_mode_runs_every_object_stage_without_pause(
 def test_master_main_blob_mode_runs_every_object_stage(task_state, task_arg) -> None:
     module = load_master_main()
     module.OBJECT_DETECTION_USE_YOLO = False
+    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
 
     class StopLoop(Exception):
         pass
@@ -247,6 +248,7 @@ def test_master_main_blob_mode_runs_every_object_stage(task_state, task_arg) -> 
 def test_master_main_yolo_mode_keeps_category_without_tracking_box() -> None:
     module = load_master_main()
     module.OBJECT_DETECTION_USE_YOLO = True
+    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
     module.state.current_task = {
         "context_id": 12,
         "state": module.State.SEARCH_OBJECT,
@@ -287,6 +289,33 @@ def test_master_main_search_locks_category_after_three_stable_frames() -> None:
     assert module.state.pending_event is not None
 
 
+def test_master_main_default_search_locks_category_after_two_frames() -> None:
+    module = load_role_entry_module(
+        "master",
+        "run.py",
+        "vision_master_default_selection_frames_test_module",
+    )
+    module.reset_runtime_state()
+    module.handle_control_frame(
+        task_sync_frame(
+            module,
+            context_id=7,
+            arg=int(module.Task.SEARCH) | 0x200,
+        )
+    )
+    module.write_data_line = lambda _frame: None
+    red = object_candidate(module, "red", 150, 190, 170, 210)
+
+    module.state.current_object_candidates = (red,)
+    module.process_task_frame(FakeImage())
+
+    assert module.state.object_task_name is None
+
+    module.process_task_frame(FakeImage())
+
+    assert module.state.object_task_name == "red"
+
+
 def test_master_main_new_search_task_clears_previous_yolo_class_lock() -> None:
     module = load_master_main()
     module.OBJECT_DETECTION_USE_YOLO = True
@@ -310,9 +339,9 @@ def test_master_main_new_search_task_clears_previous_yolo_class_lock() -> None:
 
 def test_master_main_search_lock_reselects_before_target_found_and_hardens_afterward() -> None:
     module = load_master_main()
+    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
     module.OBJECT_STABLE_FRAMES = 99
     module.OBJECT_SELECTION_STABLE_FRAMES = 3
-    assert module.OBJECT_LOCK_MISS_FRAMES == 3
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     module.write_data_line = lambda _frame: None
     red = object_candidate(module, "red", 150, 20, 170, 40)
@@ -321,15 +350,16 @@ def test_master_main_search_lock_reselects_before_target_found_and_hardens_after
     for _ in range(module.OBJECT_SELECTION_STABLE_FRAMES):
         module.state.current_object_candidates = (red,)
         module.process_task_frame(FakeImage())
-    first_miss = module.build_object_candidates(FakeImage(), (brown,))
-    second_miss = module.build_object_candidates(FakeImage(), (brown,))
-    candidates = module.build_object_candidates(FakeImage(), (brown,))
+    miss_results = [
+        module.build_object_candidates(FakeImage(), (brown,))
+        for _ in range(module.OBJECT_LOCK_MISS_FRAMES)
+    ]
+    candidates = miss_results[-1]
     for _ in range(module.OBJECT_SELECTION_STABLE_FRAMES):
         module.state.current_object_candidates = candidates
         module.process_task_frame(FakeImage())
 
-    assert first_miss == ()
-    assert second_miss == ()
+    assert all(result == () for result in miss_results[:-1])
     assert tuple(candidate[0] for candidate in candidates) == ("brown",)
     assert module.state.object_task_name == "brown"
     assert module.state.stable_frame_count == 0
@@ -337,6 +367,42 @@ def test_master_main_search_lock_reselects_before_target_found_and_hardens_after
     module.state.last_event_context_id = 7
 
     assert module.build_object_candidates(FakeImage(), (red,)) == ()
+
+
+def test_master_main_locked_white_rejects_brown_candidate() -> None:
+    module = load_master_main()
+    module.state.object_task_name = "white"
+    module.handle_control_frame(
+        task_sync_frame(module, context_id=9, arg=int(module.Task.TRANSPORT))
+    )
+    fallback = object_candidate(module, "brown", 150, 190, 170, 210)
+
+    assert module.build_object_candidates(FakeImage(), (fallback,)) == ()
+
+
+def test_master_main_locked_brown_rejects_white_candidate() -> None:
+    module = load_master_main()
+    module.state.object_task_name = "brown"
+    module.handle_control_frame(
+        task_sync_frame(module, context_id=9, arg=int(module.Task.TRANSPORT))
+    )
+    white = object_candidate(module, "white", 150, 190, 170, 210)
+
+    assert module.build_object_candidates(FakeImage(), (white,)) == ()
+
+
+def test_master_main_locked_brown_uses_only_exact_candidate() -> None:
+    module = load_master_main()
+    module.state.object_task_name = "brown"
+    module.handle_control_frame(
+        task_sync_frame(module, context_id=9, arg=int(module.Task.TRANSPORT))
+    )
+    exact = object_candidate(module, "brown", 180, 190, 200, 210)
+    fallback = object_candidate(module, "white", 150, 190, 170, 210)
+
+    candidates = module.build_object_candidates(FakeImage(), (fallback, exact))
+
+    assert candidates == (exact,)
 
 
 @pytest.mark.parametrize("use_yolo", (True, False))
@@ -804,6 +870,13 @@ def test_master_main_runtime_state_uses_state_object() -> None:
     assert module.Mode.UDP == 0x01
     assert module.Topic.MASTER_VISION_EVENT_REPORT == 0x12
     assert module.Task.SEARCH == 1
+    assert module.IS_FINAL_ROUND is True
+    assert (
+        module.FINAL_ROUND_SELECTION_MODE
+        == module._ObjectSelectionMode.EDGE
+    )
+    assert module.RED_SELECTION_MODE == module._RedSelectionMode.FIRST
+    assert not hasattr(module, "FINAL_RED_SELECTION_MODE")
     assert module.Event.TARGET_FOUND == 6
     assert module.Target.OBJECT == 1
     assert not hasattr(module, "MODE_UDP")
@@ -942,6 +1015,7 @@ def test_master_main_creates_target_found_once_per_context() -> None:
 
 def test_master_main_search_uses_yolo_candidates_for_velocity_and_target_found() -> None:
     module = load_master_main()
+    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
     module.tf.detect = lambda net, img: [search_aligned_detection()]
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     uart = FakeUART()
@@ -969,35 +1043,74 @@ def test_master_main_search_uses_yolo_candidates_for_velocity_and_target_found()
     }
 
 
-def test_master_main_search_prefers_previous_target_edge_among_two_outer_candidates() -> None:
+def test_master_main_search_filters_red_yolo_candidates_by_bbox_aspect_ratio() -> None:
+    module = load_master_main()
+    module.handle_control_frame(task_sync_frame(module, context_id=7, arg=0x201))
+    module.tf.detect = lambda net, img: [
+        pixel_detection(100, 100, 120, 120, label=1),
+        pixel_detection(120, 100, 132, 120, label=1),
+        pixel_detection(140, 100, 168, 120, label=1),
+        pixel_detection(140, 100, 180, 120, label=1),
+    ]
+
+    candidates = module.yolo_detect(FakeImage())
+
+    assert tuple(candidate[4].rect() for candidate in candidates) == (
+        (100, 100, 20, 20),
+        (140, 100, 28, 20),
+    )
+
+
+def test_master_main_final_object_marker_keeps_target_found_event() -> None:
     module = load_master_main()
     module.IS_FINAL_ROUND = True
-    module.state.object_task_name = "brown"
-    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.RED_SELECTION_MODE = module._RedSelectionMode.LAST
+    module.tf.detect = lambda net, img: [search_aligned_detection()]
+    module.handle_control_frame(
+        task_sync_frame(module, context_id=7, arg=0x101)
+    )
+    uart = FakeUART()
+    module.state.uart_device = uart
+    img = FakeImage(detections=[search_aligned_detection()])
+
+    run_frame(module, img)
+    run_frame(module, img)
+
+    assert latest_event(uart) == {
+        "context_id": 7,
+        "event": module.Event.TARGET_FOUND,
+        "value": 1,
+    }
+
+
+def test_master_main_edge_selection_prefers_previous_target_edge_among_two_outer_candidates() -> None:
+    module = load_master_main()
+    module.state.last_object_edge_group = module.object_edge_group("brown")
     red = object_candidate(module, "red", 10, 20, 30, 60)
     white = object_candidate(module, "white", 280, 20, 300, 60)
     blue = object_candidate(module, "blue", 80, 20, 100, 60)
-    module.state.current_object_candidates = (red, white, blue)
 
-    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+    task_name, _, _, _, best_blob = module.choose_search_candidate(
+        (red, white, blue)
+    )
 
     assert best_blob is white[4]
     assert task_name == "white"
 
 
-def test_master_main_first_search_prefers_right_target_edge() -> None:
+def test_master_main_first_search_prefers_left_group_after_red_filter() -> None:
     module = load_master_main()
     module.IS_FINAL_ROUND = True
     module.handle_control_frame(task_sync_frame(module, context_id=7))
-    brown = object_candidate(module, "brown", 10, 20, 30, 60)
-    red = object_candidate(module, "red", 280, 20, 300, 60)
-    white = object_candidate(module, "white", 80, 20, 100, 60)
-    module.state.current_object_candidates = (brown, red, white)
+    red = object_candidate(module, "red", 0, 20, 20, 60)
+    blue = object_candidate(module, "blue", 20, 20, 40, 60)
+    brown = object_candidate(module, "brown", 280, 20, 300, 60)
+    module.state.current_object_candidates = (red, blue, brown)
 
     _, best_blob, task_name, _ = module.build_observation_and_candidates()
 
-    assert best_blob is brown[4]
-    assert task_name == "brown"
+    assert best_blob is blue[4]
+    assert task_name == "blue"
 
 
 def test_master_main_preliminary_mode_uses_nearest_target_candidate() -> None:
@@ -1014,6 +1127,140 @@ def test_master_main_preliminary_mode_uses_nearest_target_candidate() -> None:
     assert task_name == "brown"
 
 
+def test_master_main_final_mode_uses_edge_selection() -> None:
+    module = load_master_main()
+    module.IS_FINAL_ROUND = True
+    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    edge = object_candidate(module, "red", 10, 180, 30, 200)
+    centered = object_candidate(module, "brown", 150, 190, 170, 230)
+    module.state.current_object_candidates = (edge, centered)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is edge[4]
+    assert task_name == "red"
+
+
+def test_master_main_final_all_mode_keeps_red_in_selection() -> None:
+    module = load_master_main()
+    module.IS_FINAL_ROUND = True
+    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.state.last_object_edge_group = 1
+    red = object_candidate(module, "red", 10, 20, 30, 60)
+    white = object_candidate(module, "white", 150, 20, 170, 60)
+    module.state.current_object_candidates = (red, white)
+
+    _, best_blob, task_name, candidates = module.build_observation_and_candidates()
+
+    assert tuple(candidate[0] for candidate in candidates) == ("red", "white")
+    assert best_blob is red[4]
+    assert task_name == "red"
+
+
+def test_master_main_final_red_last_mode_excludes_red_before_final_object() -> None:
+    module = load_master_main()
+    module.IS_FINAL_ROUND = True
+    module.RED_SELECTION_MODE = module._RedSelectionMode.LAST
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.state.last_object_edge_group = 1
+    red = object_candidate(module, "red", 10, 20, 30, 60)
+    white = object_candidate(module, "white", 150, 20, 170, 60)
+    module.state.current_object_candidates = (red, white)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is white[4]
+    assert task_name == "white"
+
+
+def test_master_main_final_red_last_mode_uses_nearest_candidate_on_final_object() -> None:
+    module = load_master_main()
+    module.IS_FINAL_ROUND = True
+    module.RED_SELECTION_MODE = module._RedSelectionMode.LAST
+    module.handle_control_frame(
+        task_sync_frame(module, context_id=7, arg=0x101)
+    )
+    red = object_candidate(module, "red", 10, 20, 30, 60)
+    brown = object_candidate(module, "brown", 150, 190, 170, 210)
+    module.state.current_object_candidates = (red, brown)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is brown[4]
+    assert task_name == "brown"
+
+
+def test_master_main_final_red_last_mode_accepts_final_object_without_red() -> None:
+    module = load_master_main()
+    module.IS_FINAL_ROUND = True
+    module.RED_SELECTION_MODE = module._RedSelectionMode.LAST
+    module.handle_control_frame(
+        task_sync_frame(module, context_id=7, arg=0x101)
+    )
+    blue = object_candidate(module, "blue", 10, 20, 30, 60)
+    brown = object_candidate(module, "brown", 150, 190, 170, 210)
+    module.state.current_object_candidates = (blue, brown)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is brown[4]
+    assert task_name == "brown"
+
+
+def test_master_main_final_no_red_mode_excludes_red_on_final_object() -> None:
+    module = load_master_main()
+    module.IS_FINAL_ROUND = True
+    module.RED_SELECTION_MODE = module._RedSelectionMode.NEVER
+    module.handle_control_frame(
+        task_sync_frame(module, context_id=7, arg=0x101)
+    )
+    module.state.last_object_edge_group = 1
+    red = object_candidate(module, "red", 10, 20, 30, 60)
+    white = object_candidate(module, "white", 150, 20, 170, 60)
+    module.state.current_object_candidates = (red, white)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is white[4]
+    assert task_name == "white"
+
+
+def test_master_main_final_red_first_mode_selects_nearest_red_on_first_object() -> None:
+    module = load_master_main()
+    module.IS_FINAL_ROUND = True
+    module.RED_SELECTION_MODE = module._RedSelectionMode.FIRST
+    module.handle_control_frame(
+        task_sync_frame(module, context_id=7, arg=0x201)
+    )
+    far_red = object_candidate(module, "red", 10, 20, 30, 60)
+    near_red = object_candidate(module, "red", 150, 190, 170, 210)
+    brown = object_candidate(module, "brown", 155, 190, 175, 210)
+    module.state.current_object_candidates = (far_red, near_red, brown)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is near_red[4]
+    assert task_name == "red"
+
+
+def test_master_main_final_red_first_mode_excludes_red_after_first_object() -> None:
+    module = load_master_main()
+    module.IS_FINAL_ROUND = True
+    module.RED_SELECTION_MODE = module._RedSelectionMode.FIRST
+    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    red = object_candidate(module, "red", 0, 20, 20, 60)
+    blue = object_candidate(module, "blue", 20, 20, 40, 60)
+    brown = object_candidate(module, "brown", 280, 20, 300, 60)
+    module.state.current_object_candidates = (red, blue, brown)
+
+    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+
+    assert best_blob is blue[4]
+    assert task_name == "blue"
+
+
 @pytest.mark.parametrize(
     ("previous_task_name", "candidate_task_name", "left_x", "right_x", "expected_side"),
     (
@@ -1023,7 +1270,7 @@ def test_master_main_preliminary_mode_uses_nearest_target_candidate() -> None:
         ("green", "red", 20, 280, "right"),
     ),
 )
-def test_master_main_final_mode_matches_candidate_side_to_target_edge(
+def test_master_main_edge_selection_matches_candidate_side_to_target_edge(
     previous_task_name,
     candidate_task_name,
     left_x,
@@ -1031,14 +1278,11 @@ def test_master_main_final_mode_matches_candidate_side_to_target_edge(
     expected_side,
 ) -> None:
     module = load_master_main()
-    module.IS_FINAL_ROUND = True
-    module.state.object_task_name = previous_task_name
-    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.state.last_object_edge_group = module.object_edge_group(previous_task_name)
     left = object_candidate(module, candidate_task_name, left_x - 10, 20, left_x + 10, 60)
     right = object_candidate(module, candidate_task_name, right_x - 10, 20, right_x + 10, 60)
-    module.state.current_object_candidates = (left, right)
 
-    _, best_blob, _, _ = module.build_observation_and_candidates()
+    _, _, _, _, best_blob = module.choose_search_candidate((left, right))
 
     expected = left if expected_side == "left" else right
     assert best_blob is expected[4]
@@ -1059,16 +1303,29 @@ def test_master_main_final_mode_selects_single_tennis_on_any_side() -> None:
     assert task_name == "green"
 
 
-def test_master_main_search_ignores_candidate_occluded_on_lower_center_line() -> None:
+def test_master_main_edge_selection_keeps_physical_outer_candidates_before_side_filter() -> None:
+    """三目标整体偏向一侧时仍应从真实左右两端选择."""
     module = load_master_main()
-    module.IS_FINAL_ROUND = True
-    module.state.object_task_name = "red"
-    module.handle_control_frame(task_sync_frame(module, context_id=7))
+    module.state.last_object_edge_group = module.object_edge_group("red")
+    white = object_candidate(module, "white", 105, 20, 135, 60)
+    brown = object_candidate(module, "brown", 215, 20, 245, 60)
+    tennis = object_candidate(module, "green", 275, 20, 305, 60)
+
+    task_name, _, _, _, best_blob = module.choose_search_candidate(
+        (white, brown, tennis)
+    )
+
+    assert best_blob is white[4]
+    assert task_name == "white"
+
+
+def test_master_main_edge_selection_ignores_candidate_occluded_on_lower_center_line() -> None:
+    module = load_master_main()
+    module.state.last_object_edge_group = module.object_edge_group("red")
     red = object_candidate(module, "red", 100, 120, 120, 200)
     brown = object_candidate(module, "brown", 80, 170, 115, 220)
-    module.state.current_object_candidates = (red, brown)
 
-    _, best_blob, task_name, _ = module.build_observation_and_candidates()
+    task_name, _, _, _, best_blob = module.choose_search_candidate((red, brown))
 
     assert best_blob is brown[4]
     assert task_name == "brown"
@@ -1170,6 +1427,7 @@ def test_master_main_blob_debug_preview_reports_detected_object() -> None:
 
 def test_master_main_build_observation_and_candidates_uses_cached_candidates_without_current_image() -> None:
     module = load_master_main()
+    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
     module.handle_control_frame(task_sync_frame(module, context_id=7))
     target_x, target_y = module.build_search_target_point(module.Task.SEARCH)
     blob = module.YoloDetectionBlob(
@@ -1196,6 +1454,16 @@ def test_master_main_missing_target_outputs_configured_search_velocity() -> None
     velocity = module.build_search_velocity_from_observation((7, 0.0, 0.0, 0.0))
 
     assert velocity == (module.MASTER_MISSING_SEARCH_VX, module.MASTER_MISSING_SEARCH_VY)
+
+
+def test_master_main_transport_alignment_missing_target_outputs_zero_velocity() -> None:
+    module = load_master_main()
+    module.handle_control_frame(task_sync_frame(module, arg=int(module.Task.TRANSPORT)))
+
+    assert module.build_search_velocity_from_observation((7, 0.0, 0.0, 0.0)) == (
+        0.0,
+        0.0,
+    )
 
 
 def test_master_main_search_velocity_deadzone_zeroes_each_axis() -> None:
@@ -1426,6 +1694,7 @@ def test_master_main_transport_alignment_keeps_candidate_selection() -> None:
     assert observation[3] == pytest.approx(400.0)
 def test_master_main_pending_event_blocks_non_return_velocity_until_ack() -> None:
     module = load_master_main()
+    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
     module.state.yolo_net = "fake-net"
     module.tf.detect = lambda net, img: [search_aligned_detection()]
     module.handle_control_frame(task_sync_frame(module, context_id=21))

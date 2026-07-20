@@ -19,7 +19,7 @@ UART_ID = 12
 # 串口波特率, 单位为 bit/s
 UART_BAUDRATE = 115200
 # 图像曝光时间, 单位为 us
-EXP_TIME_US = 500
+EXP_TIME_US = 1000
 # 可靠消息重发间隔, 单位为 ms
 RELIABLE_RESEND_INTERVAL_MS = 100
 # 启动 READY 重发间隔, 单位为 ms
@@ -86,7 +86,9 @@ YOLO_MODEL_PATH = "/sd/yolo.tflite"
 # YOLO 输入图像复制缩放比例
 YOLO_IMAGE_COPY_SCALE = 0.75
 # YOLO 检测最小置信度阈值
-YOLO_MIN_SCORE = 0.50
+YOLO_MIN_SCORE = 0.80
+# 红色沙包目标框最大长宽比
+RED_SANDBAG_MAX_ASPECT_RATIO = 1.5
 # YOLO 输出标签顺序, 需与模型保持一致
 YOLO_LABELS = ("green", "red", "blue", "brown", "white")
 # 视觉控制的参考帧率, 用于按时间尺度理解速度响应
@@ -182,7 +184,7 @@ OBJECT_BLOB_PIXELS_THRESHOLD = 200
 # 色块最小面积阈值
 OBJECT_BLOB_AREA_THRESHOLD = 200
 # 跟随任务的颜色阈值配置
-FOLLOW_TASKS = (("marker", (50, 100, 41, 127, -60, 127)),)
+FOLLOW_TASKS = (("marker", (30, 100, 70, 127, -128, 0)),)
 # 目标相关任务的筛选参数配置
 OBJECT_TASKS = (
     ('red', ((16, 39, 21, 60, 0, 49),), 3, 10, 15, 60, True),
@@ -696,6 +698,12 @@ def current_blob_task_name():
     return None
 
 
+def filter_locked_object_candidates(candidates, task_name):
+    return tuple(
+        candidate for candidate in candidates if candidate[0] == task_name
+    )
+
+
 def _object_task_thresholds(task_name):
     for task in OBJECT_TASKS:
         if task[0] == task_name:
@@ -749,6 +757,12 @@ def yolo_detect(img):
         bottom = float(y2) * image_height
         if right <= left or bottom <= top:
             continue
+        if task_name == "red" and int(current_task_config_id()) == int(Task.SEARCH):
+            width = right - left
+            height = bottom - top
+            aspect_ratio = max(width, height) / min(width, height)
+            if aspect_ratio > RED_SANDBAG_MAX_ASPECT_RATIO:
+                continue
         blob = YoloDetectionBlob(left, top, right, bottom, label, score)
         if blob.area() < float(OBJECT_MIN_AREA):
             continue
@@ -855,7 +869,7 @@ def build_object_candidates(img, yolo_candidates):
         state.current_detection_source = "yolo"
         if task_name is None:
             return tuple(yolo_candidates)
-        return tuple(candidate for candidate in yolo_candidates if candidate[0] == task_name)
+        return filter_locked_object_candidates(yolo_candidates, task_name)
     state.current_detection_source = "blob"
     return build_object_blob_candidates(img)
 
@@ -901,7 +915,9 @@ def build_object_observation_and_candidates():
     if object_id > 0:
         selected_task_name = object_task_name_from_id(object_id)
         if selected_task_name is not None:
-            candidates = [candidate for candidate in candidates if candidate[0] == selected_task_name]
+            candidates = list(
+                filter_locked_object_candidates(candidates, selected_task_name)
+            )
     if not candidates:
         return build_object_observation(0, 0, 0, 0), None, None, candidates
     config_id = state.current_object_config_id()
@@ -1083,6 +1099,8 @@ def build_object_approach_velocity_from_error(err_x, err_y):
 def build_object_approach_velocity_from_observation(observation):
     x, y, value = observation
     if float(value) <= 0.0:
+        if int(current_task_config_id()) == int(Task.TRANSPORT):
+            return 0.0, 0.0
         return float(OBJECT_MISSING_SEARCH_VX), float(OBJECT_MISSING_SEARCH_VY)
     return build_object_approach_velocity_from_error(x, y)
 
@@ -1186,7 +1204,8 @@ class RuntimeState:
                 "target": int(packet["target"]),
                 "arg": int(packet["arg"]),
             }
-            task_name = object_task_name_from_id(unpack_task_arg_object_id(packet["arg"]))
+            object_id = unpack_task_arg_object_id(packet["arg"])
+            task_name = object_task_name_from_id(object_id)
             if task_name is not None:
                 self.object_task_name = task_name
             self._last_sync_seq = reliable_seq
@@ -1622,11 +1641,10 @@ def _process_object_frame(img):
         target_x, target_y = build_object_target_point(config_id)
         _draw_debug_protocol_point(img, target_x, target_y)
     if best_blob is not None:
-        task_name, center_x, center_y, _bottom_y, _area = _candidate_values_for_blob(
+        _task_name, center_x, center_y, _bottom_y, _area = _candidate_values_for_blob(
             candidates,
             best_blob,
         )
-        state.object_task_name = task_name
         draw_selected_marker(img, best_blob, center_x, center_y)
     if state.mode == RunMode.ORBIT_OBJECT:
         vx, vy = build_orbit_correction_velocity_from_observation(observation)

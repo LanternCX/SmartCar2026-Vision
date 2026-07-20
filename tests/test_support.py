@@ -68,6 +68,11 @@ def load_role_entry_module(role: str, entry_name: str, module_name: str):
 def _install_board_runtime_stubs() -> None:
     """为主机测试补齐 OpenART 入口需要的最小模块桩."""
 
+    if "micropython" not in sys.modules:
+        micropython_module = types.ModuleType("micropython")
+        micropython_module.const = lambda value: value
+        sys.modules["micropython"] = micropython_module
+
     if "sensor" not in sys.modules:
         sensor_module = types.ModuleType("sensor")
         sensor_module.RGB565 = "RGB565"
