@@ -699,20 +699,8 @@ def current_blob_task_name():
 
 
 def filter_locked_object_candidates(candidates, task_name):
-    exact_candidates = tuple(
-        candidate for candidate in candidates if candidate[0] == task_name
-    )
-    if task_name not in ("brown", "white"):
-        return exact_candidates
-    if state.object_track_x is not None:
-        return tuple(
-            candidate for candidate in candidates if candidate[0] in ("brown", "white")
-        )
-    if exact_candidates or task_name == "brown":
-        return exact_candidates
-    # 白熊在远处可能暂时识别为棕熊, 未建立位置连续性时只允许白熊单向兜底
     return tuple(
-        candidate for candidate in candidates if candidate[0] == "brown"
+        candidate for candidate in candidates if candidate[0] == task_name
     )
 
 
@@ -894,23 +882,6 @@ def choose_best_candidate(candidates, target_x, target_y):
     )
 
 
-def choose_tracked_object_candidate(candidates):
-    track_x = state.object_track_x
-    track_y = state.object_track_y
-    if track_x is None or track_y is None:
-        return None
-    bear_candidates = tuple(
-        candidate for candidate in candidates if candidate[0] in ("brown", "white")
-    )
-    if not bear_candidates:
-        return None
-    return min(
-        bear_candidates,
-        key=lambda item: (float(item[1]) - float(track_x)) ** 2
-        + (float(item[3]) - float(track_y)) ** 2,
-    )
-
-
 def choose_largest_area_candidate(candidates):
     return max(candidates, key=lambda item: float(item[4]))
 
@@ -962,10 +933,7 @@ def build_object_observation_and_candidates():
         )
     if not candidates:
         return build_object_observation(0, 0, 0, 0), None, None, candidates
-    tracked_candidate = choose_tracked_object_candidate(candidates)
-    if tracked_candidate is not None:
-        task_name, center_x, _center_y, bottom_y, area, best_blob = tracked_candidate
-    elif use_target_window_filter:
+    if use_target_window_filter:
         task_name, center_x, _center_y, bottom_y, area, best_blob = choose_largest_area_candidate(candidates)
     else:
         task_name, center_x, _center_y, bottom_y, area, best_blob = choose_best_candidate(
@@ -1210,8 +1178,6 @@ class RuntimeState:
         self.rx_buffer = b""
         self.current_object_candidates = ()
         self.object_task_name = None
-        self.object_track_x = None
-        self.object_track_y = None
         self.current_image = None
         self.current_image_width = PROTOCOL_IMAGE_WIDTH
         self.current_image_height = PROTOCOL_IMAGE_HEIGHT
@@ -1232,7 +1198,6 @@ class RuntimeState:
     def _handle_sync_packet(self, packet):
         reliable_seq = int(packet["reliable_seq"])
         if self._should_apply_sync(reliable_seq):
-            previous_object_id = self.current_object_id()
             self.current_sync = {
                 "reliable_seq": reliable_seq,
                 "state": int(packet["state"]),
@@ -1242,12 +1207,7 @@ class RuntimeState:
             object_id = unpack_task_arg_object_id(packet["arg"])
             task_name = object_task_name_from_id(object_id)
             if task_name is not None:
-                if int(object_id) != int(previous_object_id):
-                    self.object_task_name = task_name
-                    self.object_track_x = None
-                    self.object_track_y = None
-                elif not (self.object_task_name == "white" and task_name == "brown"):
-                    self.object_task_name = task_name
+                self.object_task_name = task_name
             self._last_sync_seq = reliable_seq
             self._pending_event = None
             self._pending_event_last_sent_ms = None
@@ -1681,21 +1641,10 @@ def _process_object_frame(img):
         target_x, target_y = build_object_target_point(config_id)
         _draw_debug_protocol_point(img, target_x, target_y)
     if best_blob is not None:
-        task_name, center_x, center_y, _bottom_y, _area = _candidate_values_for_blob(
+        _task_name, center_x, center_y, _bottom_y, _area = _candidate_values_for_blob(
             candidates,
             best_blob,
         )
-        if task_name in ("brown", "white"):
-            state.object_track_x = center_x
-            state.object_track_y = _bottom_y
-            if state.object_task_name == "brown" and task_name == "white":
-                state.object_task_name = "white"
-            elif state.object_task_name != "white":
-                state.object_task_name = task_name
-        else:
-            state.object_task_name = task_name
-            state.object_track_x = None
-            state.object_track_y = None
         draw_selected_marker(img, best_blob, center_x, center_y)
     if state.mode == RunMode.ORBIT_OBJECT:
         vx, vy = build_orbit_correction_velocity_from_observation(observation)

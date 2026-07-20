@@ -369,7 +369,7 @@ def test_master_main_search_lock_reselects_before_target_found_and_hardens_after
     assert module.build_object_candidates(FakeImage(), (red,)) == ()
 
 
-def test_master_main_locked_white_uses_brown_fallback() -> None:
+def test_master_main_locked_white_rejects_brown_candidate() -> None:
     module = load_master_main()
     module.state.object_task_name = "white"
     module.handle_control_frame(
@@ -377,16 +377,10 @@ def test_master_main_locked_white_uses_brown_fallback() -> None:
     )
     fallback = object_candidate(module, "brown", 150, 190, 170, 210)
 
-    candidates = module.build_object_candidates(FakeImage(), (fallback,))
-    module.state.current_object_candidates = candidates
-    _, best_blob, task_name, _ = module.build_observation_and_candidates()
-
-    assert candidates == (fallback,)
-    assert best_blob is fallback[4]
-    assert task_name == "brown"
+    assert module.build_object_candidates(FakeImage(), (fallback,)) == ()
 
 
-def test_master_main_locked_brown_does_not_use_white_without_track() -> None:
+def test_master_main_locked_brown_rejects_white_candidate() -> None:
     module = load_master_main()
     module.state.object_task_name = "brown"
     module.handle_control_frame(
@@ -397,7 +391,7 @@ def test_master_main_locked_brown_does_not_use_white_without_track() -> None:
     assert module.build_object_candidates(FakeImage(), (white,)) == ()
 
 
-def test_master_main_locked_brown_white_prefers_exact_candidate() -> None:
+def test_master_main_locked_brown_uses_only_exact_candidate() -> None:
     module = load_master_main()
     module.state.object_task_name = "brown"
     module.handle_control_frame(
@@ -409,29 +403,6 @@ def test_master_main_locked_brown_white_prefers_exact_candidate() -> None:
     candidates = module.build_object_candidates(FakeImage(), (fallback, exact))
 
     assert candidates == (exact,)
-
-
-def test_master_main_promotes_tracked_brown_candidate_to_white() -> None:
-    module = load_master_main()
-    module.RED_SELECTION_MODE = module._RedSelectionMode.ALL
-    module.OBJECT_STABLE_FRAMES = 99
-    module.handle_control_frame(task_sync_frame(module, context_id=9))
-    module.write_data_line = lambda _frame: None
-    distant_white = object_candidate(module, "brown", 90, 90, 110, 110)
-
-    for _ in range(module.OBJECT_SELECTION_STABLE_FRAMES):
-        module.state.current_object_candidates = (distant_white,)
-        module.process_task_frame(FakeImage())
-
-    converged_white = object_candidate(module, "white", 92, 90, 112, 110)
-    real_brown = object_candidate(module, "brown", 150, 190, 170, 210)
-    module.state.current_object_candidates = module.build_object_candidates(
-        FakeImage(),
-        (real_brown, converged_white),
-    )
-    module.process_task_frame(FakeImage())
-
-    assert module.state.object_task_name == "white"
 
 
 @pytest.mark.parametrize("use_yolo", (True, False))

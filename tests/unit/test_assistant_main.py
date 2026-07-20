@@ -1111,7 +1111,7 @@ def test_assistant_main_missing_target_uses_configured_search_velocity() -> None
     )
 
 
-def test_assistant_main_locked_white_uses_brown_fallback() -> None:
+def test_assistant_main_locked_white_rejects_brown_candidate() -> None:
     module = load_assistant_main()
     module.state.handle_control_line(
         legacy_tests.assistant_sync_frame(
@@ -1131,16 +1131,10 @@ def test_assistant_main_locked_white_uses_brown_fallback() -> None:
 
     blob = object()
     fallback = ("brown", 160.0, 200.0, 210.0, 400.0, blob)
-    candidates = module.build_object_candidates(Image(), (fallback,))
-    module.state.current_object_candidates = candidates
-    _, best_blob, task_name, _ = module.build_object_observation_and_candidates()
-
-    assert candidates == (fallback,)
-    assert best_blob is blob
-    assert task_name == "brown"
+    assert module.build_object_candidates(Image(), (fallback,)) == ()
 
 
-def test_assistant_main_locked_brown_does_not_use_white_without_track() -> None:
+def test_assistant_main_locked_brown_rejects_white_candidate() -> None:
     module = load_assistant_main()
     module.state.handle_control_line(
         legacy_tests.assistant_sync_frame(
@@ -1163,7 +1157,7 @@ def test_assistant_main_locked_brown_does_not_use_white_without_track() -> None:
     assert module.build_object_candidates(Image(), (white,)) == ()
 
 
-def test_assistant_main_locked_brown_white_prefers_exact_candidate() -> None:
+def test_assistant_main_locked_brown_uses_only_exact_candidate() -> None:
     module = load_assistant_main()
     module.state.handle_control_line(
         legacy_tests.assistant_sync_frame(
@@ -1187,57 +1181,6 @@ def test_assistant_main_locked_brown_white_prefers_exact_candidate() -> None:
     candidates = module.build_object_candidates(Image(), (fallback, exact))
 
     assert candidates == (exact,)
-
-
-def test_assistant_main_promotes_tracked_brown_candidate_to_white() -> None:
-    module = load_assistant_main()
-    module.state.handle_control_line(
-        legacy_tests.assistant_sync_frame(
-            12,
-            module.State.APPROACH_OBJECT,
-            module.Target.OBJECT,
-            legacy_tests.pack_task_arg(module.Task.SEARCH, 3),
-        )
-    )
-    module.write_data_line = lambda _frame: None
-
-    class Image:
-        def width(self):
-            return legacy_tests.IMAGE_WIDTH
-
-        def height(self):
-            return legacy_tests.IMAGE_HEIGHT
-
-        def draw_rectangle(self, *_args, **_kwargs):
-            return None
-
-        def draw_cross(self, *_args, **_kwargs):
-            return None
-
-    class Blob:
-        def __init__(self, left, top):
-            self._rect = (left, top, 20, 20)
-
-        def rect(self):
-            return self._rect
-
-    image = Image()
-    distant_white = ("brown", 100.0, 100.0, 110.0, 400.0, Blob(90, 90))
-    module.state.current_object_candidates = module.build_object_candidates(
-        image,
-        (distant_white,),
-    )
-    module.process_task_frame(image)
-
-    converged_white = ("white", 102.0, 100.0, 112.0, 400.0, Blob(92, 90))
-    real_brown = ("brown", 160.0, 200.0, 210.0, 400.0, Blob(150, 190))
-    module.state.current_object_candidates = module.build_object_candidates(
-        image,
-        (real_brown, converged_white),
-    )
-    module.process_task_frame(image)
-
-    assert module.state.object_task_name == "white"
 
 
 def test_assistant_main_transport_alignment_missing_target_outputs_zero_velocity() -> None:
