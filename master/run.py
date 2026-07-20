@@ -230,6 +230,8 @@ class RuntimeState:
         self.current_object_candidates = ()
         self.object_task_name = None
         self.object_selection_task_name = None
+        self.object_track_x = None
+        self.object_track_y = None
         self.last_object_edge_group = 1
         self.current_image = None
         self.current_image_width = PROTOCOL_IMAGE_WIDTH
@@ -646,12 +648,17 @@ def filter_locked_object_candidates(candidates, task_name):
     exact_candidates = tuple(
         candidate for candidate in candidates if candidate[0] == task_name
     )
-    if exact_candidates or task_name not in ("brown", "white"):
+    if task_name not in ("brown", "white"):
         return exact_candidates
-    # 棕熊和白熊共用搬运目标边, 精确类别缺失时允许互相兜底
-    fallback_task_name = "white" if task_name == "brown" else "brown"
+    if state.object_track_x is not None:
+        return tuple(
+            candidate for candidate in candidates if candidate[0] in ("brown", "white")
+        )
+    if exact_candidates or task_name == "brown":
+        return exact_candidates
+    # 白熊在远处可能暂时识别为棕熊, 未建立位置连续性时只允许白熊单向兜底
     return tuple(
-        candidate for candidate in candidates if candidate[0] == fallback_task_name
+        candidate for candidate in candidates if candidate[0] == "brown"
     )
 
 
@@ -832,6 +839,8 @@ def build_object_candidates(img, yolo_candidates):
             state.object_task_name = None
             state.object_selection_task_name = None
             state.object_selection_stable_count = 0
+            state.object_track_x = None
+            state.object_track_y = None
             state.object_lock_miss_count = 0
             return tuple(yolo_candidates)
         task_name = current_blob_task_name()
@@ -894,6 +903,23 @@ def choose_best_candidate(candidates, target_x, target_y):
         candidates,
         key=lambda item: (float(item[1]) - float(target_x)) ** 2
         + (float(item[2]) - float(target_y)) ** 2,
+    )
+
+
+def choose_tracked_object_candidate(candidates):
+    track_x = state.object_track_x
+    track_y = state.object_track_y
+    if track_x is None or track_y is None:
+        return None
+    bear_candidates = tuple(
+        candidate for candidate in candidates if candidate[0] in ("brown", "white")
+    )
+    if not bear_candidates:
+        return None
+    return min(
+        bear_candidates,
+        key=lambda item: (float(item[1]) - float(track_x)) ** 2
+        + (float(item[2]) - float(track_y)) ** 2,
     )
 
 
@@ -981,6 +1007,13 @@ def choose_final_round_candidate(candidates, target_x, target_y):
 
 
 def update_object_selection(task_name):
+    if state.object_task_name == "white" and task_name == "brown":
+        return
+    if state.object_task_name == "brown" and task_name == "white":
+        state.object_task_name = "white"
+        state.object_selection_task_name = "white"
+        state.object_selection_stable_count = int(OBJECT_SELECTION_STABLE_FRAMES)
+        return
     if not is_unconfirmed_search_task():
         state.object_task_name = task_name
         return
@@ -1103,21 +1136,22 @@ def build_observation_and_candidates():
         selection_candidates = filter_final_round_candidates(selection_candidates)
         if not selection_candidates:
             return build_observation(0, 0, 0, 0), None, None, candidates
-    if is_unconfirmed_search_task() and state.object_task_name is not None:
-        locked_candidates = tuple(
-            candidate
-            for candidate in selection_candidates
-            if candidate[0] == state.object_task_name
+    if state.object_task_name is not None:
+        selection_candidates = filter_locked_object_candidates(
+            selection_candidates,
+            state.object_task_name,
         )
-        if locked_candidates:
-            selection_candidates = locked_candidates
-    target_x, target_y = build_search_target_point(current_task_config_id())
-    if search_task_context and IS_FINAL_ROUND:
-        selected = choose_final_round_candidate(selection_candidates, target_x, target_y)
-        if selected is None:
+        if not selection_candidates:
             return build_observation(0, 0, 0, 0), None, None, candidates
-    else:
-        selected = choose_best_candidate(selection_candidates, target_x, target_y)
+    target_x, target_y = build_search_target_point(current_task_config_id())
+    selected = choose_tracked_object_candidate(selection_candidates)
+    if selected is None:
+        if search_task_context and IS_FINAL_ROUND:
+            selected = choose_final_round_candidate(selection_candidates, target_x, target_y)
+            if selected is None:
+                return build_observation(0, 0, 0, 0), None, None, candidates
+        else:
+            selected = choose_best_candidate(selection_candidates, target_x, target_y)
     task_name, center_x, bottom_y, area, best_blob = selected
     return (
         build_observation(1, center_x, bottom_y, area),
@@ -1455,6 +1489,8 @@ def handle_control_frame(frame_bytes):
                 if state.object_task_name is not None:
                     state.last_object_edge_group = object_edge_group(state.object_task_name)
                 state.object_task_name = None
+                state.object_track_x = None
+                state.object_track_y = None
         return format_ack_frame(packet["reliable_seq"])
 
     packet = parse_event_ack_packet(frame_bytes)
@@ -1515,17 +1551,26 @@ def process_task_frame(img):
         return
     observation, best_blob, task_name, _candidates = build_observation_and_candidates()
     if best_blob is not None:
+        if task_name in ("brown", "white"):
+            target_x, target_y = build_search_target_point(current_task_config_id())
+            state.object_track_x = float(target_x) + float(observation[1])
+            state.object_track_y = float(target_y) + float(observation[2])
+        else:
+            state.object_track_x = None
+            state.object_track_y = None
         update_object_selection(task_name)
     elif state.object_task_name is None:
         state.object_selection_task_name = None
         state.object_selection_stable_count = 0
         state.stable_frame_count = 0
+        state.object_track_x = None
+        state.object_track_y = None
     if is_orbit_task_context():
         velocity = build_orbit_correction_velocity_from_observation(observation)
     else:
         velocity = build_search_velocity_from_observation(observation)
     write_data_line(format_search_velocity_frame(*velocity))
-    event_value = build_task_event_value(img, best_blob, task_name)
+    event_value = build_task_event_value(img, best_blob, state.object_task_name)
     accept_observation(
         observation,
         img,
