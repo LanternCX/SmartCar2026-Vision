@@ -27,4 +27,3 @@ env/
 .serena/
 *.log
 .DS_Store
-yolo/*.tflite
