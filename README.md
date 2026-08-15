@@ -8,6 +8,8 @@
 
 模型：[yolo/yolo.tflite](yolo/yolo.tflite)
 
+模型训练：[yolo/train/ReadME.md](yolo/train/ReadME.md)
+
 构建：
 
 ```

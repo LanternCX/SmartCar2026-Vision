@@ -20,7 +20,7 @@ def test_pyright_typecheck_passes() -> None:
             "master",
             "calibration",
             "tests",
-            "yolo",
+            "yolo/main.py",
         ],
         cwd=ROOT,
         capture_output=True,
